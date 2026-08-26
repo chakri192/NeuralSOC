@@ -1,0 +1,47 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Network Capture & Large Data Files (Strict data diode constraint)
+*.pcap
+*.pcapng
+*.cap
+*.dmp
+*.csv
+*.tsv
+*.parquet
+*.feather
+data/*.pcap
+data/*.pcapng
+data/zeek_logs/*.log
+data/zeek_logs/*.log.gz
+
+# Streamlit & IDE
+.streamlit/secrets.toml
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Redpanda / Docker volumes
+redpanda-data/
+
+# Model checkpoints & temporary caches
+*.tmp
+.pytest_cache/
+.coverage
+htmlcov/

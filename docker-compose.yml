@@ -1,0 +1,62 @@
+services:
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v23.3.11
+    container_name: redpanda-broker
+    platform: linux/arm64
+    command:
+      - redpanda
+      - start
+      - --smp 1
+      - --memory 512M
+      - --reserve-memory 0M
+      - --overprovisioned
+      - --node-id 0
+      - --kafka-addr PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr PLAINTEXT://localhost:9092
+      - --pandaproxy-addr 0.0.0.0:8082
+      - --advertise-pandaproxy-addr localhost:8082
+      - --set redpanda.enable_transactions=true
+      - --set redpanda.enable_idempotence=true
+      - --set redpanda.auto_create_topics_enabled=true
+    ports:
+      - "9092:9092"   # Kafka API
+      - "8081:8081"   # Schema Registry
+      - "8082:8082"   # HTTP Proxy
+      - "9644:9644"   # Admin API
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    networks:
+      - threat-detection-net
+
+  redpanda-init:
+    image: docker.redpanda.com/redpandadata/redpanda:v23.3.11
+    platform: linux/arm64
+    container_name: redpanda-init
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    entrypoint: /bin/bash
+    command: >
+      -c "
+        echo 'Waiting for Redpanda broker...';
+        sleep 3;
+        rpk topic create raw_traffic -p 3 -c retention.ms=3600000 --brokers redpanda-broker:9092 || true;
+        rpk topic create security_alerts -p 1 -c retention.ms=86400000 --brokers redpanda-broker:9092 || true;
+        echo 'Current Topics:';
+        rpk topic list --brokers redpanda-broker:9092;
+      "
+    networks:
+      - threat-detection-net
+
+volumes:
+  redpanda-data:
+    driver: local
+
+networks:
+  threat-detection-net:
+    driver: bridge
