@@ -60,6 +60,14 @@ except ImportError:
         ReconScanTracker,
     )
 
+try:
+    from dl_engine import DeepLearningEngine
+except ImportError:
+    try:
+        from inference.dl_engine import DeepLearningEngine
+    except ImportError:
+        DeepLearningEngine = None
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] [%(name)s] %(message)s",
@@ -77,6 +85,10 @@ class ComprehensiveThreatEngine:
         self.flow_anomaly_model = None
         self.beacon_tracker = BeaconingTracker()
         self.recon_tracker = ReconScanTracker()
+        
+        if DeepLearningEngine:
+            self.dl_engine = DeepLearningEngine()
+            
         self._load_models()
 
     def _load_models(self):
@@ -124,6 +136,13 @@ class ComprehensiveThreatEngine:
 
         # 2. DGA Domain ML Evaluation
         dga_prob = 0.0
+        cnn_prob = 0.0
+        
+        # Deep Learning Evaluation (CNN)
+        if hasattr(self, 'dl_engine'):
+            cnn_prob = self.dl_engine.evaluate_dns(query)
+            
+        # Scikit-Learn Evaluation (Random Forest)
         if self.dga_model is not None and np is not None:
             try:
                 vec = np.array([features["feature_vector"]])
@@ -135,21 +154,30 @@ class ComprehensiveThreatEngine:
             if features["entropy"] > 3.7 or (features["entropy"] > 3.3 and features["body_length"] > 14):
                 dga_prob = 0.85
 
-        if dga_prob >= 0.70 or features["entropy"] >= 3.85:
-            severity = "CRITICAL" if (dga_prob > 0.90 or features["entropy"] > 4.2) else "HIGH"
-            confidence = round(max(dga_prob, min(1.0, features["entropy"] / 4.4)), 2)
+        # Alert if either Traditional ML or Deep Learning flags it
+        if dga_prob >= 0.70 or cnn_prob >= 0.75 or features["entropy"] >= 3.85:
+            max_prob = max(dga_prob, cnn_prob)
+            severity = "CRITICAL" if (max_prob > 0.90 or features["entropy"] > 4.2) else "HIGH"
+            confidence = round(max(max_prob, min(1.0, features["entropy"] / 4.4)), 2)
+            
+            reason = "Algorithmic Domain Detected"
+            if cnn_prob >= 0.75:
+                reason = "Dictionary-Based DGA Detected (CNN AI)"
+            elif features["entropy"] >= 3.85:
+                reason = "High-Entropy Domain Query Detected"
+                
             return {
                 "threat_class": "DGA_DOMAIN",
                 "severity": severity,
                 "confidence_score": confidence,
                 "mitre_technique": "T1568.002",
                 "evidence": {
-                    "reason": "Algorithmic / High-Entropy Domain Query Detected",
+                    "reason": reason,
                     "domain": query,
                     "entropy": features["entropy"],
                     "body_length": features["body_length"],
-                    "tld": features["tld"],
-                    "dga_ml_probability": round(dga_prob, 3),
+                    "cnn_probability": round(cnn_prob, 3),
+                    "rf_probability": round(dga_prob, 3),
                     "qtype": features["qtype"],
                 },
             }
@@ -278,26 +306,43 @@ class ComprehensiveThreatEngine:
                 },
             }
 
-        # 5. ML Isolation Forest Flow Anomaly (Optimized single-pass decision function)
+        # 5. ML Flow Anomaly (Isolation Forest & Autoencoder)
+        dl_mse = 0.0
+        if hasattr(self, 'dl_engine') and self.dl_engine.ae_model:
+            dl_mse = self.dl_engine.evaluate_flow(
+                conn_feats["orig_bytes"], 
+                conn_feats["resp_bytes"], 
+                conn_feats["duration"], 
+                conn_feats["orig_pkts"] + conn_feats["resp_pkts"]
+            )
+            
         if self.flow_anomaly_model is not None and np is not None:
             try:
                 # Fast heuristic pre-filter: only run tree traversal on non-trivial flows
                 if conn_feats["orig_bytes"] > 10000 or conn_feats["byte_ratio"] > 100 or conn_feats["bytes_per_sec"] > 200000:
                     vec = np.array([conn_feats["feature_vector"]])
                     score = float(self.flow_anomaly_model.decision_function(vec)[0])
-                    if score < -0.05:
-                        conf = round(min(1.0, 0.65 + abs(score) * 2.0), 2)
+                    
+                    # Alert if Isolation Forest score is very low OR Autoencoder MSE is very high
+                    if score < -0.05 or dl_mse > 0.15:
+                        conf = round(min(1.0, max(0.65 + abs(score) * 2.0, dl_mse * 5.0)), 2)
+                        
+                        reason = f"Isolation Forest Flow Anomaly (Score: {round(score, 4)})"
+                        if dl_mse > 0.15:
+                            reason = f"Zero-Day Deep Learning Autoencoder Anomaly (MSE Loss: {round(dl_mse, 4)})"
+                            
                         return {
                             "threat_class": "FLOW_ANOMALY",
                             "severity": "HIGH" if conf > 0.85 else "MEDIUM",
                             "confidence_score": conf,
                             "mitre_technique": "T1048",
                             "evidence": {
-                                "reason": f"Isolation Forest Flow Anomaly (Outlier Score: {round(score, 4)})",
+                                "reason": reason,
                                 "orig_bytes": int(conn_feats["orig_bytes"]),
                                 "resp_bytes": int(conn_feats["resp_bytes"]),
                                 "duration_sec": conn_feats["duration"],
                                 "pkts_per_sec": conn_feats["pkts_per_sec"],
+                                "dl_reconstruction_loss": round(dl_mse, 4)
                             },
                         }
             except Exception:
