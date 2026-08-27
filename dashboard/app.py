@@ -217,7 +217,7 @@ if len(st.session_state.alerts) > 0:
     nodes_trace = go.Scatter(
         x=node_x, y=node_y, mode='markers+text',
         hoverinfo='text', text=node_text, textposition="top center",
-        marker=dict(size=14, color='#38bdf8', lineWidth=2, line_color='white')
+        marker=dict(size=14, color='#38bdf8', line=dict(width=2, color='white'))
     )
     
     fig = go.Figure(data=[edges_trace, nodes_trace],
