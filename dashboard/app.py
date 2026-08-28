@@ -2,8 +2,9 @@
 """
 app.py
 ======
-Refined Web Dashboard for Enterprise SOC Teams.
-Focuses on clear typography, robust metrics, reliable time-series, and strict professional design.
+Enterprise-Grade SOC Dashboard.
+Completely redesigned for maximum legibility, high-contrast data visualization,
+and professional SIEM aesthetics (replacing messy network graphs with clean metrics).
 """
 
 import streamlit as st
@@ -12,7 +13,6 @@ import json
 import time
 from datetime import datetime, timedelta
 from collections import deque
-import networkx as nx
 import plotly.graph_objects as go
 import plotly.express as px
 
@@ -30,61 +30,56 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# Custom CSS for a refined, modern "Datadog/Splunk" aesthetic
+# High-contrast CSS for Enterprise SIEM
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Fira+Code:wght@400;600&display=swap');
 
-    .stApp { background-color: #0B0E14; color: #94A3B8; font-family: 'Inter', sans-serif; }
-    
+    .stApp { background-color: #0d1117; color: #c9d1d9; font-family: 'Inter', sans-serif; }
     #MainMenu {visibility: hidden;} footer {visibility: hidden;} header {visibility: hidden;}
     
     /* Elegant Metric Cards */
     div[data-testid="metric-container"] {
-        background-color: #151923;
-        border: 1px solid #1E293B;
-        padding: 20px;
-        border-radius: 6px;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.4);
-        transition: all 0.2s ease-in-out;
+        background-color: #161b22;
+        border: 1px solid #30363d;
+        padding: 24px;
+        border-radius: 8px;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.3);
     }
-    div[data-testid="metric-container"]:hover { border-color: #334155; }
-    
     div[data-testid="metric-container"] label {
-        color: #64748B !important;
+        color: #8b949e !important;
         font-size: 0.85rem;
         text-transform: uppercase;
-        letter-spacing: 0.05em;
+        letter-spacing: 1px;
         font-weight: 600;
     }
     div[data-testid="metric-container"] div[data-testid="stMetricValue"] {
-        color: #F8FAFC;
-        font-size: 2.2rem;
+        color: #ffffff;
+        font-size: 2.4rem;
         font-weight: 700;
-        font-family: 'JetBrains Mono', monospace;
+        font-family: 'Fira Code', monospace;
     }
-    div[data-testid="stMetricDelta"] svg { fill: #34D399; }
     
     /* Header Bar */
     .dashboard-header {
         display: flex; justify-content: space-between; align-items: center;
-        padding: 10px 0 20px 0; border-bottom: 1px solid #1E293B; margin-bottom: 30px;
+        padding: 15px 0 25px 0; border-bottom: 1px solid #30363d; margin-bottom: 30px;
     }
-    .header-title { font-size: 1.4rem; font-weight: 700; color: #F8FAFC; }
-    .header-status { display: flex; align-items: center; gap: 8px; font-size: 0.85rem; font-weight: 600; color: #34D399; }
+    .header-title { font-size: 1.5rem; font-weight: 700; color: #ffffff; letter-spacing: 0.5px; }
+    .header-status { display: flex; align-items: center; gap: 10px; font-size: 0.9rem; font-weight: 600; color: #3fb950; }
     .pulse-dot {
-        width: 8px; height: 8px; background-color: #34D399; border-radius: 50%;
-        box-shadow: 0 0 8px #34D399; animation: pulse 2s infinite;
+        width: 10px; height: 10px; background-color: #3fb950; border-radius: 50%;
+        box-shadow: 0 0 10px #3fb950; animation: pulse 2s infinite;
     }
     @keyframes pulse {
-        0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.7); }
-        70% { transform: scale(1); box-shadow: 0 0 0 6px rgba(52, 211, 153, 0); }
-        100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(52, 211, 153, 0); }
+        0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(63, 185, 80, 0.7); }
+        70% { transform: scale(1); box-shadow: 0 0 0 8px rgba(63, 185, 80, 0); }
+        100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(63, 185, 80, 0); }
     }
     
     /* Section Titles */
     .section-title {
-        font-size: 1rem; font-weight: 600; color: #E2E8F0; margin-bottom: 15px; margin-top: 10px;
+        font-size: 1.1rem; font-weight: 600; color: #ffffff; margin-bottom: 20px; margin-top: 15px; border-left: 4px solid #58a6ff; padding-left: 10px;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -114,9 +109,6 @@ if "consumer" not in st.session_state:
     except Exception:
         st.session_state.consumer = None
 
-# ==========================================
-# Data Polling
-# ==========================================
 def poll_kafka():
     if not st.session_state.consumer:
         return
@@ -135,7 +127,6 @@ def poll_kafka():
 
 poll_kafka()
 
-# Calculate dynamic deltas
 delta_total = st.session_state.stats['total'] - st.session_state.last_total
 st.session_state.last_total = st.session_state.stats['total']
 
@@ -145,8 +136,8 @@ st.session_state.last_total = st.session_state.stats['total']
 
 st.markdown("""
 <div class="dashboard-header">
-    <div class="header-title">Unified Threat Intelligence Platform</div>
-    <div class="header-status"><div class="pulse-dot"></div> TELEMETRY ONLINE</div>
+    <div class="header-title">Enterprise Threat Intelligence</div>
+    <div class="header-status"><div class="pulse-dot"></div> SECURE PIPELINE ACTIVE</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -165,9 +156,8 @@ with m4:
 
 
 if not st.session_state.alerts:
-    st.info("System operational. Listening for network metadata on Kafka broker...")
+    st.info("System operational. Awaiting network telemetry...")
 else:
-    # Build DataFrame
     df = pd.DataFrame(st.session_state.alerts)
     if 'timestamp' in df.columns:
         df['Time'] = pd.to_datetime(df['timestamp'], unit='s', errors='coerce').dt.strftime('%H:%M:%S')
@@ -180,113 +170,102 @@ else:
     df['Target'] = df.get('dst_ip', '').astype(str) + ":" + df.get('dst_port', '').astype(str)
     df['Confidence'] = df.get('confidence_score', 0.0) * 100
 
-    # 2. Main Row (Alert Feed Table + Threat Distribution Donut)
-    row1_col1, row1_col2 = st.columns([7, 3])
+    # Professional Color Palette
+    CHART_COLORS = ['#ff7b72', '#ffa657', '#3fb950', '#a5d6ff', '#d2a8ff', '#79c0ff']
+
+    # 2. Top Row: Threat Distribution & Target Origins
+    row1_col1, row1_col2 = st.columns([1, 1])
     
     with row1_col1:
-        st.markdown('<div class="section-title">Live Alert Feed</div>', unsafe_allow_html=True)
-        display_df = df[['Time', 'Severity', 'Signature', 'Source', 'Target', 'Confidence']].head(30)
+        st.markdown('<div class="section-title">Active Threat Signatures</div>', unsafe_allow_html=True)
+        sig_counts = df['Signature'].value_counts().reset_index()
+        sig_counts.columns = ['Signature', 'Count']
         
-        st.dataframe(
-            display_df,
-            use_container_width=True,
-            hide_index=True,
-            height=320,
-            column_config={
-                "Severity": st.column_config.TextColumn("Sev"),
-                "Confidence": st.column_config.ProgressColumn("Conf", format="%.0f%%", min_value=0, max_value=100),
-            }
+        # High-contrast, highly legible Donut Chart
+        fig_donut = go.Figure(data=[go.Pie(
+            labels=sig_counts['Signature'], 
+            values=sig_counts['Count'], 
+            hole=0.6,
+            marker=dict(colors=CHART_COLORS, line=dict(color='#0d1117', width=2)),
+            textposition='outside',
+            textinfo='label+percent',
+            textfont=dict(color='#c9d1d9', size=12, family="Inter")
+        )])
+        fig_donut.update_layout(
+            showlegend=False,
+            margin=dict(l=20, r=20, t=20, b=20),
+            plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
+            height=300
         )
+        st.plotly_chart(fig_donut, use_container_width=True, config={'displayModeBar': False})
 
     with row1_col2:
-        st.markdown('<div class="section-title">Threat Signatures</div>', unsafe_allow_html=True)
-        if len(df) > 0:
-            sig_counts = df['Signature'].value_counts().reset_index()
-            sig_counts.columns = ['Signature', 'Count']
-            
-            fig_donut = px.pie(
-                sig_counts, values='Count', names='Signature', hole=0.7,
-                color_discrete_sequence=px.colors.sequential.Tealgrn
-            )
-            fig_donut.update_layout(
-                showlegend=False,
-                margin=dict(l=0, r=0, t=10, b=10),
-                plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
-                annotations=[dict(text=f"{len(sig_counts)}<br>Classes", x=0.5, y=0.5, font_size=14, font_color="#94A3B8", showarrow=False)],
-                height=320
-            )
-            fig_donut.update_traces(textposition='inside', textinfo='percent+label', marker=dict(line=dict(color='#0B0E14', width=2)))
-            st.plotly_chart(fig_donut, use_container_width=True, config={'displayModeBar': False})
-
-    # 3. Bottom Row (Velocity Graph + Network Topology)
-    row2_col1, row2_col2 = st.columns([6, 4])
-    
-    with row2_col1:
-        st.markdown('<div class="section-title">Detection Velocity (Events per Second)</div>', unsafe_allow_html=True)
-        if 'timestamp' in df.columns:
-            velocity_df = df.copy()
-            velocity_df['Sec'] = pd.to_datetime(velocity_df['timestamp'], unit='s', errors='coerce').dt.floor('S')
-            v_counts = velocity_df.groupby('Sec').size().reset_index(name='Count')
-            
-            fig_line = px.bar(
-                v_counts.tail(60), x='Sec', y='Count',
-                color_discrete_sequence=['#3B82F6']
-            )
-            fig_line.update_layout(
-                margin=dict(l=0, r=0, t=10, b=0),
-                plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
-                xaxis=dict(showgrid=False, title="", visible=False),
-                yaxis=dict(showgrid=True, gridcolor='#1E293B', title="", side="right"),
-                height=250, bargap=0.2
-            )
-            st.plotly_chart(fig_line, use_container_width=True, config={'displayModeBar': False})
-
-    with row2_col2:
-        st.markdown('<div class="section-title">Compromise Topology</div>', unsafe_allow_html=True)
-        G = nx.DiGraph()
+        st.markdown('<div class="section-title">Top Attacker Origins (Source IPs)</div>', unsafe_allow_html=True)
+        # Replaced the messy network graph with a professional Top Talkers Bar Chart
+        top_ips = df['src_ip'].value_counts().head(5).reset_index()
+        top_ips.columns = ['Source IP', 'Alert Count']
+        top_ips = top_ips.sort_values('Alert Count', ascending=True) # For horizontal bar chart
         
-        # Build strict topological map of the last 30 alerts
-        for _, row in df.head(30).iterrows():
-            src = row.get('src_ip')
-            dst = row.get('dst_ip')
-            if pd.notna(src) and pd.notna(dst):
-                G.add_edge(src, dst)
-                
-        if len(G.nodes) > 0:
-            pos = nx.spring_layout(G, seed=42)
-            edge_x, edge_y = [], []
-            for edge in G.edges():
-                x0, y0 = pos[edge[0]]
-                x1, y1 = pos[edge[1]]
-                edge_x.extend([x0, x1, None])
-                edge_y.extend([y0, y1, None])
-                
-            edges_trace = go.Scatter(x=edge_x, y=edge_y, line=dict(width=1, color='#334155'), mode='lines', hoverinfo='none')
-            
-            node_x, node_y, node_text = [], [], []
-            for node in G.nodes():
-                x, y = pos[node]
-                node_x.append(x)
-                node_y.append(y)
-                node_text.append(node)
-                
-            nodes_trace = go.Scatter(
-                x=node_x, y=node_y, mode='markers',
-                hovertext=node_text, hoverinfo='text',
-                marker=dict(size=10, color='#F43F5E', line=dict(width=1, color='#0B0E14'))
-            )
-            
-            fig_net = go.Figure(data=[edges_trace, nodes_trace])
-            fig_net.update_layout(
-                showlegend=False, margin=dict(l=0, r=0, t=0, b=0),
-                plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
-                xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-                yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-                height=250
-            )
-            st.plotly_chart(fig_net, use_container_width=True, config={'displayModeBar': False})
-        else:
-            st.caption("Insufficient topology data.")
+        fig_bar = go.Figure(go.Bar(
+            x=top_ips['Alert Count'],
+            y=top_ips['Source IP'],
+            orientation='h',
+            marker=dict(color='#ff7b72', line=dict(color='#0d1117', width=1)),
+            text=top_ips['Alert Count'],
+            textposition='outside',
+            textfont=dict(color='#c9d1d9', family="Fira Code")
+        ))
+        fig_bar.update_layout(
+            margin=dict(l=10, r=30, t=10, b=10),
+            plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
+            xaxis=dict(showgrid=True, gridcolor='#30363d', title="Alert Volume", titlefont=dict(color="#8b949e"), tickfont=dict(color="#8b949e")),
+            yaxis=dict(showgrid=False, tickfont=dict(color="#c9d1d9", family="Fira Code", size=12)),
+            height=300
+        )
+        st.plotly_chart(fig_bar, use_container_width=True, config={'displayModeBar': False})
+
+    # 3. Middle Row: Detection Velocity Line Chart
+    st.markdown('<div class="section-title">Detection Velocity (Events per Second)</div>', unsafe_allow_html=True)
+    if 'timestamp' in df.columns:
+        velocity_df = df.copy()
+        velocity_df['Sec'] = pd.to_datetime(velocity_df['timestamp'], unit='s', errors='coerce').dt.floor('S')
+        v_counts = velocity_df.groupby('Sec').size().reset_index(name='Count')
+        
+        # High visibility Area Chart
+        fig_line = go.Figure(go.Scatter(
+            x=v_counts['Sec'].tail(60), 
+            y=v_counts['Count'].tail(60),
+            fill='tozeroy',
+            mode='lines+markers',
+            line=dict(color='#58a6ff', width=3),
+            marker=dict(size=6, color='#58a6ff', symbol='circle'),
+            fillcolor='rgba(88, 166, 255, 0.15)'
+        ))
+        fig_line.update_layout(
+            margin=dict(l=0, r=0, t=10, b=10),
+            plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
+            xaxis=dict(showgrid=True, gridcolor='#30363d', tickfont=dict(color="#8b949e")),
+            yaxis=dict(showgrid=True, gridcolor='#30363d', tickfont=dict(color="#8b949e")),
+            height=220
+        )
+        st.plotly_chart(fig_line, use_container_width=True, config={'displayModeBar': False})
+
+    # 4. Bottom Row: Data Table
+    st.markdown('<div class="section-title">Real-Time Intrusion Log</div>', unsafe_allow_html=True)
+    display_df = df[['Time', 'Severity', 'Signature', 'Source', 'Target', 'Confidence']].head(50)
+    
+    st.dataframe(
+        display_df,
+        use_container_width=True,
+        hide_index=True,
+        height=400,
+        column_config={
+            "Time": st.column_config.TextColumn("Time", width="small"),
+            "Severity": st.column_config.TextColumn("Severity", width="small"),
+            "Signature": st.column_config.TextColumn("Threat Signature", width="medium"),
+            "Confidence": st.column_config.ProgressColumn("AI Confidence", format="%.0f%%", min_value=0, max_value=100),
+        }
+    )
 
 # Auto-refresh
 time.sleep(1.0)
