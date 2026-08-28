@@ -2,18 +2,16 @@
 """
 app.py
 ======
-Minimalist, Enterprise-Grade SOC Web Dashboard.
-Focuses strictly on necessary telemetry and actionable intelligence.
+Enterprise-Grade Cyber Security Operations Center (SOC) Dashboard.
+Completely overrides Streamlit's default styles to mimic a high-end SIEM (like Splunk or CrowdStrike).
 """
 
 import streamlit as st
-import pandas as pd
 import json
 import time
-import altair as alt
 from collections import deque
-import networkx as nx
 import plotly.graph_objects as go
+import pandas as pd
 
 try:
     from kafka import KafkaConsumer
@@ -21,54 +19,152 @@ except ImportError:
     from kafka_python_ng import KafkaConsumer
 
 # ==========================================
-# Page Configuration & CSS
+# Page Configuration & Heavy CSS
 # ==========================================
 st.set_page_config(
-    page_title="SOC Defense Control",
+    page_title="AI Threat Intelligence",
     layout="wide",
-    page_icon="bar-chart",
+    page_icon="🛡️",
     initial_sidebar_state="collapsed"
 )
 
+# Completely override Streamlit's amateur styling with Enterprise CSS
 st.markdown("""
 <style>
-    /* Ultra-clean minimalist theme */
-    .block-container {
-        padding-top: 2rem;
-        padding-bottom: 2rem;
-    }
+    /* Reset and Layout */
     .stApp {
-        background-color: #0f172a;
-        color: #f8fafc;
+        background-color: #0b1120;
+        color: #e2e8f0;
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
     }
-    .metric-container {
-        background-color: #1e293b;
-        border: 1px solid #334155;
-        border-radius: 8px;
-        padding: 20px;
-        text-align: center;
-        box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
-    }
-    .metric-value {
-        font-size: 2.5rem;
-        font-weight: 700;
-        margin: 0;
-    }
-    .metric-label {
-        font-size: 0.9rem;
-        color: #94a3b8;
-        text-transform: uppercase;
-        letter-spacing: 1px;
-    }
-    .text-critical { color: #ef4444; }
-    .text-high { color: #f97316; }
-    .text-medium { color: #eab308; }
-    .text-safe { color: #22c55e; }
     
-    /* Hide unwanted Streamlit elements */
+    /* Hide Streamlit Chrome */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     header {visibility: hidden;}
+    
+    /* Top Bar */
+    .top-bar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 10px 0 30px 0;
+        border-bottom: 1px solid #1e293b;
+        margin-bottom: 30px;
+    }
+    .top-bar-title {
+        font-size: 1.5rem;
+        font-weight: 700;
+        letter-spacing: 1px;
+        color: #f8fafc;
+        display: flex;
+        align-items: center;
+        gap: 15px;
+    }
+    .live-indicator {
+        display: inline-block;
+        width: 10px; height: 10px;
+        background-color: #22c55e;
+        border-radius: 50%;
+        box-shadow: 0 0 10px #22c55e;
+        animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+        0% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7); }
+        70% { box-shadow: 0 0 0 10px rgba(34, 197, 94, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); }
+    }
+
+    /* KPI Cards Grid */
+    .kpi-grid {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 20px;
+        margin-bottom: 30px;
+    }
+    .kpi-card {
+        background: linear-gradient(145deg, #1e293b, #0f172a);
+        border: 1px solid #334155;
+        border-radius: 8px;
+        padding: 24px;
+        position: relative;
+        overflow: hidden;
+    }
+    .kpi-card::before {
+        content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px;
+    }
+    .kpi-crit::before { background: #ef4444; box-shadow: 0 0 15px #ef4444; }
+    .kpi-high::before { background: #f97316; box-shadow: 0 0 15px #f97316; }
+    .kpi-med::before { background: #eab308; box-shadow: 0 0 15px #eab308; }
+    .kpi-total::before { background: #3b82f6; box-shadow: 0 0 15px #3b82f6; }
+    
+    .kpi-value { 
+        font-size: 2.5rem; font-weight: 800; margin: 0 0 5px 0; 
+        font-family: 'JetBrains Mono', 'Courier New', monospace; 
+        color: #f8fafc;
+    }
+    .kpi-label { 
+        font-size: 0.8rem; color: #94a3b8; text-transform: uppercase; 
+        letter-spacing: 1px; font-weight: 600; margin: 0;
+    }
+
+    /* Custom SIEM Data Table */
+    .siem-table-container {
+        max-height: 450px;
+        overflow-y: auto;
+        border: 1px solid #334155;
+        border-radius: 8px;
+        background: #0f172a;
+        margin-bottom: 30px;
+    }
+    .siem-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-family: 'JetBrains Mono', 'Courier New', monospace;
+        font-size: 0.85rem;
+    }
+    .siem-table th {
+        background: #1e293b;
+        color: #cbd5e1;
+        font-weight: 600;
+        text-align: left;
+        padding: 14px 20px;
+        position: sticky;
+        top: 0;
+        border-bottom: 2px solid #334155;
+        z-index: 10;
+        letter-spacing: 0.5px;
+    }
+    .siem-table td {
+        padding: 14px 20px;
+        border-bottom: 1px solid #1e293b;
+        color: #94a3b8;
+    }
+    .siem-table tr:hover { background: #1e293b; }
+    .siem-table .highlight { color: #f8fafc; font-weight: 500; }
+    
+    .badge {
+        padding: 4px 10px;
+        border-radius: 4px;
+        font-size: 0.75rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        display: inline-block;
+    }
+    .badge-critical { background: rgba(239, 68, 68, 0.15); color: #fca5a5; border: 1px solid rgba(239, 68, 68, 0.5); }
+    .badge-high { background: rgba(249, 115, 22, 0.15); color: #fdba74; border: 1px solid rgba(249, 115, 22, 0.5); }
+    .badge-medium { background: rgba(234, 179, 8, 0.15); color: #fde047; border: 1px solid rgba(234, 179, 8, 0.5); }
+    .badge-low { background: rgba(148, 163, 184, 0.15); color: #cbd5e1; border: 1px solid rgba(148, 163, 184, 0.5); }
+    
+    /* Panel Titles */
+    .panel-title {
+        font-size: 1.1rem;
+        font-weight: 600;
+        color: #f8fafc;
+        margin-bottom: 15px;
+        letter-spacing: 0.5px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -76,7 +172,7 @@ st.markdown("""
 # Data Management (Session State)
 # ==========================================
 if "alerts" not in st.session_state:
-    st.session_state.alerts = deque(maxlen=50) # Keep only the last 50 for a clean view
+    st.session_state.alerts = deque(maxlen=50) # Keep only the last 50 for the table
 if "stats" not in st.session_state:
     st.session_state.stats = {"total": 0, "CRITICAL": 0, "HIGH": 0, "MEDIUM": 0}
 if "consumer" not in st.session_state:
@@ -114,128 +210,147 @@ def poll_kafka():
 poll_kafka()
 
 # ==========================================
-# UI Layout
+# UI Layout Rendering
 # ==========================================
-st.markdown("<h2 style='text-align: center; margin-bottom: 2rem; font-weight: 300;'>AI Cyber Threat Detection Enclave</h2>", unsafe_allow_html=True)
+# Top Header
+st.markdown("""
+<div class="top-bar">
+    <div class="top-bar-title">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
+        AI THREAT INTELLIGENCE PLATFORM
+    </div>
+    <div style="color: #94a3b8; font-size: 0.9rem; font-weight: 600; display: flex; align-items: center; gap: 8px;">
+        <span class="live-indicator"></span> LIVE TELEMETRY
+    </div>
+</div>
+""", unsafe_allow_html=True)
 
-# 1. High-Level KPIs
-col1, col2, col3, col4 = st.columns(4)
+# KPIs
+st.markdown(f"""
+<div class="kpi-grid">
+    <div class="kpi-card kpi-total">
+        <p class="kpi-value">{st.session_state.stats['total']:,}</p>
+        <p class="kpi-label">Flows Evaluated</p>
+    </div>
+    <div class="kpi-card kpi-crit">
+        <p class="kpi-value" style="color: #ef4444;">{st.session_state.stats['CRITICAL']:,}</p>
+        <p class="kpi-label">Critical Exploits</p>
+    </div>
+    <div class="kpi-card kpi-high">
+        <p class="kpi-value" style="color: #f97316;">{st.session_state.stats['HIGH']:,}</p>
+        <p class="kpi-label">High Severity</p>
+    </div>
+    <div class="kpi-card kpi-med">
+        <p class="kpi-value" style="color: #eab308;">{st.session_state.stats['MEDIUM']:,}</p>
+        <p class="kpi-label">Medium Anomalies</p>
+    </div>
+</div>
+""", unsafe_allow_html=True)
 
-with col1:
-    st.markdown(f"""
-        <div class="metric-container">
-            <p class="metric-value">{st.session_state.stats['total']}</p>
-            <p class="metric-label">Total Threats Evaluated</p>
-        </div>
-    """, unsafe_allow_html=True)
+# Main Dashboard Grid (2 columns: Table taking 2/3, Graph taking 1/3)
+col_feed, col_graph = st.columns([2, 1])
 
-with col2:
-    st.markdown(f"""
-        <div class="metric-container">
-            <p class="metric-value text-critical">{st.session_state.stats['CRITICAL']}</p>
-            <p class="metric-label">Critical Incidents</p>
-        </div>
-    """, unsafe_allow_html=True)
-
-with col3:
-    st.markdown(f"""
-        <div class="metric-container">
-            <p class="metric-value text-high">{st.session_state.stats['HIGH']}</p>
-            <p class="metric-label">High Severity</p>
-        </div>
-    """, unsafe_allow_html=True)
-
-with col4:
-    st.markdown(f"""
-        <div class="metric-container">
-            <p class="metric-value text-medium">{st.session_state.stats['MEDIUM']}</p>
-            <p class="metric-label">Medium Severity</p>
-        </div>
-    """, unsafe_allow_html=True)
-
-st.markdown("---")
-
-# 2. Main Alert Feed (Clean Table)
-if not st.session_state.alerts:
-    st.info("No threats detected yet. Monitoring live traffic...")
-else:
-    # Convert deque to clean DataFrame
-    df_alerts = pd.DataFrame(st.session_state.alerts)
+with col_feed:
+    st.markdown('<div class="panel-title">Real-Time Intrusion Feed</div>', unsafe_allow_html=True)
     
-    # Format time and IPs for clean display
-    df_alerts['Time'] = pd.to_datetime(df_alerts['timestamp']).dt.strftime('%H:%M:%S')
-    df_alerts['Source'] = df_alerts['src_ip'] + ":" + df_alerts['src_port'].astype(str)
-    df_alerts['Destination'] = df_alerts['dst_ip'] + ":" + df_alerts['dst_port'].astype(str)
-    
-    # Extract just the main reason from evidence, ignore the rest of the JSON clutter
-    df_alerts['AI Reason'] = df_alerts['evidence'].apply(lambda x: x.get('reason', 'Unknown Anomaly') if isinstance(x, dict) else 'Unknown Anomaly')
-    
-    # Select only necessary columns
-    clean_df = df_alerts[['Time', 'severity', 'threat_class', 'Source', 'Destination', 'AI Reason']].copy()
-    clean_df.columns = ['Time', 'Severity', 'Threat Type', 'Source', 'Destination', 'AI Context']
-    
-    st.markdown("### Live Threat Triage")
-    st.dataframe(
-        clean_df,
-        use_container_width=True,
-        hide_index=True,
-        height=400
-    )
-
-# 3. Minimalist Network Graph
-st.markdown("### Active Compromise Topology")
-if len(st.session_state.alerts) > 0:
-    G = nx.DiGraph()
-    # Build graph from recent alerts
-    for a in list(st.session_state.alerts)[:30]:
-        src = a.get("src_ip", "Unknown")
-        dst = a.get("dst_ip", "Unknown")
-        sev = a.get("severity", "LOW")
-        G.add_edge(src, dst, severity=sev)
+    if not st.session_state.alerts:
+        st.markdown("""
+        <div class="siem-table-container" style="display: flex; align-items: center; justify-content: center; min-height: 400px; color: #64748b;">
+            Awaiting network telemetry...
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        # Build HTML Table manually for pixel-perfect SIEM styling
+        table_html = """
+        <div class="siem-table-container">
+            <table class="siem-table">
+                <thead>
+                    <tr>
+                        <th>TIMESTAMP</th>
+                        <th>SEVERITY</th>
+                        <th>THREAT SIGNATURE</th>
+                        <th>SOURCE</th>
+                        <th>TARGET</th>
+                    </tr>
+                </thead>
+                <tbody>
+        """
         
-    pos = nx.spring_layout(G, k=0.5, seed=42)
+        for a in list(st.session_state.alerts)[:35]:
+            ts = pd.to_datetime(a.get('timestamp')).strftime('%H:%M:%S.%f')[:-3] if a.get('timestamp') else 'UNKNOWN'
+            sev = a.get('severity', 'LOW').upper()
+            badge_class = f"badge-{sev.lower()}"
+            threat = a.get('threat_class', 'Unknown Anomaly').replace('_', ' ')
+            src = f"{a.get('src_ip', '')}:{a.get('src_port', '')}"
+            dst = f"{a.get('dst_ip', '')}:{a.get('dst_port', '')}"
+            
+            table_html += f"""
+            <tr>
+                <td>{ts}</td>
+                <td><span class="badge {badge_class}">{sev}</span></td>
+                <td class="highlight">{threat}</td>
+                <td>{src}</td>
+                <td>{dst}</td>
+            </tr>
+            """
+        table_html += "</tbody></table></div>"
+        st.markdown(table_html, unsafe_allow_html=True)
+
+with col_graph:
+    st.markdown('<div class="panel-title">Active Kill-Chain Topology</div>', unsafe_allow_html=True)
     
-    edge_x, edge_y = [], []
-    for edge in G.edges():
-        x0, y0 = pos[edge[0]]
-        x1, y1 = pos[edge[1]]
-        edge_x.extend([x0, x1, None])
-        edge_y.extend([y0, y1, None])
+    # Minimalist Dark Plotly Graph
+    G = go.Figure()
+    
+    if len(st.session_state.alerts) > 0:
+        edges_x, edges_y = [], []
+        nodes_x, nodes_y, nodes_text = [], [], []
         
-    edges_trace = go.Scatter(
-        x=edge_x, y=edge_y, line=dict(width=1, color='#475569'),
-        hoverinfo='none', mode='lines'
+        # Simple simulated ring layout for visual flair
+        import math
+        import random
+        alerts = list(st.session_state.alerts)[:15]
+        
+        # Add center node (Firewall / Diode)
+        nodes_x.append(0)
+        nodes_y.append(0)
+        nodes_text.append("DATA DIODE")
+        
+        for i, a in enumerate(alerts):
+            angle = (i / len(alerts)) * 2 * math.pi
+            r = random.uniform(0.7, 1.0)
+            nx, ny = r * math.cos(angle), r * math.sin(angle)
+            
+            nodes_x.append(nx)
+            nodes_y.append(ny)
+            
+            src = a.get("src_ip", "")
+            nodes_text.append(f"{src}")
+            
+            edges_x.extend([0, nx, None])
+            edges_y.extend([0, ny, None])
+            
+        G.add_trace(go.Scatter(x=edges_x, y=edges_y, mode='lines', line=dict(color='#334155', width=1), hoverinfo='none'))
+        G.add_trace(go.Scatter(x=nodes_x, y=nodes_y, mode='markers+text', 
+                               text=nodes_text, textposition="top center",
+                               textfont=dict(color="#94a3b8", size=9, family="JetBrains Mono"),
+                               marker=dict(size=[20] + [10]*len(alerts), 
+                                           color=['#3b82f6'] + ['#ef4444' if a.get('severity')=='CRITICAL' else '#f97316' for a in alerts],
+                                           line=dict(color='#0f172a', width=2)),
+                               hoverinfo='text'))
+                               
+    G.update_layout(
+        showlegend=False,
+        margin=dict(l=0, r=0, t=0, b=0),
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)',
+        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+        height=450
     )
     
-    node_x, node_y, node_text = [], [], []
-    for node in G.nodes():
-        x, y = pos[node]
-        node_x.append(x)
-        node_y.append(y)
-        node_text.append(node)
-        
-    nodes_trace = go.Scatter(
-        x=node_x, y=node_y, mode='markers+text',
-        hoverinfo='text', text=node_text, textposition="top center",
-        marker=dict(size=14, color='#38bdf8', line=dict(width=2, color='white'))
-    )
-    
-    fig = go.Figure(data=[edges_trace, nodes_trace],
-                 layout=go.Layout(
-                    showlegend=False,
-                    hovermode='closest',
-                    margin=dict(b=0,l=0,r=0,t=0),
-                    plot_bgcolor='rgba(0,0,0,0)',
-                    paper_bgcolor='rgba(0,0,0,0)',
-                    xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-                    yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-                    height=300
-                 ))
-    
-    st.plotly_chart(fig, use_container_width=True)
-else:
-    st.caption("Not enough data to map topology.")
+    st.plotly_chart(G, use_container_width=True, config={'displayModeBar': False})
 
 # Auto-refresh loop
-time.sleep(1.5)
+time.sleep(1.0)
 st.rerun()
