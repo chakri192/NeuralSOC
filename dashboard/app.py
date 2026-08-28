@@ -218,7 +218,7 @@ else:
         fig_bar.update_layout(
             margin=dict(l=10, r=30, t=10, b=10),
             plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
-            xaxis=dict(showgrid=True, gridcolor='#30363d', title="Alert Volume", titlefont=dict(color="#8b949e"), tickfont=dict(color="#8b949e")),
+            xaxis=dict(showgrid=True, gridcolor='#30363d', title=dict(text="Alert Volume", font=dict(color="#8b949e")), tickfont=dict(color="#8b949e")),
             yaxis=dict(showgrid=False, tickfont=dict(color="#c9d1d9", family="Fira Code", size=12)),
             height=300
         )
