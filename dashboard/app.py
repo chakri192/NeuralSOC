@@ -27,7 +27,6 @@ except ImportError:
 st.set_page_config(
     page_title="SOC Unified Platform",
     layout="wide",
-    page_icon="🛡️",
     initial_sidebar_state="collapsed"
 )
 

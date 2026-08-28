@@ -106,7 +106,7 @@ class CLIDashboard:
         )
 
         # 1. Header
-        header_text = Text("🛡️ TACTICAL THREAT INTELLIGENCE (T-SOC) 🛡️", justify="center", style="bold white")
+        header_text = Text("TACTICAL THREAT INTELLIGENCE (T-SOC)", justify="center", style="bold white")
         header = Panel(header_text, style="on #0f172a", border_style="#334155")
         layout["header"].update(header)
 
@@ -132,11 +132,11 @@ class CLIDashboard:
         term_height = console.size.height
         max_rows = max(5, term_height - 18)  # Account for headers, kpis, borders
 
-        icons = {"CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡", "LOW": "🔵"}
+        icons = {"CRITICAL": "[C]", "HIGH": "[H]", "MEDIUM": "[M]", "LOW": "[L]"}
         
         for a in list(self.alerts)[:max_rows]:
             sev = a.get("severity", "LOW")
-            icon = icons.get(sev, "⚪")
+            icon = icons.get(sev, "[L]")
             ts = a.get("timestamp", "00:00:00T00")[11:19]
             conf = f"{int(a.get('confidence_score', 0) * 100)}%"
             threat = a.get("threat_class", "").replace("_", " ")
