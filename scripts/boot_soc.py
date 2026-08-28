@@ -79,10 +79,13 @@ def main():
     # Extract Cloudflare URL
     cf_url = "Waiting for tunnel..."
     try:
-        out = subprocess.check_output("grep 'trycloudflare.com' /tmp/cf.log | head -1", shell=True, text=True)
-        cf_url = [word for word in out.split() if "trycloudflare.com" in word][0]
+        # We sleep a bit extra just to ensure Cloudflare has time to print the final URL to the log
+        time.sleep(3)
+        out = subprocess.check_output("grep -o 'https://[a-zA-Z0-9.-]*\.trycloudflare\.com' /tmp/cf.log | head -1", shell=True, text=True).strip()
+        if out:
+            cf_url = out
     except Exception:
-        cf_url = "http://localhost:8501 (Local Only)"
+        cf_url = "http://localhost:8501 (Local Only - Tunnel Failed)"
 
     console.print("\n[bold green]✅ System Online.[/bold green]")
     console.print(Panel(
