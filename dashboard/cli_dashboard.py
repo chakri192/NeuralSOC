@@ -30,7 +30,8 @@ class CLIDashboard:
     def __init__(self, broker: str, topic: str):
         self.broker = broker
         self.topic = topic
-        self.alerts = deque(maxlen=25)
+        # Keep a large history in memory, but only display what fits
+        self.alerts = deque(maxlen=1000)
         self.stats = {
             "total": 0,
             "CRITICAL": 0,
@@ -99,7 +100,11 @@ class CLIDashboard:
         table.add_column("Destination", style="#fb7185")
         table.add_column("Conf", justify="right", width=6)
 
-        for a in self.alerts:
+        # Dynamically calculate rows based on terminal height
+        term_height = console.size.height
+        max_rows = max(5, term_height - 12)  # Adjust for headers, borders, and margins
+
+        for a in list(self.alerts)[:max_rows]:
             sev = a.get("severity", "LOW")
             color = "red" if sev == "CRITICAL" else "yellow" if sev == "HIGH" else "blue" if sev == "MEDIUM" else "white"
             ts = a.get("timestamp", "")[11:19]  # Just HH:MM:SS
