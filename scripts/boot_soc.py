@@ -35,6 +35,9 @@ def main():
     if not docker_bin:
         console.print("[bold red]❌ Error:[/bold red] Docker binary not found. Please ensure Docker Desktop is installed.")
         sys.exit(1)
+        
+    # CRITICAL FIX: macOS 'docker-credential-desktop' often fails if PATH isn't correctly set to the Docker.app bin folder
+    os.environ["PATH"] += os.pathsep + os.path.dirname(docker_bin)
 
     with Progress(
         SpinnerColumn(spinner_name="dots2", style="cyan"),
@@ -53,7 +56,7 @@ def main():
             
         # 2. AI Engines
         task2 = progress.add_task("[cyan]Loading Neural Networks & Stream Processor...", total=100)
-        subprocess.Popen(["venv/bin/python3", "scripts/simulate_zeek_feed.py", "--rate", "15.0"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen(["venv/bin/python3", "scripts/simulate_zeek_feed.py", "--rate", "15.0", "--burst-attacks"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         subprocess.Popen(["venv/bin/python3", "ingest/tail_to_redpanda.py", "--broker", "localhost:9092", "--log-dir", "data/zeek_logs"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         subprocess.Popen(["venv/bin/python3", "inference/stream_processor.py", "--broker", "localhost:9092"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         
