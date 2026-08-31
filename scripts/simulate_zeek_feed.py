@@ -287,6 +287,7 @@ def main():
     parser = argparse.ArgumentParser(description="Simulate Zeek JSON stream for testing all 6 threat categories.")
     parser.add_argument("--rate", type=float, default=3.0, help="Events generated per second")
     parser.add_argument("--burst-attacks", action="store_true", help="Increase attack frequency for demo")
+    parser.add_argument("--no-attacks", action="store_true", help="Generate 100% benign traffic only")
     args = parser.parse_args()
 
     print(f"[*] Starting Zeek log stream simulation in {LOG_DIR}")
@@ -307,24 +308,25 @@ def main():
             step += 1
             simulate_normal_flow()
             
-            # Beacon pulse every ~5 steps
-            if step % 5 == 0:
-                simulate_c2_beaconing()
+            if not args.no_attacks:
+                # Beacon pulse every ~30 steps
+                if step % 30 == 0:
+                    simulate_c2_beaconing()
 
-            # Attacks every few steps
-            attack_freq = 6 if args.burst_attacks else 12
-            if step % attack_freq == 0:
-                choice = random.choice(["ddos", "dga_tunnel", "ja3", "scan", "exfil"])
-                if choice == "ddos":
-                    simulate_ddos_syn_flood()
-                elif choice == "dga_tunnel":
-                    simulate_dga_and_tunneling()
-                elif choice == "ja3":
-                    simulate_c2_ja3_malware()
-                elif choice == "scan":
-                    simulate_port_scan()
-                elif choice == "exfil":
-                    simulate_data_exfiltration()
+                # Attacks every few steps (mostly benign now)
+                attack_freq = 50 if args.burst_attacks else 200
+                if step % attack_freq == 0:
+                    choice = random.choice(["ddos", "dga_tunnel", "ja3", "scan", "exfil"])
+                    if choice == "ddos":
+                        simulate_ddos_syn_flood()
+                    elif choice == "dga_tunnel":
+                        simulate_dga_and_tunneling()
+                    elif choice == "ja3":
+                        simulate_c2_ja3_malware()
+                    elif choice == "scan":
+                        simulate_port_scan()
+                    elif choice == "exfil":
+                        simulate_data_exfiltration()
 
             time.sleep(sleep_sec)
     except KeyboardInterrupt:
