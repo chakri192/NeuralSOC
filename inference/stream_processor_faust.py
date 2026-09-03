@@ -101,7 +101,13 @@ async def process_traffic(stream):
                     logger.error(f"[Faust] Dropped invalid alert schema: {err}")
         except Exception as e:
             logger.error(f"[DLQ] Pipeline crash prevented. Routing bad event to DLQ. Error: {str(e)}")
-            await dlq_topic.send(value={"raw_event": event, "error": str(e), "timestamp": datetime.now(timezone.utc).isoformat()})
+            
+            # Redact PII before sending to DLQ
+            safe_event = dict(event)
+            safe_event.pop("id.orig_h", None)
+            safe_event.pop("id.resp_h", None)
+            await dlq_topic.send(value={"raw_event": safe_event, "error": str(e), "timestamp": datetime.now(timezone.utc).isoformat()})
+
 
 if __name__ == '__main__':
     app.main()

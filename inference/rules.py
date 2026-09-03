@@ -1,9 +1,7 @@
 def evaluate_rules(event: dict, features: dict) -> list:
     alerts = []
     
-    if not event.get("simulated", False):
-        return alerts
-        
+            
     evt_type = event.get("event_type")
     
     # 1. DDoS (Replaces Failed Connection Spike)
