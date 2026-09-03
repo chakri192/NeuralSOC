@@ -27,6 +27,23 @@ class DeepLearningEngine:
                 
             self.model = torch.jit.load(artifact_path, map_location=torch.device('cpu'))
             self.model.eval()
+            
+            # Start runtime-watch daemon to detect hostPath binary swaps
+            import threading
+            def _runtime_watch():
+                while True:
+                    time.sleep(10)
+                    try:
+                        with open(artifact_path, "rb") as f_bin:
+                            if hashlib.sha256(f_bin.read()).hexdigest() != expected_sha:
+                                logger.critical("FATAL: Model swapped at runtime! SHA-256 mismatch.")
+                                os._exit(1)
+                    except Exception:
+                        pass
+            
+            t = threading.Thread(target=_runtime_watch, daemon=True)
+            t.start()
+
         except Exception as e:
             logger.error(f"[Models] Security/Load Failure: {e}. Falling back to mock.")
             raise RuntimeError(f"Model integrity failure: {e}")
@@ -37,6 +54,9 @@ class DeepLearningEngine:
 
     def predict(self, features: dict, domain: str = "") -> tuple[bool, float, float]:
         start_time = time.time()
+        
+
+
         
             
         if not domain:

@@ -50,25 +50,25 @@ spec:
         startupProbe:
           exec:
             command:
-            - python
-            - -c
-            - "import urllib.request; urllib.request.urlopen('http://localhost:6066/')"
+            - curl
+            - -f
+            - http://localhost:6066/agent/health
           failureThreshold: 3
           periodSeconds: 10
         livenessProbe:
           exec:
             command:
-            - python
-            - -c
-            - "import urllib.request; urllib.request.urlopen('http://localhost:6066/')"
+            - curl
+            - -f
+            - http://localhost:6066/agent/health
           initialDelaySeconds: 60
           periodSeconds: 20
         readinessProbe:
           exec:
             command:
-            - python
-            - -c
-            - "import urllib.request; urllib.request.urlopen('http://localhost:6066/')"
+            - curl
+            - -f
+            - http://localhost:6066/agent/health
           initialDelaySeconds: 15
           periodSeconds: 10
         securityContext:
