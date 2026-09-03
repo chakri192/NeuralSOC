@@ -20,12 +20,9 @@ spec:
           value: soc-redpanda-cluster.prod.svc.cluster.local:9092
         image: your-registry.com/tsoc/stream-processor:v1.0
         livenessProbe:
-          exec:
-            command:
-            - faust
-            - -A
-            - inference.stream_processor_faust
-            - agents
+          httpGet:
+            path: /healthz
+            port: 8000
           initialDelaySeconds: 30
           periodSeconds: 15
         name: faust-worker
@@ -39,6 +36,11 @@ spec:
         securityContext:
           readOnlyRootFilesystem: true
           runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -62,21 +64,35 @@ spec:
               key: api-key
               name: tsoc-secrets
         image: your-registry.com/tsoc/api:v1.0
+        name: fastapi
+        ports:
+        - name: http
+          containerPort: 8000
+          protocol: TCP
+        resources:
+          limits:
+            cpu: 500m
+            memory: 512Mi
+          requests:
+            cpu: 250m
+            memory: 256Mi
         livenessProbe:
           httpGet:
-            path: /docs
+            path: /healthz
             port: 8000
           initialDelaySeconds: 15
           periodSeconds: 20
-        name: fastapi
-        ports:
-        - containerPort: 8000
         readinessProbe:
           httpGet:
-            path: /docs
+            path: /healthz
             port: 8000
           initialDelaySeconds: 5
           periodSeconds: 10
         securityContext:
           readOnlyRootFilesystem: true
           runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
