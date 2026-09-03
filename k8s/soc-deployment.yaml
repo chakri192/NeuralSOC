@@ -22,7 +22,7 @@ spec:
         livenessProbe:
           httpGet:
             path: /healthz
-            port: 8000
+            port: 6066
           initialDelaySeconds: 30
           periodSeconds: 15
         name: faust-worker

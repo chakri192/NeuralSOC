@@ -14,7 +14,9 @@ logger = logging.getLogger("data_access")
 
 API_URL = os.getenv("API_URL", "http://127.0.0.1:8000/api/v1")
 # SECURITY FIX: Dynamically pull API key from environment, fallback for local demo only
-API_KEY = os.getenv("TSOC_API_KEY", "tsoc-prod-key-2026") 
+API_KEY = os.environ.get("TSOC_API_KEY", "")
+if not API_KEY:
+    raise RuntimeError("TSOC_API_KEY not set") 
 
 class DataStreamManager:
     _instance = None

@@ -11,7 +11,7 @@ class IncidentCorrelator:
     def __init__(self):
         # Strict fallback enforcement
         redis_host = os.getenv("REDIS_HOST", "localhost")
-        pool = redis.ConnectionPool(host=redis_host, port=6379, db=0, decode_responses=True)
+        pool = redis.ConnectionPool(host=redis_host, port=6379, db=0, decode_responses=True, socket_timeout=2.0, socket_connect_timeout=2.0)
         self.redis = redis.Redis(connection_pool=pool)
         self.time_window_sec = int(os.getenv("CORRELATION_WINDOW", "300"))
 

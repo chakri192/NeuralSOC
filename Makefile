@@ -17,7 +17,7 @@ down:
 
 pipeline:
 	@echo "[+] Starting AI Stream Processor..."
-	export REDPANDA_BROKERS=127.0.0.1:9092 && $(PYTHON) inference/stream_processor.py
+	export REDPANDA_BROKERS=127.0.0.1:9092 && $(PYTHON) inference/stream_processor_faust.py worker -l info
 
 simulate:
 	@echo "[+] Injecting Synthetic Attack Traffic (Burst Mode)..."

@@ -14,3 +14,5 @@ data/soc_alerts.*
 
 soc-stream-processor-cluster-data/
 
+
+k8s/secrets.yaml

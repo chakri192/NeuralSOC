@@ -35,4 +35,4 @@ ENV REDPANDA_BROKERS="soc-redpanda:29092"
 ENV PYTHONUNBUFFERED=1
 
 # Default execution falls back to the stream processor
-CMD ["python", "inference/stream_processor.py"]
+CMD ["python", "inference/stream_processor_faust.py"]

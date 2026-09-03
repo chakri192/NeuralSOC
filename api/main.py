@@ -56,8 +56,17 @@ def metrics():
 
 
 # 1. SECURITY FIX: Global Exception Handler to prevent Stack Trace Leakage
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+
+@app.exception_handler(RequestValidationError)
+async def validation_handler(request: Request, exc: RequestValidationError):
+    return JSONResponse(status_code=422, content={"detail": exc.errors()})
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
+    if isinstance(exc, HTTPException):
+        raise exc
     logger.error(f"[API Crash Guard] Unhandled exception on {request.url.path}: {str(exc)}")
     return JSONResponse(
         status_code=500,
