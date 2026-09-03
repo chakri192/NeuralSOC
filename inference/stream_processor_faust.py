@@ -84,6 +84,6 @@ async def process_traffic(stream):
             except Exception as e:
                 logger.error(f"Processing error: {e}")
 
-@app.task
-async def on_stop():
-    executor.shutdown(wait=False)
+@app.on_stopped.connect
+def on_worker_stopped(app, **kwargs):
+    executor.shutdown(wait=True)

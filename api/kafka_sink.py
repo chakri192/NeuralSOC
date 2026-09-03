@@ -38,7 +38,7 @@ def run_sink():
                     for msg in messages:
                         try:
                             data = json.loads(msg.value.decode("utf-8"))
-                            jsonschema.validate(data, {"type": "object", "properties": {"event_type": {"type": "string"}}, "required": ["event_type"]})
+                            jsonschema.validate(data, {"type": "object", "properties": {"alert_id": {"type": "string"}, "timestamp": {"type": "string"}, "source_ip": {"type": "string"}, "threat_class": {"type": "string"}}, "required": ["alert_id", "timestamp", "source_ip", "threat_class"]})
                             if not data.get("alert_id"): continue
                             batch.append(Alert(**{k: v for k, v in data.items() if hasattr(Alert, k)}))
                         except Exception as e:

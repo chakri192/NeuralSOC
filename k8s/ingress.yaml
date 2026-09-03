@@ -2,6 +2,7 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: tsoc-api-ingress
+  namespace: tsoc
   annotations:
     nginx.ingress.kubernetes.io/auth-url: "https://auth.tsoc.local/verify"
     cert-manager.io/cluster-issuer: "letsencrypt-prod"

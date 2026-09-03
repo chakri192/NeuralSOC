@@ -18,14 +18,17 @@ class IncidentCorrelator:
         self.redis = redis.Redis(connection_pool=pool)
         self.time_window_sec = 300
         self._correlate_script = self.redis.register_script('''
-            local key = KEYS[1]
-            local dedup = KEYS[2]
+                        local key = KEYS[1]
             local window = tonumber(ARGV[1])
             local alert_data = ARGV[2]
             redis.call('LPUSH', key, alert_data)
             redis.call('LTRIM', key, 0, 99)
             redis.call('EXPIRE', key, window)
-            if redis.call('GET', dedup) == "1" then return nil end
+            local len = redis.call('LLEN', key)
+            if len >= 2 then
+                return "INCIDENT"
+            end
+            return nil end
             local len = redis.call('LLEN', key)
             if len >= 2 then
                 redis.call('SET', dedup, "1", "EX", window)

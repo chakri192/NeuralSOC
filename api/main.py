@@ -2,7 +2,10 @@ import os
 from fastapi import HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
-API_KEY = os.getenv("TSOC_API_KEY", "default-dev-key")
+import secrets
+API_KEY = os.getenv("TSOC_API_KEY")
+if not API_KEY:
+    raise RuntimeError("CRITICAL: TSOC_API_KEY must be configured.")
 security = HTTPBearer()
 import os
 import traceback
@@ -24,10 +27,11 @@ logging.basicConfig(level=logging.INFO, handlers=[logging.StreamHandler()])
 logger = logging.getLogger(__name__)
 
 def get_remote_address(request: Request):
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
+    client_ip = request.client.host if request.client else "127.0.0.1"
+    forwarded = request.headers.get("X-Real-IP") or request.headers.get("X-Forwarded-For")
+    if forwarded and (client_ip.startswith("10.") or client_ip.startswith("172.") or client_ip.startswith("192.") or client_ip == "127.0.0.1"):
         return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else "127.0.0.1"
+    return client_ip
 
 limiter = Limiter(key_func=get_remote_address)
 app = FastAPI()
@@ -73,7 +77,7 @@ def healthz(): return {'status': 'ok'}
 @app.get("/api/v1/alerts", response_model=List[AlertResponse])
 @limiter.limit("100/minute")
 def get_alerts(request: Request, cursor: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=100), db: Session = Depends(get_db), token: HTTPAuthorizationCredentials = Depends(security)):
-    if token.credentials != API_KEY:
+    if not secrets.compare_digest(token.credentials, API_KEY):
         raise HTTPException(status_code=403, detail="Invalid API Key")
     if cursor == 0:
         return db.query(models.Alert).order_by(models.Alert.id.desc()).limit(limit).all()
