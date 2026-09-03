@@ -36,8 +36,8 @@ services:
     container_name: soc-postgres
     platform: linux/arm64
     environment:
-      POSTGRES_USER: soc_admin
-      POSTGRES_PASSWORD: secure_soc_password
+      POSTGRES_USER: ${COMPOSE_POSTGRES_USER:-soc_admin}
+      POSTGRES_PASSWORD: ${COMPOSE_POSTGRES_PASSWORD:-secure_soc_password}
       POSTGRES_DB: tsoc
     ports:
       - "5432:5432"

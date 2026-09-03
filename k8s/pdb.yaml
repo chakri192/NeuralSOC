@@ -1,0 +1,19 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pdb-stream-processor
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: tsoc-stream-processor
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pdb-api
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: tsoc-api
