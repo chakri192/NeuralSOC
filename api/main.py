@@ -1,3 +1,4 @@
+import psutil
 from fastapi import FastAPI, Depends, Security, HTTPException, status, Request, Query
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
@@ -36,7 +37,7 @@ def get_remote_address(req: Request):
     xff = req.headers.get("X-Forwarded-For")
     if xff:
         hops = [h.strip() for h in xff.split(",")]
-        return hops[-1]  # Trust only the last hop from the trusted ingress proxy
+        return hops[0]  # Trust first hop (closest to ingress)
     return req.client.host
 
 limiter = Limiter(key_func=get_remote_address)

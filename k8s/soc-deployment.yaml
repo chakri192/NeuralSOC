@@ -14,19 +14,12 @@ spec:
       labels:
         app: tsoc-stream-processor
     spec:
-      volumes:
-      - name: model-volume
-        emptyDir: {}
       containers:
       - env:
         - name: REDPANDA_BROKERS
           value: soc-redpanda-cluster.prod.svc.cluster.local:9092
         image: your-registry.com/tsoc/stream-processor:v1.0
         name: faust-worker
-        volumeMounts:
-        - name: model-volume
-          mountPath: /app/models
-          readOnly: true
         resources:
           limits:
             cpu: 1000m

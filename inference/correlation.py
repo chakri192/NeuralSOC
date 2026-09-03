@@ -68,7 +68,7 @@ class IncidentCorrelator:
                         "related_alerts": len(records),
                         "timestamp": datetime.now(timezone.utc).isoformat()
                     }
-                    self.redis.delete(key)
+                    self.redis.setex(f"incident:{incident['incident_id']}", self.time_window_sec, json.dumps(incident))
                     return incident
                     
                 return None
