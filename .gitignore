@@ -11,3 +11,6 @@ logs/
 soc-stream-processor-cluster-data/
 data/*.db
 data/soc_alerts.*
+
+soc-stream-processor-cluster-data/
+
