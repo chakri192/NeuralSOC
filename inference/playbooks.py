@@ -137,7 +137,7 @@ def enrich_ip_intel(ip_address: str) -> Dict[str, str]:
         return {"country": "Internal / RFC1918", "asn": "N/A", "reputation": "Trusted"}
     
     # Deterministic mock based on hash to keep it consistent
-    h = int(hashlib.md5(ip_address.encode()).hexdigest(), 16)
+    h = int(hashlib.md5(ip_address.encode(), usedforsecurity=False).hexdigest(), 16)
     countries = ["RU", "CN", "IR", "KP", "BR", "RO", "US", "NL", "DE"]
     asns = ["AS47764", "AS4134", "AS58224", "AS174", "AS398324", "AS20473"]
     

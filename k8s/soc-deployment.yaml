@@ -1,0 +1,82 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: tsoc-stream-processor
+  name: tsoc-stream-processor
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: tsoc-stream-processor
+  template:
+    metadata:
+      labels:
+        app: tsoc-stream-processor
+    spec:
+      containers:
+      - env:
+        - name: REDPANDA_BROKERS
+          value: soc-redpanda-cluster.prod.svc.cluster.local:9092
+        image: your-registry.com/tsoc/stream-processor:v1.0
+        livenessProbe:
+          exec:
+            command:
+            - faust
+            - -A
+            - inference.stream_processor_faust
+            - agents
+          initialDelaySeconds: 30
+          periodSeconds: 15
+        name: faust-worker
+        resources:
+          limits:
+            cpu: 1000m
+            memory: 2Gi
+          requests:
+            cpu: 500m
+            memory: 1Gi
+        securityContext:
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tsoc-api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: tsoc-api
+  template:
+    metadata:
+      labels:
+        app: tsoc-api
+    spec:
+      containers:
+      - env:
+        - name: X_API_KEY
+          valueFrom:
+            secretKeyRef:
+              key: api-key
+              name: tsoc-secrets
+        image: your-registry.com/tsoc/api:v1.0
+        livenessProbe:
+          httpGet:
+            path: /docs
+            port: 8000
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        name: fastapi
+        ports:
+        - containerPort: 8000
+        readinessProbe:
+          httpGet:
+            path: /docs
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        securityContext:
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true

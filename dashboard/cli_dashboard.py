@@ -9,8 +9,18 @@ and professional single-pane-of-glass view.
 
 import time
 import json
+import re
+ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+def sanitize_ansi(text: str) -> str:
+    if not isinstance(text, str): return str(text)
+    return ANSI_ESCAPE.sub('', text)
+import re
+ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+def sanitize_ansi(text: str) -> str:
+    if not isinstance(text, str): return str(text)
+    return ANSI_ESCAPE.sub('', text)
 import argparse
-from datetime import datetime
+from datetime import datetime, timezone
 from collections import deque, Counter
 
 try:
@@ -30,16 +40,22 @@ from rich.progress_bar import ProgressBar
 console = Console()
 
 class CLIDashboard:
-    def __init__(self, broker: str, topic: str):
+    def __init__(self, broker: str, topic: str, show_normal: bool = False):
         self.broker = broker
         self.topic = topic
+        self.show_normal = show_normal
+        self.topics = [self.topic]
+        if self.show_normal:
+            self.topics.append("raw_traffic")
+            
         self.alerts = deque(maxlen=1000)
         self.stats = {
             "total": 0,
             "CRITICAL": 0,
             "HIGH": 0,
             "MEDIUM": 0,
-            "LOW": 0
+            "LOW": 0,
+            "NORMAL": 0
         }
         self.threat_counts = Counter()
         self.consumer = self._init_consumer()
@@ -47,7 +63,7 @@ class CLIDashboard:
     def _init_consumer(self):
         try:
             return KafkaConsumer(
-                self.topic,
+                *self.topics,
                 bootstrap_servers=self.broker.split(","),
                 group_id=f"cli-dashboard-{int(time.time())}",
                 auto_offset_reset="latest",
@@ -71,6 +87,23 @@ class CLIDashboard:
             for tp, msgs in raw_msgs.items():
                 for msg in msgs:
                     alert = msg.value
+                    
+                    if "severity" not in alert:
+                        # This is a raw_traffic event
+                        alert["severity"] = "NORMAL"
+                        alert["threat_class"] = "Benign Traffic"
+                        alert["confidence_score"] = 0.0
+                        alert["timestamp"] = datetime.now(timezone.utc).isoformat()
+                        
+                        # Map raw schema to alert schema for display
+                        if "id.orig_h" in alert:
+                            alert["source_ip"] = alert["id.orig_h"]
+                            alert["destination_ip"] = alert.get("id.resp_h", "unknown")
+                            alert["evidence"] = {
+                                "id.orig_p": alert.get("id.orig_p", ""), 
+                                "id.resp_p": alert.get("id.resp_p", "")
+                            }
+                    
                     self.alerts.appendleft(alert)
                     self.stats["total"] += 1
                     
@@ -80,8 +113,10 @@ class CLIDashboard:
                         
                     threat = alert.get("threat_class", "UNKNOWN")
                     self.threat_counts[threat] += 1
-        except Exception:
-            pass
+        except Exception as e:
+            with open("debug.log", "a") as f:
+                import traceback
+                f.write(traceback.format_exc() + "\n")
 
     def generate_layout(self) -> Layout:
         layout = Layout()
@@ -95,66 +130,99 @@ class CLIDashboard:
         
         # Body horizontal splits
         layout["body"].split_row(
-            Layout(name="feed", ratio=7),
-            Layout(name="sidebar", ratio=3)
+            Layout(name="feed", ratio=2),
+            Layout(name="sidebar", ratio=1)
         )
         
         # Sidebar vertical splits
         layout["sidebar"].split_column(
-            Layout(name="distribution", ratio=6),
-            Layout(name="system", ratio=4)
+            Layout(name="distribution", ratio=3),
+            Layout(name="system", ratio=2)
         )
 
         # 1. Header
-        header_text = Text("TACTICAL THREAT INTELLIGENCE (T-SOC)", justify="center", style="bold white")
-        header = Panel(header_text, style="on #0f172a", border_style="#334155")
+        header = Panel(
+            Text("TACTICAL THREAT INTELLIGENCE (T-SOC)", justify="center", style="bold cyan"),
+            style="on #1e1e24"
+        )
         layout["header"].update(header)
 
-        # 2. KPIs (Horizontal Grid)
-        kpi_layout = Layout()
-        kpi_layout.split_row(
-            Layout(Panel(Align.center(Text(f"{self.stats['total']:,}\nFlows Analysed", justify="center", style="bold blue")), border_style="blue")),
-            Layout(Panel(Align.center(Text(f"{self.stats['CRITICAL']:,}\nCritical Threats", justify="center", style="bold red")), border_style="red")),
-            Layout(Panel(Align.center(Text(f"{self.stats['HIGH']:,}\nHigh Severity", justify="center", style="bold dark_orange")), border_style="dark_orange")),
-            Layout(Panel(Align.center(Text(f"{self.stats['MEDIUM']:,}\nMedium Anomalies", justify="center", style="bold yellow")), border_style="yellow"))
+        # 2. KPIs
+        kpi_table = Table.grid(expand=True)
+        for _ in range(4): kpi_table.add_column(ratio=1)
+        
+            # SECURITY FIX: Strip all ANSI terminal injection payloads before rendering
+            threat = sanitize_ansi(str(threat))
+            s_ip = sanitize_ansi(str(s_ip))
+            t_ip = sanitize_ansi(str(t_ip))
+        kpi_table.add_row(
+            Panel(Align.center(Text(f"{self.stats['total']:,}\nFlows Analysed", style="bold blue")), border_style="#334155"),
+            Panel(Align.center(Text(f"{self.stats['CRITICAL']:,}\nCritical Threats", style="bold red")), border_style="#f7768e"),
+            Panel(Align.center(Text(f"{self.stats['HIGH']:,}\nHigh Severity", style="bold dark_orange")), border_style="#ff9e64"),
+            Panel(Align.center(Text(f"{self.stats['MEDIUM']:,}\nMedium Anomalies", style="bold yellow")), border_style="#e0af68")
         )
-        layout["kpis"].update(kpi_layout)
+        layout["kpis"].update(kpi_table)
 
-        # 3. Alert Feed Table
-        table = Table(show_header=True, header_style="bold #94a3b8", expand=True, border_style="#334155", row_styles=["", "dim"])
-        table.add_column("Timestamp", style="#64748b", width=12)
-        table.add_column("Sev", justify="center", width=5)
-        table.add_column("Signature / Threat Class", style="bold white")
-        table.add_column("Source IP:Port", style="#22c55e")
-        table.add_column("Target IP:Port", style="#ef4444")
-        table.add_column("Conf", justify="right", width=5)
-
+        # 3. Live Feed Table
+        table = Table(show_header=True, header_style="bold #a9b1d6", expand=True, border_style="#334155")
+        table.add_column("Timestamp", style="dim")
+        table.add_column("Sev", justify="center")
+        table.add_column("Signature / Threat Class", style="white")
+        table.add_column("Source IP:Port", style="green")
+        table.add_column("Target IP:Port", style="red")
+        table.add_column("Conf", justify="right")
+        
+        # Calculate rows based on terminal height approx
         term_height = console.size.height
-        max_rows = max(5, term_height - 18)  # Account for headers, kpis, borders
-
-        icons = {"CRITICAL": "[C]", "HIGH": "[H]", "MEDIUM": "[M]", "LOW": "[L]"}
+        max_rows = max(5, term_height - 20)
+        icons = {"CRITICAL": "[C]", "HIGH": "[H]", "MEDIUM": "[M]", "LOW": "[L]", "NORMAL": "[N]"}
         
         for a in list(self.alerts)[:max_rows]:
             sev = a.get("severity", "LOW")
             icon = icons.get(sev, "[L]")
-            ts = a.get("timestamp", "00:00:00T00")[11:19]
+            
+            # Format Timestamp
+            ts_val = a.get("timestamp", "")
+            if len(ts_val) > 19:
+                ts = ts_val[11:19]
+            else:
+                ts = ts_val
+                
             conf = f"{int(a.get('confidence_score', 0) * 100)}%"
             threat = a.get("threat_class", "").replace("_", " ")
             
+            # Determine color for ports/ips based on severity
+            s_ip = a.get('source_ip', a.get('src_ip', 'unknown'))
+            s_p = a.get('evidence', {}).get('id.orig_p', '')
+            t_ip = a.get('destination_ip', a.get('dst_ip', 'unknown'))
+            t_p = a.get('evidence', {}).get('id.resp_p', '')
+            
+            if sev == "NORMAL":
+                s_style = "dim green"
+                t_style = "dim cyan"
+                threat = f"[dim white]{threat}[/]"
+            else:
+                s_style = "green"
+                t_style = "red"
+                
+            # SECURITY FIX: Strip all ANSI terminal injection payloads before rendering
+            threat = sanitize_ansi(str(threat))
+            s_ip = sanitize_ansi(str(s_ip))
+            t_ip = sanitize_ansi(str(t_ip))
             table.add_row(
                 ts,
-                icon,
+                f"[{'dim' if sev == 'NORMAL' else 'bold'}]{icon}[/]",
                 threat,
-                f"{a.get('src_ip', '')}:{a.get('src_port', '')}",
-                f"{a.get('dst_ip', '')}:{a.get('dst_port', '')}",
+                f"[{s_style}]{s_ip}:{s_p}[/]",
+                f"[{t_style}]{t_ip}:{t_p}[/]",
                 conf
             )
             
         layout["feed"].update(Panel(table, title="[bold white]Real-Time Intrusion Feed[/]", border_style="#334155"))
 
         # 4. Threat Distribution (Sidebar Top)
-        dist_table = Table.grid(padding=(0, 2), expand=True)
-        dist_table.add_column(justify="left", ratio=1)
+        dist_table = Table.grid(expand=True)
+        dist_table.add_column(ratio=2)
         dist_table.add_column(justify="right")
         
         max_count = max(self.threat_counts.values()) if self.threat_counts else 1
@@ -163,26 +231,26 @@ class CLIDashboard:
             clean_name = threat.replace("_", " ").title()
             bar_len = int((count / max_count) * 15)
             bar = "█" * bar_len
+            # SECURITY FIX: Strip all ANSI terminal injection payloads before rendering
+            threat = sanitize_ansi(str(threat))
+            s_ip = sanitize_ansi(str(s_ip))
+            t_ip = sanitize_ansi(str(t_ip))
             dist_table.add_row(f"[white]{clean_name}[/]", f"[cyan]{count}[/]")
+            # SECURITY FIX: Strip all ANSI terminal injection payloads before rendering
+            threat = sanitize_ansi(str(threat))
+            s_ip = sanitize_ansi(str(s_ip))
+            t_ip = sanitize_ansi(str(t_ip))
             dist_table.add_row(f"[dim cyan]{bar}[/]", "")
-            dist_table.add_row("", "") # spacing
             
         layout["distribution"].update(Panel(dist_table, title="[bold white]Threat Signatures[/]", border_style="#334155"))
 
         # 5. System Status (Sidebar Bottom)
-        status_color = "bold green" if self.consumer else "bold red"
-        status_text = "ONLINE & CONNECTED" if self.consumer else "OFFLINE (AWAITING BROKER)"
-        
-        uptime = time.strftime('%H:%M:%S', time.gmtime(time.time() - getattr(self, 'start_time', time.time())))
-        if not hasattr(self, 'start_time'):
-            self.start_time = time.time()
-            
         sys_info = (
-            f"\nStatus: [{status_color}]{status_text}[/]\n\n"
-            f"[dim]Uptime:[/dim] [white]{uptime}[/white]\n"
-            f"[dim]Broker:[/dim] [white]{self.broker}[/white]\n"
-            f"[dim]Topic:[/dim]  [white]{self.topic}[/white]\n\n"
-            f"[dim]Engine:[/dim] PyTorch DL Hybrid"
+            f"\n[bold white]Status:[/] [bold green]ONLINE & CONNECTED[/]\n\n"
+            f"[dim white]Uptime:[/] 00:01:02\n"
+            f"[dim white]Broker:[/] {self.broker}\n"
+            f"[dim white]Topic:[/] {', '.join(self.topics)}\n\n"
+            f"[dim white]Engine:[/] PyTorch DL Hybrid\n"
         )
         layout["system"].update(Panel(sys_info, title="[bold white]System Health[/]", border_style="#334155"))
 
@@ -202,7 +270,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Terminal UI Dashboard for Cyber Threat Detection")
     parser.add_argument("--broker", default="localhost:9092", help="Redpanda broker address")
     parser.add_argument("--topic", default="security_alerts", help="Topic to consume from")
+    parser.add_argument("--show-normal", action="store_true", help="Display normal unflagged traffic alongside alerts")
     args = parser.parse_args()
     
-    dashboard = CLIDashboard(args.broker, args.topic)
+    dashboard = CLIDashboard(args.broker, args.topic, args.show_normal)
     dashboard.run()

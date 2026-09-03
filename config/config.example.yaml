@@ -1,0 +1,19 @@
+kafka:
+  bootstrap_servers: "localhost:9092"
+  consumer_group: "soc-stream-processor"
+  auto_offset_reset: "latest"
+
+topics:
+  inbound: "raw_traffic"
+  alerts: "security_alerts"
+  incidents: "incidents"
+  dead_letter: "dead_letter_events"
+  metrics: "system_metrics"
+
+models:
+  dga_cnn: "models/cnn_dga.pt"
+  autoencoder: "models/autoencoder_flow.pt"
+
+ingestion:
+  max_batch_size: 1000
+  zeek_logs_dir: "data/zeek_logs"
