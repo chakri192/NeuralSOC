@@ -39,7 +39,7 @@ class IncidentCorrelator:
         
         try:
             with Lock(self.redis, lock_name=f"lock:{src_ip}", timeout=10, blocking_timeout=2):
-                raw = self._correlate_script(keys=[key], args=[self.time_window_sec, json.dumps(alert), 100])
+                raw = self._correlate_script(keys=[key], args=[self.time_window_sec, 100, json.dumps(alert)])
                 if not raw:
                     return None
                     

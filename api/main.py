@@ -39,7 +39,6 @@ def get_remote_address(req: Request):
         hops = [h.strip() for h in xff.split(",") if h.strip()]
         return hops[0] if hops else req.client.host
     return req.client.host
-    return req.client.host
 
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter

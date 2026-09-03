@@ -3,7 +3,6 @@ import json
 import os
 import time
 import os
-MAX_BATCH_SIZE = 100
 from kafka import KafkaConsumer
 from api.database import SessionLocal, engine, Base
 from api.models import Alert
@@ -68,7 +67,12 @@ MAX_BATCH_SIZE = 100
                 for msg in batch:
                     try:
                         import uuid
-                        db.add(Alert(**msg.__dict__ if hasattr(msg, '__dict__') else msg))
+                        if isinstance(msg, dict): 
+                            record = msg 
+                        else: 
+                            record = {k: v for k, v in msg.__dict__.items() if not k.startswith('_')}
+                        
+                        db.add(Alert(**record))
                         db.commit()
                     except Exception:
                         db.rollback()
@@ -76,7 +80,7 @@ MAX_BATCH_SIZE = 100
                             os.makedirs("/tmp/dlq", exist_ok=True)
                             with open("/tmp/dlq/alerts.jsonl", "a") as df:
                                 import json
-                                df.write(json.dumps({"poison": msg.__dict__ if hasattr(msg, '__dict__') else msg, "err": str(e)}) + "
+                                df.write(json.dumps({"poison": record, "err": str(e)}) + "
 ")
                         except Exception:
                             pass
