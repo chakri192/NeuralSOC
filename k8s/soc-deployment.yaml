@@ -44,6 +44,22 @@ spec:
           requests:
             cpu: 500m
             memory: 1Gi
+        livenessProbe:
+          exec:
+            command:
+            - python
+            - -c
+            - "import faust; print('ok')"
+          initialDelaySeconds: 60
+          periodSeconds: 20
+        readinessProbe:
+          exec:
+            command:
+            - python
+            - -c
+            - "import faust; print('ok')"
+          initialDelaySeconds: 15
+          periodSeconds: 10
         securityContext:
           readOnlyRootFilesystem: true
           runAsNonRoot: true

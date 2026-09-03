@@ -32,6 +32,10 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
+def get_remote_address(req: Request):
+    xff = req.headers.get("X-Forwarded-For")
+    return xff.split(",")[0].strip() if xff else req.client.host
+
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)

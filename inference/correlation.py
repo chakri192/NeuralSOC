@@ -35,7 +35,7 @@ class IncidentCorrelator:
         
         try:
             # Distributed lock prevents two-phase commit race conditions between Lua return and Python delete
-            with self.redis.lock(lock_name, timeout=5.0, blocking_timeout=3.0):
+            with self.redis.lock(lock_name, timeout=30.0, blocking_timeout=10.0):
                 raw_records = self._correlate_script(keys=[key], args=[self.time_window_sec, 100, json.dumps(alert)])
                 
                 records = []

@@ -44,7 +44,11 @@ spec:
     ports:
     - protocol: TCP
       port: 9092
-  - ports: # Allow DNS Resolution
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+    ports: # Allow DNS Resolution
     - protocol: UDP
       port: 53
     - protocol: TCP
@@ -84,7 +88,11 @@ spec:
     ports:
     - protocol: TCP
       port: 5432
-  - ports: # Allow DNS Resolution
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+    ports: # Allow DNS Resolution
     - protocol: UDP
       port: 53
     - protocol: TCP
