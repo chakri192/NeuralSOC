@@ -30,7 +30,7 @@ status = stream_manager.status()
 # Top bar layout - Professional Header
 col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
 with col1:
-    st.markdown("## 🛡️ T-SOC Platform")
+    st.markdown("##  T-SOC Platform")
 with col2:
     st.markdown("<br>**ENV:** <span style='color:#7aa2f7'>DEMO</span>", unsafe_allow_html=True)
 with col3:

@@ -1,10 +1,10 @@
-# 🛡️ Cyber Threat Taxonomy & Detection Matrix
+#  Cyber Threat Taxonomy & Detection Matrix
 
 Comprehensive mapping of all 6 threat categories specified in the Problem Statement to MITRE ATT&CK techniques, detection algorithms, and evidence schemas.
 
 ---
 
-## 📋 Threat Matrix Overview
+##  Threat Matrix Overview
 
 | Code | Threat Category | Primary Detection Technique | MITRE ATT&CK ID | Default Severity |
 | :--- | :--- | :--- | :--- | :--- |
@@ -17,7 +17,7 @@ Comprehensive mapping of all 6 threat categories specified in the Problem Statem
 
 ---
 
-## 🔍 Detailed Threat Class Breakdowns
+##  Detailed Threat Class Breakdowns
 
 ### 1. Volumetric / Protocol DDoS (`VOLUMETRIC_PROTOCOL_DDOS`)
 - **Vectors Monitored**:

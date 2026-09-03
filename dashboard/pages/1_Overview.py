@@ -22,7 +22,7 @@ status = stream_manager.status()
 
 col1, col2 = st.columns([9, 1])
 with col1:
-    st.markdown("## 📊 Operations Overview")
+    st.markdown("##  Operations Overview")
 with col2:
     if st.button("Refresh ↻"):
         st.rerun()

@@ -1,18 +1,18 @@
 # AI-Powered Cyber Threat Detection Enclave
 
-## 🎯 The Problem Statement
+##  The Problem Statement
 In highly secure environments (like nuclear power plants, financial mainframes, or intelligence databases), you cannot put traditional inline firewalls because an attacker could hack the firewall to breach the network. Instead, security teams use **Hardware Data Diodes**—physical devices that only allow data to flow *out*, never in. 
 
 **The Challenge:** How do we detect advanced cyber attacks (like Zero-Days, Botnets, and Exfiltration) in real-time when we are completely blind to the payload (due to encryption) and can only passively listen to a unidirectional stream of network metadata?
 
-## 🏗️ Architecture & Tech Stack
+##  Architecture & Tech Stack
 This project simulates a real-time, high-speed SOC (Security Operations Center) data pipeline:
 1. **Sensor:** Zeek Network Security Monitor logs.
 2. **Message Broker:** Redpanda (a high-performance C++ Kafka alternative) buffers the streaming logs.
 3. **AI Inference Engine:** A custom Python stream processor evaluates packets in under 1 millisecond.
 4. **Triage Dashboard:** An ultra-minimalist Streamlit Web UI for security analysts.
 
-## 🧠 The AI & Detection Engines
+##  The AI & Detection Engines
 To solve the payload-blindness constraint, the system uses a hybrid mix of **Deep Learning, Machine Learning, and Behavioral Statistics** to detect the 6 deadliest threat vectors:
 
 ### 1. Dictionary DGA & DNS Tunnelling (Deep Learning)
@@ -39,7 +39,7 @@ To solve the payload-blindness constraint, the system uses a hybrid mix of **Dee
 * **Threat:** A massive SYN Flood or UDP Reflection attack designed to take down services.
 * **Solution:** High-speed velocity calculations track packet-per-second deviations to flag asymmetric traffic spikes.
 
-## 🚀 Key "Wow" Factors for the Demo
+##  Key "Wow" Factors for the Demo
 * **Lightweight Edge-AI:** Despite using Deep Learning, the compiled `.pt` model binaries weigh less than **1.5 MB** combined. This means it requires ZERO GPUs, runs completely on the CPU, and can be deployed on a cheap Raspberry Pi at the edge of the network.
 * **Sub-Millisecond Inference:** By skipping massive LLMs and using targeted neural networks and Scikit-Learn forests, the engine processes and scores threats in microseconds.
 * **Enterprise Minimalist UI:** Built for real SOC analysts. No massive JSON dumps or bloated configurations—just ultra-clean critical telemetry and active compromise topology graphs.

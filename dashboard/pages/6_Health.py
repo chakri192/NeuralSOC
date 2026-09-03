@@ -16,7 +16,7 @@ if not status["broker_healthy"]:
     render_broker_unavailable()
     st.stop()
 
-st.success("### System Status: HEALTHY", icon="✅")
+st.success("### System Status: HEALTHY", icon="")
 
 st.markdown("---")
 

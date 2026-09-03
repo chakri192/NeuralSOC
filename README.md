@@ -1,11 +1,11 @@
-# ️ Data Diode Cyber Threat Defense Platform
+#  Data Diode Cyber Threat Defense Platform
 
 > **Lightweight, Real-Time AI Cyber Threat Detection for Unidirectional IP Traffic (Hardware Data Diode / Passive Monitoring Enclave)**  
 > Built for Apple Silicon (ARM64) • Sub-Millisecond Multi-Model Inference • Interactive SOC Defense Dashboard
 
 ---
 
-## ️ Architecture & Data Flow
+##  Architecture & Data Flow
 
 ```
    [ Unidirectional Link / Hardware Data Diode ]
@@ -60,20 +60,20 @@
 
 ##  Quality-of-Life (QoL) & Advanced Capabilities
 
-1. **️ Interactive Attack Graph & Threat Map**:
+1. ** Interactive Attack Graph & Threat Map**:
    - Visualizes internal compromised hosts connecting to external C2 nodes / drop-sites using interactive Plotly network topology graphs.
-2. **️ Automated SOC Incident Response Playbooks**:
+2. ** Automated SOC Incident Response Playbooks**:
    - Tailored remediation playbooks with copyable firewall ACL commands (`iptables` / ACLs), forensic checklists, and MITRE mitigation mappings.
-3. **⚡ Live Hackathon Demo Attack Injector**:
+3. ** Live Hackathon Demo Attack Injector**:
    - 1-click on-demand attack triggers in the UI allowing judges to inject Cobalt Strike handshakes, DGA storms, 75MB exfiltration bursts, and SYN floods.
 4. ** Executive Forensic Incident Report**:
    - One-click generated executive Markdown / CSV incident response audit summaries.
-5. **⚙️ Real-time Detection Configuration**:
+5. ** Real-time Detection Configuration**:
    - Dynamic threshold tuning sliders (Entropy cutoffs, Byte asymmetry ratios, Beaconing jitter tolerances) without restarting workers.
 
 ---
 
-## ⚡ Performance & Benchmarks (Apple Silicon ARM64)
+##  Performance & Benchmarks (Apple Silicon ARM64)
 
 - **Median Decision Latency (P50)**: **`22.75 µs` (`0.023 ms`)**
 - **Sustained Flow Rate**: **`>225 flows/second`** (single-thread worker)

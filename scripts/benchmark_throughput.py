@@ -94,7 +94,7 @@ def generate_benchmark_records(n: int = 50000) -> list:
 
 def run_benchmark(num_records: int = 50000):
     print("=" * 70)
-    print(f"  ⚡ UNIDIRECTIONAL THREAT DETECTION THROUGHPUT & LATENCY BENCHMARK")
+    print(f"   UNIDIRECTIONAL THREAT DETECTION THROUGHPUT & LATENCY BENCHMARK")
     print(f"  Target: {num_records:,} Streaming Flow Records on Apple Silicon (ARM64)")
     print("=" * 70)
     
@@ -153,7 +153,7 @@ def run_benchmark(num_records: int = 50000):
     mean_lat = np.mean(latencies_us)
     
     print("\n" + "=" * 70)
-    print("  📊 BENCHMARK RESULTS")
+    print("   BENCHMARK RESULTS")
     print("=" * 70)
     print(f"  • Total Flows Processed      : {num_records:,} flows")
     print(f"  • Total Time Elapsed         : {total_time_sec:.3f} seconds")
@@ -161,7 +161,7 @@ def run_benchmark(num_records: int = 50000):
     print(f"  • Wire Equivalent Bandwidth  : {equiv_mbps:,.2f} Mbps sustained")
     print(f"  • Threats Detected & Labelled: {alerts_count:,} alerts ({alerts_count/num_records*100:.2f}% anomaly rate)")
     print("-" * 70)
-    print("  ⏱️ LATENCY PERCENTILES (Per-Flow Decision Latency):")
+    print("  ⏱ LATENCY PERCENTILES (Per-Flow Decision Latency):")
     print(f"  • Mean Latency               : {mean_lat:.2f} µs ({mean_lat/1000:.3f} ms)")
     print(f"  • Median (P50) Latency       : {p50:.2f} µs ({p50/1000:.3f} ms)")
     print(f"  • 90th Percentile (P90)      : {p90:.2f} µs ({p90/1000:.3f} ms)")
@@ -169,7 +169,7 @@ def run_benchmark(num_records: int = 50000):
     print(f"  • 99th Percentile (P99)      : {p99:.2f} µs ({p99/1000:.3f} ms)")
     print(f"  • Max Latency                : {max_lat:.2f} µs ({max_lat/1000:.3f} ms)")
     print("=" * 70)
-    print("  ✅ Bounded latency requirement satisfied (< 1.0 ms guaranteed).")
+    print("   Bounded latency requirement satisfied (< 1.0 ms guaranteed).")
     print("=" * 70)
 
 

@@ -1,4 +1,4 @@
-# 🛡️ AI Cyber Threat Detector - Ultimate Demo Cheat Sheet
+#  AI Cyber Threat Detector - Ultimate Demo Cheat Sheet
 
 Print this out or keep it on a second monitor during your presentation. It covers exactly what to say and how to answer the hardest technical questions.
 

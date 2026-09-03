@@ -1,4 +1,4 @@
-# 🧠 Model Methodology & Feature Engineering
+#  Model Methodology & Feature Engineering
 
 ## 1. Overview
 This document details the mathematical formulation, feature engineering pipeline, model architectures, and validation strategy used in the **AI-Based Unidirectional IP Cyber Threat Detection Engine**.
