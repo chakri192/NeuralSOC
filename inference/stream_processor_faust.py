@@ -1,7 +1,24 @@
 import logging
-logging.basicConfig(level=logging.INFO)
+from pythonjsonlogger import jsonlogger
+import logging
+import sys
+
+logger = logging.getLogger("stream_processor")
+logger.setLevel(logging.INFO)
+handler = logging.StreamHandler(sys.stdout)
+formatter = jsonlogger.JsonFormatter('%(asctime)s %(levelname)s %(message)s')
+handler.setFormatter(formatter)
+logger.addHandler(handler)
+
 logger = logging.getLogger("faust")
 import os
+
+import signal
+
+@app.task
+async def on_stop():
+    logger.info("SIGTERM Received: Flushing Faust internal buffers before shutdown.")
+
 import sys
 import json
 import uuid

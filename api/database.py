@@ -3,10 +3,9 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 import os
 
 # Fallback to SQLite if PostgreSQL is not configured, but default to Postgres for the new architecture
-SQLALCHEMY_DATABASE_URL = os.getenv(
-    "DATABASE_URL", 
-    "postgresql://soc_admin:secure_soc_password@localhost:5432/tsoc"
-)
+SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL")
+if not SQLALCHEMY_DATABASE_URL:
+    raise RuntimeError("CRITICAL ERROR: DATABASE_URL environment variable is missing. Halting boot sequence.")
 
 # Connect args specific to SQLite vs Postgres
 connect_args = {}
