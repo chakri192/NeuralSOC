@@ -21,6 +21,16 @@ spec:
         emptyDir: {}
       containers:
       - env:
+        - name: SLACK_WEBHOOK_URL
+          valueFrom:
+            secretKeyRef:
+              name: tsoc-secrets
+              key: slack_webhook_url
+        - name: PAGERDUTY_ROUTING_KEY
+          valueFrom:
+            secretKeyRef:
+              name: tsoc-secrets
+              key: pagerduty_routing_key
         - name: REDPANDA_BROKERS
           value: soc-redpanda-cluster.prod.svc.cluster.local:9092
         image: your-registry.com/tsoc/stream-processor:v1.0
@@ -91,6 +101,16 @@ spec:
         emptyDir: {}
       containers:
       - env:
+        - name: SLACK_WEBHOOK_URL
+          valueFrom:
+            secretKeyRef:
+              name: tsoc-secrets
+              key: slack_webhook_url
+        - name: PAGERDUTY_ROUTING_KEY
+          valueFrom:
+            secretKeyRef:
+              name: tsoc-secrets
+              key: pagerduty_routing_key
         - name: TSOC_API_KEY
           valueFrom:
             secretKeyRef:

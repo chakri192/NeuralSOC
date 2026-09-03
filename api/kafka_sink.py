@@ -87,7 +87,7 @@ def run_sink():
                             req = urllib.request.Request(
                                 "https://events.pagerduty.com/v2/enqueue",
                                 data=json.dumps({
-                                    "routing_key": "YOUR_PAGERDUTY_KEY",
+                                    "routing_key": os.getenv("PAGERDUTY_ROUTING_KEY", ""),
                                     "event_action": "trigger",
                                     "payload": {
                                         "summary": f"SOC Database Rollback / Poison Pill: {e}",
