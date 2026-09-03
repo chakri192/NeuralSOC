@@ -27,7 +27,7 @@ class ThreatEnricher:
             return "Unknown"
             
         # Deterministic hash to map IP to a country
-        h = int(hashlib.md5(ip_address.encode(), usedforsecurity=False).hexdigest(), 16)
+        h = int(hashlib.sha256(ip_address.encode()).hexdigest(), 16)
         return self.countries[h % len(self.countries)]
 
     def get_deterministic_intel(self, ip_address: str, severity: str) -> str:
@@ -35,7 +35,7 @@ class ThreatEnricher:
         if severity not in ["high", "critical"]:
             return None
             
-        h = int(hashlib.md5((ip_address + "intel").encode(), usedforsecurity=False).hexdigest(), 16)
+        h = int(hashlib.sha256((ip_address + "intel").encode()).hexdigest(), 16)
         
         # Only 40% of critical alerts get a specific APT tag to maintain realism
         if h % 100 < 40:

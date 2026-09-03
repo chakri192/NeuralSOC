@@ -11,7 +11,8 @@ class IncidentCorrelator:
     def __init__(self):
         # Strict fallback enforcement
         redis_host = os.getenv("REDIS_HOST", "localhost")
-        self.redis = redis.Redis(host=redis_host, port=6379, db=0, decode_responses=True)
+        pool = redis.ConnectionPool(host=redis_host, port=6379, db=0, decode_responses=True)
+        self.redis = redis.Redis(connection_pool=pool)
         self.time_window_sec = int(os.getenv("CORRELATION_WINDOW", "300"))
 
     def add_alert(self, alert: dict):
@@ -22,6 +23,7 @@ class IncidentCorrelator:
         # Store alert in Redis list with TTL
         key = f"alerts:{src_ip}"
         self.redis.lpush(key, json.dumps(alert))
+        self.redis.ltrim(key, 0, 99)
         self.redis.expire(key, self.time_window_sec)
 
         # Retrieve and correlate

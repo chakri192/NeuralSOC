@@ -9,7 +9,6 @@ import asyncio
 import faust
 
 # Assume the repo is installed as a package, but keep path hack just in case
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from inference.features import extract_features
 from inference.rules import evaluate_rules
@@ -96,10 +95,10 @@ async def process_traffic(stream):
             # 1. Feature extraction in a thread to avoid blocking event loop
             features = await asyncio.to_thread(extract_features, event)
             
-            # 2. Run rule engine and ML model concurrently
+            # 2. Run rule engine and ML model concurrently with timeouts to prevent stalling
             rule_task = asyncio.to_thread(evaluate_rules, event, features)
             ml_task   = asyncio.to_thread(app.orchestrator.evaluate, event, features)
-            rule_res, ml_res = await asyncio.gather(rule_task, ml_task)
+            rule_res, ml_res = await asyncio.wait_for(asyncio.gather(rule_task, ml_task), timeout=5.0)
             
             detections = []
             detections.extend(rule_res)
