@@ -55,7 +55,7 @@ def format_alert(event: dict, detection: dict) -> dict:
         "schema_version": "1.0"
     }
 
-@app.agent(raw_traffic_topic)
+@app.agent(raw_traffic_topic, concurrency=4)
 async def process_traffic(stream):
     async for event in stream:
         try:
@@ -73,7 +73,7 @@ async def process_traffic(stream):
                 is_valid, err = validate_alert(alert)
             
                 if is_valid:
-                    alert = enricher.enrich(alert)
+                    alert = await enricher.enrich(alert)
                     await security_alerts_topic.send(value=alert)
                 
                     # 4. Correlate Incidents

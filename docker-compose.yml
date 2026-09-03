@@ -30,13 +30,36 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    
+  postgres:
+    image: postgres:15-alpine
+    container_name: soc-postgres
+    platform: linux/arm64
+    environment:
+      POSTGRES_USER: soc_admin
+      POSTGRES_PASSWORD: secure_soc_password
+      POSTGRES_DB: tsoc
+    ports:
+      - "5432:5432"
     volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U soc_admin -d tsoc"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - soc-net
+
+volumes:
       - redpanda-data:/var/lib/redpanda/data
     networks:
       - soc-net
 
 volumes:
   redpanda-data:
+    driver: local
+  postgres-data:
     driver: local
 
 networks:

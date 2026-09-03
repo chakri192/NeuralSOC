@@ -2,7 +2,8 @@ from fastapi import FastAPI, Depends, Security, HTTPException, status, Request, 
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from api.database import SessionLocal, engine, Base
-from api import models
+from api import models, schemas
+from typing import List
 import logging
 
 from fastapi.security.api_key import APIKeyHeader
@@ -26,6 +27,15 @@ async def get_api_key(api_key_header: str = Security(api_key_header)):
 
 
 app = FastAPI(title="T-SOC API", description="Enterprise SOC Backend")
+
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 
 from fastapi.middleware.cors import CORSMiddleware
 app.add_middleware(
@@ -65,14 +75,16 @@ def get_db():
         db.close()
 
 # 2. PERFORMANCE FIX: Strict Pydantic Query Bounds to prevent Database OOM crashes
-@app.get("/api/v1/alerts")
-def get_alerts(limit: int = Query(100, ge=1, le=1000), db: Session = Depends(get_db), api_key: str = Depends(get_api_key)):
+@app.get("/api/v1/alerts", response_model=List[schemas.AlertResponse])
+@limiter.limit("50/second")
+def get_alerts(request: Request, limit: int = Query(100, ge=1, le=1000), db: Session = Depends(get_db), api_key: str = Depends(get_api_key)):
     alerts = db.query(models.Alert).order_by(models.Alert.id.desc()).limit(limit).all()
     return alerts
 
 from sqlalchemy import func
-@app.get("/api/v1/stats")
-def get_stats(db: Session = Depends(get_db), api_key: str = Depends(get_api_key)):
+@app.get("/api/v1/stats", response_model=schemas.StatsResponse)
+@limiter.limit("50/second")
+def get_stats(request: Request, db: Session = Depends(get_db), api_key: str = Depends(get_api_key)):
     # Consolidate into a single DB round-trip
     results = db.query(
         func.count(models.Alert.id).label('total'),

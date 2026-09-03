@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 
 class ThreatEnricher:
@@ -41,7 +42,9 @@ class ThreatEnricher:
             return self.intel_tags[h % len(self.intel_tags)]
         return None
 
-    def enrich(self, alert: dict) -> dict:
+    async def enrich(self, alert: dict) -> dict:
+        # Simulate an asynchronous external API call
+        await asyncio.sleep(0.005)
         src_ip = alert.get("source_ip", "")
         
         # Determine if the attack is Inbound or Outbound
