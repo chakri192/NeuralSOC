@@ -54,7 +54,7 @@ jobs:
       - name: Build image
         run: docker build -t tsoc:latest .
       - name: Trivy image scan
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@0.14.0
         with:
           image-ref: 'tsoc:latest'
           format: 'table'

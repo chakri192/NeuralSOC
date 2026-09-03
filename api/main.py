@@ -61,7 +61,7 @@ def healthcheck():
 @app.get("/metrics")
 @limiter.limit("10/second")
 def metrics():
-    return {"active_connections": 0, "cpu_usage": 0.0} # Placeholder for prometheus
+    return {"cpu": psutil.cpu_percent(), "mem": psutil.virtual_memory().percent} # Placeholder for prometheus
 
 
 # 1. SECURITY FIX: Global Exception Handler to prevent Stack Trace Leakage

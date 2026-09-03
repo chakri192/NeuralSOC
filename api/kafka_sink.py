@@ -2,41 +2,33 @@ import logging
 import json
 import os
 import time
-import os
+import uuid
 from kafka import KafkaConsumer
 from api.database import SessionLocal, engine, Base
 from api.models import Alert
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("sink")
+logger = logging.getLogger(__name__)
 
-# Initialize the database tables if they don't exist
+# Kafka configuration
+brokers = os.getenv("REDPANDA_BROKERS", "soc-redpanda-cluster.prod.svc.cluster.local:9092")
+topic = os.getenv("ALERTS_TOPIC", "security_alerts")
+
+# Initialize database schema
 Base.metadata.create_all(bind=engine)
 
 def run_sink():
-    logger.info("[*] Starting High-Throughput Redpanda-to-Database Sink...")
-    brokers = os.environ.get("REDPANDA_BROKERS")
-    if not brokers:
-        raise RuntimeError("REDPANDA_BROKERS environment variable is missing")
+    # Fix: Ensure brokers splits properly
+    consumer = KafkaConsumer(
+        topic,
+        bootstrap_servers=[b.strip() for b in brokers.split(',') if b.strip()],
+        group_id="tsoc-db-sink-group",
+        auto_offset_reset="earliest",
+        enable_auto_commit=False,
+        value_deserializer=lambda m: m
+    )
     
-    try:
-        # DATA LOSS FIX: enable_auto_commit=False prevents dropped alerts
-        consumer = KafkaConsumer(
-            'security_alerts',
-            bootstrap_servers=[b.strip() for b in brokers.split(',') if b.strip()],
-            auto_offset_reset='earliest',
-            enable_auto_commit=False, 
-            group_id='db_sink_group',
-            value_deserializer=lambda x: json.loads(x.decode('utf-8'))
-        )
-    except Exception as e:
-        logger.error(f"Failed to connect to Redpanda: {e}")
-        return
-        
     db = SessionLocal()
-    import time
-import os
-MAX_BATCH_SIZE = 100
+    MAX_BATCH_SIZE = 100
     batch = []
     last_commit = time.time()
     
@@ -53,7 +45,7 @@ MAX_BATCH_SIZE = 100
                         logger.error(f"Skip bad message: {e}")
                         continue
                         
-        if len(batch) >= MAX_BATCH_SIZE or (len(batch) > 0 and time.time() - last_commit >= 5):
+        if (len(batch) >= MAX_BATCH_SIZE) or (len(batch) > 0 and time.time() - last_commit >= 5):
             try:
                 db.bulk_save_objects(batch)
                 db.flush()
@@ -80,9 +72,12 @@ MAX_BATCH_SIZE = 100
                             os.makedirs("/tmp/dlq", exist_ok=True)
                             with open("/tmp/dlq/alerts.jsonl", "a") as df:
                                 import json
-                                df.write(json.dumps({"poison": record, "err": str(e)}) + "
-")
+                                df.write(json.dumps({"poison": record, "err": str(e)}) + "\n")
                         except Exception:
                             pass
                 batch.clear()
                 last_commit = time.time()
+
+if __name__ == "__main__":
+    logger.info("Starting Kafka to Postgres sink...")
+    run_sink()
