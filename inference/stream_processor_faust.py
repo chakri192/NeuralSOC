@@ -1,31 +1,14 @@
 import logging
 from pythonjsonlogger import jsonlogger
-import logging
 import sys
-
-logger = logging.getLogger("stream_processor")
-logger.setLevel(logging.INFO)
-handler = logging.StreamHandler(sys.stdout)
-formatter = jsonlogger.JsonFormatter('%(asctime)s %(levelname)s %(message)s')
-handler.setFormatter(formatter)
-logger.addHandler(handler)
-
-logger = logging.getLogger("faust")
 import os
-
-import signal
-
-@app.task
-async def on_stop():
-    logger.info("SIGTERM Received: Flushing Faust internal buffers before shutdown.")
-
-import sys
 import json
 import uuid
 from datetime import datetime, timezone
+import asyncio
 import faust
 
-# Append parent dir for imports
+# Assume the repo is installed as a package, but keep path hack just in case
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from inference.features import extract_features
@@ -35,13 +18,31 @@ from inference.schemas import validate_alert
 from inference.correlation import IncidentCorrelator
 from inference.enrichment import ThreatEnricher
 
+# ----------------------------------------------------------------------
+# 1. Structured logger (JSON)
+# ----------------------------------------------------------------------
+logger = logging.getLogger("stream_processor")
+if not logger.handlers:
+    logger.setLevel(logging.INFO)
+    handler = logging.StreamHandler(sys.stdout)
+    formatter = jsonlogger.JsonFormatter('%(asctime)s %(levelname)s %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
+# Keep the same logger for Faust-related messages
+faust_logger = logging.getLogger("faust")
+faust_logger.handlers = logger.handlers
+faust_logger.setLevel(logging.INFO)
+
+# ----------------------------------------------------------------------
+# 2. Faust application definition
+# ----------------------------------------------------------------------
 BROKERS = os.getenv("REDPANDA_BROKERS", "127.0.0.1:9092")
 
 app = faust.App(
     'soc-stream-processor-cluster',
     broker=f'kafka://{BROKERS}',
-    value_serializer='json',
-    store='memory://'
+    value_serializer='json'
 )
 
 raw_traffic_topic = app.topic('raw_traffic')
@@ -49,9 +50,22 @@ security_alerts_topic = app.topic('security_alerts')
 incidents_topic = app.topic('incidents')
 dlq_topic = app.topic('dead_letter_events')
 
-orchestrator = ThreatModelOrchestrator()
-correlator = IncidentCorrelator()
-enricher = ThreatEnricher()
+# ----------------------------------------------------------------------
+# 3. Graceful shutdown task
+# ----------------------------------------------------------------------
+@app.task
+async def on_stop():
+    logger.info("SIGTERM received - stopping Faust app and flushing buffers")
+    await app.stop()
+
+# ----------------------------------------------------------------------
+# 4. Instantiate heavy objects once per Faust worker
+# ----------------------------------------------------------------------
+@app.signal(app.signals.startup)
+async def init_components(app, **kw):
+    app.orchestrator = ThreatModelOrchestrator()
+    app.correlator = IncidentCorrelator()
+    app.enricher = ThreatEnricher()
 
 def format_alert(event: dict, detection: dict) -> dict:
     return {
@@ -72,42 +86,47 @@ def format_alert(event: dict, detection: dict) -> dict:
         "schema_version": "1.0"
     }
 
+# ----------------------------------------------------------------------
+# 5. Agent Processing Loop
+# ----------------------------------------------------------------------
 @app.agent(raw_traffic_topic, concurrency=4)
 async def process_traffic(stream):
     async for event in stream:
         try:
-            # 1. Feature Extraction
-            features = extract_features(event)
-        
-            # 2. Detection Engine
+            # 1. Feature extraction in a thread to avoid blocking event loop
+            features = await asyncio.to_thread(extract_features, event)
+            
+            # 2. Run rule engine and ML model concurrently
+            rule_task = asyncio.to_thread(evaluate_rules, event, features)
+            ml_task   = asyncio.to_thread(app.orchestrator.evaluate, event, features)
+            rule_res, ml_res = await asyncio.gather(rule_task, ml_task)
+            
             detections = []
-            detections.extend(evaluate_rules(event, features))
-            detections.extend(orchestrator.evaluate(event, features))
-        
-            # 3. Publish Alerts
+            detections.extend(rule_res)
+            detections.extend(ml_res)
+            
+            # 3. Process each detection
             for det in detections:
                 alert = format_alert(event, det)
                 is_valid, err = validate_alert(alert)
-            
-                if is_valid:
-                    alert = await enricher.enrich(alert)
-                    await security_alerts_topic.send(value=alert)
                 
-                    # 4. Correlate Incidents
-                    incident = correlator.add_alert(alert)
+                if is_valid:
+                    alert = await app.enricher.enrich(alert)
+                    send_fut = await security_alerts_topic.send(value=alert)
+                    await send_fut
+                    
+                    # Correlation in a thread
+                    incident = await asyncio.to_thread(app.correlator.add_alert, alert)
                     if incident:
-                        await incidents_topic.send(value=incident)
+                        inc_fut = await incidents_topic.send(value=incident)
+                        await inc_fut
                 else:
                     logger.error(f"[Faust] Dropped invalid alert schema: {err}")
         except Exception as e:
-            logger.error(f"[DLQ] Pipeline crash prevented. Routing bad event to DLQ. Error: {str(e)}")
-            
-            # Redact PII before sending to DLQ
-            safe_event = dict(event)
-            safe_event.pop("id.orig_h", None)
-            safe_event.pop("id.resp_h", None)
+            logger.exception("[DLQ] Pipeline crash prevented. Routing to dead-letter")
+            safe_event = {k: v for k, v in event.items() if k not in {"id.orig_h", "id.resp_h", "uid", "payload"}}
             await dlq_topic.send(value={"raw_event": safe_event, "error": str(e), "timestamp": datetime.now(timezone.utc).isoformat()})
-
+            raise
 
 if __name__ == '__main__':
     app.main()
