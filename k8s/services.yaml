@@ -19,5 +19,5 @@ spec:
     app: tsoc-stream-processor
   ports:
     - protocol: TCP
-      port: 8000
-      targetPort: 8000
+      port: 9092
+      targetPort: 9092

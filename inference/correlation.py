@@ -11,24 +11,35 @@ class IncidentCorrelator:
     def __init__(self):
         # Strict fallback enforcement
         redis_host = os.getenv("REDIS_HOST", "localhost")
-        pool = redis.ConnectionPool(host=redis_host, port=6379, db=0, decode_responses=True, socket_timeout=2.0, socket_connect_timeout=2.0)
+        pool = redis.ConnectionPool(host=redis_host, port=6379, db=0, decode_responses=True, socket_timeout=2.0, socket_connect_timeout=2.0, max_connections=100)
         self.redis = redis.Redis(connection_pool=pool)
         self.time_window_sec = int(os.getenv("CORRELATION_WINDOW", "300"))
+
+        self._correlate_script = self.redis.register_script('''
+            local key = KEYS[1]
+            local window = tonumber(ARGV[1])
+            local max_records = tonumber(ARGV[2])
+            redis.call('LPUSH', key, ARGV[3])
+            redis.call('LTRIM', key, 0, max_records - 1)
+            redis.call('EXPIRE', key, window)
+            local records = redis.call('LRANGE', key, 0, -1)
+            return records
+        ''')
+
 
     def add_alert(self, alert: dict):
         src_ip = alert.get("source_ip")
         if not src_ip or src_ip == "unknown":
             return None
 
-        # Store alert in Redis list with TTL
         key = f"alerts:{src_ip}"
-        self.redis.lpush(key, json.dumps(alert))
-        self.redis.ltrim(key, 0, 99)
-        self.redis.expire(key, self.time_window_sec)
-
-        # Retrieve and correlate
-        records = self.redis.lrange(key, 0, -1)
-        records = [json.loads(r) for r in records]
+        raw_records = self._correlate_script(keys=[key], args=[self.time_window_sec, 100, json.dumps(alert)])
+        records = []
+        for r in raw_records:
+            try:
+                records.append(json.loads(r))
+            except Exception:
+                pass # Drop corrupt JSON (Fix 5.4 DoS)
         
         # Incident generation logic...
         tactics = set()

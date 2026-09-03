@@ -42,7 +42,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=os.getenv("ALLOWED_ORIGINS", "http://localhost:8501").split(","), # In production restrict this
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -51,6 +51,7 @@ def healthcheck():
     return {"status": "ok", "version": "1.0.0"}
 
 @app.get("/metrics")
+@limiter.limit("10/second")
 def metrics():
     return {"active_connections": 0, "cpu_usage": 0.0} # Placeholder for prometheus
 

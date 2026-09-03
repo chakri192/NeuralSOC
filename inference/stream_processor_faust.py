@@ -42,7 +42,10 @@ BROKERS = os.getenv("REDPANDA_BROKERS", "127.0.0.1:9092")
 # ----------------------------------------------------------------------
 # Thread Pool
 # ----------------------------------------------------------------------
-executor = ThreadPoolExecutor(max_workers=16)
+import torch
+torch.set_num_threads(1)
+CPU_COUNT = max(1, os.cpu_count() or 1)
+executor = ThreadPoolExecutor(max_workers=CPU_COUNT)
 
 app = faust.App(
     'soc-stream-processor-cluster',
@@ -62,6 +65,10 @@ dlq_topic = app.topic('dead_letter_events')
 async def on_stop():
     logger.info("SIGTERM received - stopping Faust app and flushing buffers")
     await app.stop()
+    try:
+        app.correlator.redis.connection_pool.disconnect()
+    except Exception:
+        pass
 
 # ----------------------------------------------------------------------
 # 4. Instantiate heavy objects once per Faust worker

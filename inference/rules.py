@@ -7,7 +7,7 @@ def evaluate_rules(event: dict, features: dict) -> list:
     # 1. DDoS (Replaces Failed Connection Spike)
     # Volumetric/protocol-based denial of service.
     if evt_type == "conn":
-        if event.get("conn_state") == "REJ" or event.get("orig_pkts", 0) > 10000:
+        if event.get("conn_state") == "REJ" or int(event.get("orig_pkts", 0)) > 10000:
             alerts.append({
                 "rule_id": "RULE_DDOS_VOLUMETRIC",
                 "threat_class": "DDoS",
