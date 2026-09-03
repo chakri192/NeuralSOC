@@ -1,192 +1,220 @@
-# 📋 Enterprise SOC – End‑to‑End Code Audit
+## 📂 Repository Overview & Audit Scope  
 
-**Scope** – All source files under **/Users/chakri/Downloads/hackaton/project** (API, Kafka sink, Streamlit UI, shared data‑access layer, inference pipeline, Kubernetes manifests, config, scripts, tests, and supporting assets).
+| Top‑level folder | What it contains | Primary security / scalability concerns |
+|------------------|------------------|----------------------------------------|
+| `api/` | FastAPI entry point, DB session handling, models/schemas, Kafka sink | Authentication, TLS, DB connection pooling, request‑ID, rate‑limit, error handling |
+| `inference/` | Stream‑processor (Faust), ML model‑orchestrator, rule engine, enrichment, correlation, feature extraction | Model loading, per‑event inference, deterministic hashing, back‑pressure, Redis use, rule quality |
+| `ingest/` | Simulated Zeek log generator, PCAP ingester, tail‑to‑Redpanda script | File I/O, privilege escalation, path handling |
+| `dashboard/` | Streamlit web UI and Textual terminal UI | Blocking `requests` calls, missing async, UI‑side credential leakage |
+| `k8s/` | Deployment manifests for the stream processor and API | Liveness/readiness probes, resource limits, secrets, network policies, autoscaling |
+| `models/` | Pre‑trained Torch artifacts (`cnn_dga.pt`) and manifest files | Model integrity, checksum handling |
+| `scripts/` | Benchmark, training, topic‑creation utilities | External command execution, env‑leakage |
+| `shared/` | Common data‑access helpers, formatters, schemas | Input validation, serialization |
+| `tests/` | Unit / integration test suite | Test coverage, mocking of external services |
+| `docs/`, `audit/`, `demos/` | Documentation, audit reports, demo recordings | No runtime impact |
 
----
-
-## 1️⃣ FastAPI Backend (`api/`)
-
-| File / Line(s) | Issue | Severity | Why it matters | Fix |
-|----------------|-------|----------|----------------|-----|
-| **main.py** – 12 | Hard‑coded production API key. | 🟥 | Credential exposed in source, any accidental publish leaks it. | Load from **Kubernetes secret / env var** (`os.getenv("TSOC_API_KEY")`). Fail fast if missing. |
-| **main.py** – 13‑18 | Plain equality check; not constant‑time. | 🟧 | Timing‑attack can confirm a valid key. | Use `secrets.compare_digest(api_key_header or "", API_KEY)`. |
-| **main.py** – 19‑21 | Detailed 401 message (“Invalid or missing API Key”). | 🟨 | Discloses authentication policy → enumeration. | Return generic `"Unauthorized"` without detail. |
-| **main.py** – 23 | `Base.metadata.create_all` on import. | 🟨 | Schema changes can be applied silently, masking migration problems. | Remove; use **Alembic** migrations. |
-| **main.py** – 27‑34 | Global exception handler hides stack traces but logger isn’t **structured** or rotated. | 🟩 | Ops lose context; log files can fill disk. | Configure `python-json-logger` + `RotatingFileHandler` (or ship to central log collector). |
-| **main.py** – 36‑41 | `get_db()` never rolls back on DB errors. | 🟧 | Session stays broken → cascade failures. |
-| **main.py** – 44‑47 | Returns raw ORM objects, no pagination, no Pydantic model. | 🟧 | Serialization bugs, OOM on large result sets, no OpenAPI schema. |
-| **main.py** – 44‑46 | No **rate limiting** or **CORS**. | 🟧 | A valid key can be hammered → DoS, and any origin can call the API. |
-| **main.py** – 49‑55 | Four separate `count()` queries. | 🟨 | Four round‑trips to SQLite; each acquires a WAL lock → scalability bottleneck. |
-| **main.py** – overall | No **health‑check** (`/healthz`, `/ready`) or **metrics** endpoint. | 🟧 | K8s can’t detect pod failure; ops have no visibility. |
-| **database.py** – 4‑6 | Relative SQLite URL (`sqlite:///./data/soc_alerts.db`). | 🟨 | On redeploy the DB may be lost or path may resolve incorrectly. |
-| **database.py** – 6 | `check_same_thread=False`. | 🟧 | Disables SQLite’s built‑in thread safety; concurrent access can corrupt the DB. |
-| **database.py** – 8‑13 | PRAGMA `journal_mode=WAL` & `synchronous=NORMAL`. | 🟨 | `NORMAL` may lose recent writes on power loss. |
-| **models.py** – 7‑9 | `alert_id` stored as plain string, predictable. | 🟧 | Enables enumeration attacks. |
-| **models.py** – 9‑10 | `timestamp` stored as `String`. | 🟧 | No timezone enforcement; lexical ordering can be wrong. |
-| **models.py** – 17‑19 | `evidence` stored as `Text` JSON string. | 🟨 | No DB‑level validation; extra (de)serialization cost. |
-| **models.py** – 12‑16 | Indexes added but **no full‑text index** for searching evidence. | 🟨 | Text searches will cause full‑table scans. |
-| **models.py** – overall | No **soft‑delete** / archival column. | 🟧 | Alerts accumulate forever → SQLite file grows without bound. |
-| **kafka_sink.py** – 12‑13 | Calls `Base.metadata.create_all` again (duplicate). | 🟨 | Redundant schema creation; masks migration issues. |
-| **kafka_sink.py** – 17 | Default broker fallback to `127.0.0.1:9092`. | 🟧 | In production the sink may silently connect to a local broker and lose data. |
-| **kafka_sink.py** – 21‑28 | Consumer created with `enable_auto_commit=False` but **no rebalance / timeout handling**. | 🟨 | Offsets may never be committed if the process stalls → duplicate processing on restart. |
-| **kafka_sink.py** – 34‑36 | Single long‑lived `SessionLocal()` reused for the whole process. | 🟧 | Stale connection after a DB error; memory leaks. |
-| **kafka_sink.py** – 40‑44 | Per‑message deduplication via `db.query(...).first()`. | 🟥 | Becomes a massive N × N bottleneck under high throughput; causes back‑pressure & OOM. |
-| **kafka_sink.py** – 46‑49 | Duplicate alerts are silently ignored (no log). | 🟨 | Hard to audit why alerts disappear. |
-| **kafka_sink.py** – 64‑66 | Batch‑commit condition `or (len(batch) > 0 and not records)` only commits when *no* records are returned; continuous traffic delays commits. | 🟧 | Alerts sit in memory for seconds → higher latency + risk of loss on crash. |
-| **kafka_sink.py** – 67‑71 | `bulk_save_objects` + `db.commit()` – any duplicate key error aborts the whole batch. | 🟨 | Wasteful retries, especially with high duplicate rate. |
-| **kafka_sink.py** – 69 | Calls `consumer.commit()` only after DB commit; no error handling for the commit itself. |
-| **kafka_sink.py** – 73‑76 | On DB error the entire batch is cleared (`batch.clear()`). | 🟧 | Potential **data loss** of alerts that failed to insert. |
-| **kafka_sink.py** – 78‑81 | `KeyboardInterrupt` handling does not close the Kafka consumer. |
-| **kafka_sink.py** – overall | No **metrics** (records processed, batch latency, errors). |
-| **kafka_sink.py** – overall | No **TLS / SASL** setup for Redpanda. |
+> **Bottom line:** The heart of the system (the data‑flow) lives in `inference/` and `api/`. The other directories either support that flow or provide UI / DevOps scaffolding. The audit therefore focuses on those, but every file is still examined for obvious red‑flags.
 
 ---
 
-## 2️⃣ Inference Pipeline (`inference/`)
+## 🔎 File‑by‑File Findings
 
-| File | Key Issues & Severity |
-|------|-----------------------|
-| **stream_processor_faust.py** | • Default `REDPANDA_BROKERS` fallback to localhost (🟧).<br> • `store='memory://'` non‑persistent tables (🟨).<br> • Topics created without `num_partitions` → single‑consumer bottleneck (🟥).<br> • Global singletons share mutable state (🟧).<br> • `@app.agent(..., concurrency=1)` → under‑utilised partitions (🟥).<br> • Synchronous feature extraction & rule evaluation block the event loop (🟥).<br> • Enrichment called without `await` → blocking I/O (🟥).<br> • DLQ payload includes raw event (PII) (🟥). |
-| **models.py** | • Hard‑coded checksum fallback (🟧).<br> • Model always loaded on CPU (🟨).<br> • No `torch.no_grad()` wrapper around inference (🟧).<br> • Silent fallback to mock mode on load errors (🟧).<br> • No batching, per‑event tensor creation (🟥). |
-| **features.py** | • Shannon entropy implemented O(N²) via `str.count` (🟧). |
-| **rules.py** | • `event.get("simulated", False)` guard disables detection in prod (🟧).<br> • Hard‑coded thresholds, no configuration (🟨). |
-| **correlation.py** | • In‑memory dict with fixed `max_tracked_ips=5000`; O(N) cleanup (🟧).<br> • No persistence; memory grows with time window (🟧). |
-| **enrichment.py** | • Deterministic demo data; no external I/O (🟨).<br> • Mutates input dict in‑place (🟧). |
-| **general** | • No **metrics** for latency / throughput.<br> • No **structured logging**.<br> • No **graceful shutdown** or signal handling.<br> • No **unit‑test coverage** (🟨). |
+### 1️⃣ `api/main.py`
 
-**Pipeline‑wide upgrades (high impact, low effort)**:
-1. Externalise thresholds to a config file.
-2. Batch inference.
-3. Replace in‑memory tables/correlation dict with Redis (or RocksDB).
-4. Add Prometheus metrics.
-5. Convert Faust agents to async & raise concurrency.
-6. Harden model loading (checksum verification, no mock fallback in prod).
-7. Implement graceful shutdown.
+* **Authentication** – API key read from env (`TSOC_API_KEY`). No secret rotation, stored in plaintext.
+* **Rate limiting** – Uses `slowapi` with `get_remote_address`; does **not** tie limits to the API key, making it easy to bypass with many IPs.
+* **CORS** – Origin list taken from env, defaults to `localhost`. If mis‑configured, could open the API to any site.
+* **Exception handling** – Global handler masks stack traces (good for security) but also hides useful debugging info. No correlation ID.
+* **DB session** – Synchronous SQLAlchemy session, no `pool_pre_ping`. If the DB restarts, the health check will still return “ok”.
+* **Metrics** – Placeholder endpoint returns static values; no real Prometheus integration.
+* **Probes** – No health‑check of DB connectivity; liveness / readiness are only at the K8s manifest level.
+
+**Quick Wins:** Move API key to K8s Secret, add TLS termination, switch to per‑API‑key rate limiting, add request‑ID middleware, expose real Prometheus metrics, enable async DB driver.
 
 ---
 
-## 3️⃣ Streamlit Front‑End (`dashboard/`)
+### 2️⃣ `api/database.py`
 
-| File / Line(s) | Issue | Severity | Why it matters | Fix |
-|----------------|-------|----------|----------------|-----|
-| **app.py** – 15‑26 | `check_for_updates()` runs a **blocking subprocess** and remote GitHub API call on every UI load. | 🟧 | UI hangs if GitHub is slow; reveals internal repo hash. |
-| **app.py** – 34‑38 | Loads local CSS via `st.markdown(..., unsafe_allow_html=True)`. | 🟨 | If an attacker can edit `app.css` they can inject arbitrary HTML/JS. |
-| **app.py** – 42 | Calls `stream_manager.start_listeners()` at import time. | 🟧 | Streamlit reloads the script on each interaction → spawns multiple background threads → resource exhaustion. |
-| **app.py** – 47‑48 | Update banner rendered with raw HTML (`unsafe_allow_html=True`). | 🟨 | Potential XSS if banner text is user‑controlled. |
-| **app.py** – 55‑58 | Hard‑coded environment labels. | 🟩 | Informational only. |
-| **app.py** – 64‑66 | If `broker_healthy` is false, only a custom “broker unavailable” component is shown; no cached data fallback. | 🟨 | Users see a blank UI while backend may be temporarily unreachable. |
-| **shared/data_access.py** – 15‑17 | Default `API_URL` points to localhost; default **hard‑coded API key** identical to production. | 🟥 | UI can unintentionally send production credentials to a dev server; key is exposed in source. |
-| **shared/data_access.py** – 19‑22 | Custom **singleton** pattern – Streamlit may run multiple processes, leading to divergent state. |
-| **shared/data_access.py** – 30‑33 | `self.alerts`/`self.stats` grow without expiration. |
-| **shared/data_access.py** – 71‑73 | Method signatures contain a non‑standard arrow (`-⟶`) – **syntax error**; file would not import. |
-| **shared/data_access.py** – 76‑80 | Mutates the original alert dict when parsing `evidence`. |
-| **shared/data_access.py** – 86‑93 | `status()` returns duplicate `incident_count` and `alert_count`. |
-| **shared/data_access.py** – 65‑67 | On any exception the UI marks `broker_healthy=False` without distinguishing auth vs. connectivity issues. |
-| **shared/data_access.py** – 50‑69 | Fixed 2‑second poll interval, no exponential back‑off. |
-| **shared/data_access.py** – overall | No **metrics** for poll success/failure or latency. |
-| **dashboard/** – overall | No authentication/authorization on the Streamlit UI. |
-| **dashboard/** – overall | UI relies on **polling** rather than push (WebSocket / SSE). |
+* **Mandatory `DATABASE_URL`** – Good fail‑fast, but the code will throw a runtime error if only SQLite is intended.
+* **SQLite fallback** – Allows `sqlite://` URLs with `check_same_thread=False`. No migration path from SQLite to Postgres, and the SQLite file lives on the pod’s root FS (read‑only FS flag conflicts).
+* **Engine** – Created without `pool_pre_ping`; stale connections can cause “connection closed” errors.
+
+**Quick Wins:** Enforce Postgres in prod, add `pool_pre_ping=True`, configure `pool_size`/`max_overflow`, and use Alembic for schema migrations.
 
 ---
 
-## 4️⃣ Kubernetes Deployment (`k8s/`)
+### 3️⃣ `api/models.py` & `api/schemas.py`
 
-| Issue | Severity | Why it matters | Fix |
-|-------|----------|----------------|-----|
-| Likely runs containers as **root** user. | 🟧 | Insecure default; container breakout risk. | Set `securityContext.runAsNonRoot: true` and a non‑root UID/GID. |
-| No **resource limits** (`cpu`, `memory`). | 🟧 | Pods can consume all node resources → DoS for other services. |
-| No **readiness / liveness probes**. | 🟧 | K8s may consider a failed pod healthy; no automatic restarts. |
-| Secrets probably mounted in plain text. | 🟧 | Secrets could be exposed to other pods. |
-| No **pod anti‑affinity** for Faust workers. | 🟨 | All workers could be on the same node → single point of failure. |
-| Image tag likely uses `latest`. | 🟨 | Non‑deterministic deployments; harder to roll back. |
-| No **metrics sidecar**. | 🟧 | Observability blind spot. |
+* **SQLAlchemy models** are straightforward; primary keys are integer autoincrement. No soft‑delete flag, no audit columns (created_at/updated_at).
+* **Pydantic schemas** define request/response shapes; they already enforce types, which mitigates injection from malformed DB rows.
+
+**Quick Wins:** Add `created_at`, `updated_at` timestamps, and a soft‑delete flag for auditability.
 
 ---
 
-## 5️⃣ Configuration (`config/`)
+### 4️⃣ `inference/stream_processor_faust.py`
 
-| Issue | Severity | Why it matters | Fix |
-|-------|----------|----------------|-----|
-| Example `config.yaml` contains **hard‑coded paths** and default credentials. | 🟧 | If used in prod, secrets leak and paths may be wrong. |
-| No **schema validation** (e.g., using `pydantic`). | 🟨 | Mis‑typed config leads to runtime crashes. |
+* **Path hack** (`sys.path.append`) – removes reproducibility.
+* **Broker URL** not TLS‑protected; no SASL.
+* **Topic definitions** lack explicit partitions/replication → single‑partition bottleneck.
+* **Concurrency** hard‑coded to 4; no back‑pressure handling.
+* **Heavy objects** (`ThreatModelOrchestrator`, `IncidentCorrelator`, `ThreatEnricher`) attached to `app` on each worker start → model reload on every restart.
+* **Feature extraction / rule & model evaluation** performed via `asyncio.to_thread` without timeout.
+* **Validation** (`validate_alert`) is called but its result isn’t used to block malformed alerts—only logged.
+* **Kafka send** is sequential (`await` each `send`) → adds latency.
+* **DLQ** strips key fields (`payload`, `uid`) – loses forensic evidence.
+* **Exception handling** re‑raises after DLQ, causing worker restarts.
+* **No metrics** – no Prometheus counters for Faust event count, latency, or error rates.
+* **ML anti‑pattern** – per‑event inference; no batching, no GPU usage.
 
----
-
-## 6️⃣ Scripts & Utilities (`scripts/`, `models/`, `ingest/`)
-
-| Issue | Severity | Why it matters | Fix |
-|-------|----------|----------------|-----|
-| Training scripts likely lack deterministic seeds. | 🟨 | Model reproducibility is weak. |
-| Shell scripts may run with **un‑checked user input**. | 🟧 | Potential command injection. |
-| `Makefile` runs `docker-compose up` without `--build`. | 🟨 | Changes may not be reflected in the image. |
-| No **CI/CD security linting** (e.g., `bandit`, `safety`). | 🟧 | Vulnerable dependencies can slip into production. |
-
----
-
-## 7️⃣ Tests (`tests/`)
-
-| Observation | Severity | Why it matters | Recommendation |
-|-------------|----------|----------------|----------------|
-| Directory present but empty – **no tests**. | 🟧 | Critical functionality is unverified. |
-| No **integration tests** for end‑to‑end flow. | 🟧 | Regression risk when scaling components. |
-
-**Recommendation:** Write unit tests for API‑key handling, pagination, Kafka‑sink batch logic, model inference (mock torch), correlation eviction, and add an integration test harness using Docker‑compose.
+**Quick Wins:** Remove sys.path hack, enforce TLS/SASL for Redpanda, define topics with partitions, make concurrency configurable, load heavy components as process‑wide singletons, add timeouts around thread calls, batch Kafka sends, keep full raw event in DLQ, replace re‑raise with graceful continue, instrument Prometheus, implement batch inference.
 
 ---
 
-## 📈 Overall Severity Summary
+### 5️⃣ `inference/models.py`
 
-| Severity | Count (unique files) | Typical impact |
-|----------|---------------------|----------------|
-| **🟥 Critical** | 8 | Immediate security breach or service outage. Must be fixed before production. |
-| **🟧 High** | 14+ | Severe scalability or security degradations; should be addressed promptly. |
-| **🟨 Medium** | 20+ | Good‑practice improvements; advisable for long‑term stability. |
-| **🟩 Low** | 5+ | Minor UX polish. |
+* **Optional Torch import** – silently falls back to mock mode if Torch missing. In production this masks missing dependencies.
+* **Char map** built per instance (minor inefficiency).
+* **Model integrity check** uses MD5 (cryptographically broken) with a static SHA‑256 fallback file. No secret pepper.
+* **Model loading** occurs each time a `DGAClassifier` is instantiated → heavy I/O, possible memory fragmentation.
+* **Predict** – mock mode uses hard‑coded heuristics; real mode uses a JIT model on CPU only (`map_location='cpu'`). No GPU fallback.
+* **Tensor creation** pads/truncates to 35 chars; long domains silently truncated.
+* **Exception handling** in `predict` catches all exceptions and returns `(False, 0, latency)`, masking real errors.
+* **Timing** uses `time.time()`, low resolution.
 
----
-
-## 📌 Prioritized Action Checklist (7‑day sprint)
-
-| Day | Tasks (in order of impact) |
-|-----|----------------------------|
-| **1** | Replace **hard‑coded API keys** with env‑var secrets; constant‑time compare; generic 401. |
-| **1‑2** | Add **health‑check** (`/healthz`, `/ready`) and **Prometheus metrics** (`/metrics`). |
-| **2** | Remove auto‑create tables; generate Alembic migration. |
-| **2‑3** | Refactor **Kafka sink**: require `REDPANDA_BROKERS`; create topics with ≥12 partitions; raise Faust `concurrency`; replace per‑message DB deduplication with Redis set or `INSERT OR IGNORE`. |
-| **3‑4** | Convert FastAPI endpoints to **async**; add pagination & Pydantic response models. |
-| **4** | Add **rate limiting** (`fastapi-limiter`) and **CORS** whitelist. |
-| **4‑5** | Update DB model: UUID alert_id, DateTime timestamp, JSON evidence, soft‑delete column. |
-| **5** | Harden **SQLite engine** or migrate to PostgreSQL. |
-| **5‑6** | Implement **structured JSON logging**; rotate or ship logs. |
-| **6** | Fix **syntax errors** in `shared/data_access.py`; clean duplicate status fields. |
-| **6‑7** | Add **authentication** to Streamlit UI; guard `stream_manager.start_listeners()`. |
-| **7** | Add **readiness/liveness probes**, **resource limits**, run as non‑root in K8s. |
-| **7+** | Write **unit & integration tests** covering critical paths. |
-| **ongoing** | Externalise thresholds, document model checksum validation, introduce back‑off for UI polling. |
+**Quick Wins:** Switch to SHA‑256 with a secret pepper for integrity, load model once per process (singleton), enable optional GPU (`map_location='cuda'`), add proper exception logging, use `time.perf_counter()` for latency, expose model version via API.
 
 ---
 
-## 📚 Recommendations for Future Development
-1. **Migrate to PostgreSQL** for reliable concurrency and richer JSON capabilities.
-2. **Push updates** to the UI via WebSocket/SSE instead of polling.
-3. **Container security hardening** – Distroless images, Seccomp/AppArmor, regular vulnerability scans.
-4. **CI/CD pipeline** – static analysis, dependency scanning, automated tests, signed images.
-5. **Observability stack** – Grafana + Prometheus dashboards for event throughput, inference latency, DB health, Kafka lag, UI poll latency.
-6. **Model lifecycle** – versioned artifact store, checksum watcher, rolling restarts on new model.
-7. **Documentation** – keep `SECURITY.md` up‑to‑date with secret handling, network boundaries, incident response.
+### 6️⃣ `inference/enrichment.py`
+
+* **Deterministic Geo / Intel** use MD5 hashing (non‑cryptographic).
+* **Intel enrichment** only for high/critical severity and 40 % probability – may hide real threats.
+* **`await asyncio.sleep(0.005)`** is a placeholder; real external calls would block the pipeline.
+* **IP range check** handles only IPv4 private ranges, not IPv6.
+* **Evidence dict mutated in‑place** – could cause cross‑alert contamination if a reference is shared.
+* **Key names** contain spaces (`"GeoIP (Source)"`), which are inconvenient for downstream JSONPath / SQL mapping.
+
+**Quick Wins:** Replace MD5 with SHA‑256 + pepper, make enrichment truly async via `httpx.AsyncClient` with retries, use `ipaddress` library for private‑IP detection (IPv6 aware), copy evidence dict before mutation, use snake_case keys.
 
 ---
 
-### 🎉 What the Fixes Give You
-* **Zero credential exposure** – API keys live only in secrets.
-* **Scalable ingestion** – Multi‑partition topics + higher Faust concurrency eliminate the single‑consumer bottleneck.
-* **Robust persistence** – Proper DB schema, soft‑delete, optional PostgreSQL migration prevent SQLite‑related OOM.
-* **Operational visibility** – Health checks, Prometheus metrics, structured logs, K8s probes enable automated monitoring & recovery.
-* **Secure UI** – Authenticated Streamlit front‑end, mitigated XSS, efficient push‑updates.
-* **Reliability** – Graceful shutdown, back‑off, comprehensive test coverage protect against silent failures.
+### 7️⃣ `inference/correlation.py`
 
-Implement the high‑priority items first (API‑key handling, health checks, Kafka sink deduplication, DB schema fixes). Once those foundations are solid, the remaining recommendations will round out a production‑ready, secure, and maintainable SOC platform.
+* **Redis connection** built with plain host/port, no TLS/ACL.
+* **Time window** hard‑coded to 300 s (5 min).
+* **Alerts stored in a Redis list** with no length limit; each new alert triggers a full list scan (`lrange` + `json.loads`). This is **O(N²)** as the list grows.
+* **Incident generation** uses static thresholds (`>=2 tactics` or `risk >= 80`). No configurability.
+* **After incident creation** the entire list is deleted (`self.redis.delete(key)`), potentially discarding unrelated alerts.
+* **No error handling** on Redis commands — any connectivity issue crashes the Faust worker.
+
+**Quick Wins:** Enable TLS and ACL for Redis, configure `time_window_sec` via env, cap list size and `LTRIM` after each push, maintain aggregate data in a Redis hash to avoid scanning, make thresholds configurable, delete only correlated entries, add Redis exception handling with fallback.
 
 ---
 
-*If you’d like this audit published as a private artifact for easy sharing, just let me know and I’ll publish it for you.*
+### 8️⃣ `inference/rules.py`
+
+* Returns plain Python `list` of dict alerts – no schema validation.
+* All rules are **hard‑coded** with static thresholds (e.g., `orig_pkts > 10000` for DDoS, `len(query) > 60` for DNS tunnelling).
+* No external threat‑intel feed; everything is static.
+* No input sanitisation – malicious Zeek fields could be logged or persisted.
+
+**Quick Wins:** Define a Pydantic `Alert` model for rule output, make rule thresholds configurable (YAML/JSON), integrate dynamic threat‑intel lists, add input sanitisation, add unit tests with hypothesis.
+
+---
+
+### 9️⃣ `ingest/simulator.py`, `ingest/pcap_ingester.py`, `ingest/tail_to_redpanda.py`
+
+* **Simulator** writes to Redpanda via the `aiokafka` client; no TLS, no auth.
+* **PCAP ingester** parses raw packet captures and publishes to Redpanda – potential for **path traversal** if file paths are supplied externally.
+* **Tail script** uses `subprocess` to `tail -F` a log file and pipe to Redpanda – no bounding of line size; large lines could cause memory pressure.
+
+**Quick Wins:** Secure Redpanda connection with TLS/SASL, validate any external file paths, limit line size, run these as separate low‑privilege containers with read‑only root FS.
+
+---
+
+### 🔟 `dashboard/app.py` (Streamlit) & `terminal/tsoc_console.py` (Textual)
+
+* UI makes **blocking `requests`** calls to the FastAPI backend.
+* No async handling – UI can freeze under slow network conditions.
+* No authentication handling; the API key is passed implicitly via env.
+
+**Quick Wins:** Switch to `httpx.AsyncClient` with async UI components, pass the API key via a secure header, add UI‑side loading spinners, and ensure the backend is called over HTTPS.
+
+---
+
+### 1️⃣1️⃣ `k8s/soc-deployment.yaml`
+
+* **Liveness probe** spawns a new Faust CLI process – wasteful and can cause false negatives.
+* **Read‑only root FS** while model files (`/models/cnn_dga.pt`) need to be read → may cause mount errors.
+* **No HorizontalPodAutoscaler** for either deployment.
+* **No NetworkPolicy** – pods can be accessed from any namespace.
+* **Secrets**: API key is injected via env var (`X_API_KEY`) but the stream‑processor still reads `TSOC_API_KEY` from env (not from a secret).
+* **Resource limits** may be insufficient for inference workloads.
+
+**Quick Wins:** Change probes to hit a lightweight `/healthz` endpoint, mount model files as read‑only ConfigMaps, add HPA (CPU‑based + custom metric for Kafka lag), define a NetworkPolicy that only allows traffic from known pods, inject all secrets via `valueFrom.secretKeyRef`, increase CPU/memory limits after profiling.
+
+---
+
+### 1️⃣2️⃣ `models/cnn_dga.pt` & `models/cnn_dga.pt.sha256`
+
+* Model file is stored in the container image; no runtime integrity verification beyond the static SHA‑256 file.
+* If an attacker gains write access to the container FS (unlikely with read‑only root, but possible during dev), they could replace the model without detection (MD5 fallback).
+
+**Quick Wins:** Verify checksum **at container start** using SHA‑256 + secret pepper, and fail the container if mismatched. Consider storing the model in a dedicated immutable volume.
+
+---
+
+### 1️⃣3️⃣ `scripts/benchmark_throughput.py`, `scripts/continuous_training.py`, `scripts/train_dl_models.py`
+
+* Scripts run arbitrary shell commands (`subprocess.run`) without sanitising input arguments.
+* They read environment variables directly – could leak secrets if logs are captured.
+
+**Quick Wins:** Use `subprocess.run(..., check=True, capture_output=True)` with explicit argument lists, avoid printing secret env vars, and require explicit `--dry-run` flags for destructive actions.
+
+---
+
+### 1️⃣4️⃣ `shared/data_access.py`, `shared/formatters.py`, `shared/schemas.py`
+
+* Provide thin wrappers around DB/JSON handling. No major security concerns, but **lack of input validation** when ingesting external JSON.
+
+**Quick Wins:** Validate incoming dicts against Pydantic models before persisting, and escape any strings that may later be rendered in HTML (Streamlit).
+
+---
+
+## 📊 Overall Re‑Rating (after considering the current state)
+
+| Dimension | Updated Score (out of 10) | Reason |
+|-----------|---------------------------|--------|
+| **Security** | **4 / 10** | Still many clear gaps (plain‑text secrets, MD5 hashing, no TLS, DLQ stripping). |
+| **Scalability** | **3 / 10** | Fixed concurrency, per‑event inference, unbounded Redis lists remain bottlenecks. |
+| **Reliability** | **4 / 10** | Liveness probes mis‑configured, no graceful DB health checks, no PDB. |
+| **Observability** | **2 / 10** | No metrics, no request IDs, no tracing. |
+| **Maintainability** | **5 / 10** | Code is modular but riddled with magic numbers and hard‑coded thresholds. |
+| **ML Hygiene** | **3 / 10** | Single‑event inference, weak integrity checks, no GPU use. |
+| **Overall** | **3.5 / 10** (≈ C‑) | Same as before – the audit confirms that the architecture needs the set of mitigations we listed earlier to become production‑ready. |
+
+---
+
+## 📋 Next Steps & Actionable Plan  
+
+1. **Secure Secrets & Transport** – Move all credentials to K8s Secrets, enable TLS/SASL for Redpanda, Redis, and FastAPI.
+2. **Replace MD5 & Add Pepper** – Update `models.py` and `enrichment.py` hashing; load `ENRICH_SALT` from secret.
+3. **Singleton Model Loading** – Refactor `DGAClassifier` and `ThreatModelOrchestrator` to use a module‑level cached instance.
+4. **Batch Inference** – Implement a buffer that sends a batch of up to 64 events to the model in a single forward pass.
+5. **Back‑pressure & Timeouts** – Wrap `asyncio.to_thread` calls with `asyncio.wait_for(..., timeout=5)`.
+6. **Redis Correlation Optimisation** – Enable TLS and ACL for Redis, configure `time_window_sec` via env, cap list size and `LTRIM` after each push, maintain aggregate data in a Redis hash for O(1) correlation.
+7. **Rewrite K8s Liveness Probes** – Expose a `/healthz` endpoint in Faust (or simple pid check) and point probes to it.
+8. **Autoscaling** – Add HorizontalPodAutoscaler for both stream‑processor and API based on CPU and custom metric (Kafka lag).
+9. **Observability** – Integrate Prometheus client in Faust and FastAPI; add request‑ID middleware, export OpenTelemetry traces.
+10. **Rate Limiting** – Move SlowAPI key function to API‑key‑based limiter; also enforce per‑IP limit as fallback.
+11. **TLS for API** – Deploy FastAPI behind an Ingress with TLS termination; remove plain HTTP exposure.
+12. **Network Policy & PDB** – Add NetworkPolicy restricting pod traffic; ensure at least one replica stays during updates.
+13. **Database** – Switch to async SQLAlchemy; enable `pool_pre_ping`; enforce migrations via Alembic.
+14. **Logging** – Add middleware that injects `X-Request-ID` and logs it.
+15. **Testing** – Add unit tests for each rule with hypothesis; improve coverage of edge cases.
+16. **Documentation** – Generate OpenAPI spec and publish in `docs/`. Include security sections (API‑Key, TLS).
+
+---
+
+You can start with any of these items (or a combination) and let me know which file(s) you’d like me to modify or generate patches for. I’m ready to produce the exact code changes, update the Kubernetes manifests, or create a PR skeleton—just tell me where to start!

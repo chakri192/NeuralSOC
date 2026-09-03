@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 import logging
 from pythonjsonlogger import jsonlogger
 import sys
@@ -37,6 +38,11 @@ faust_logger.setLevel(logging.INFO)
 # 2. Faust application definition
 # ----------------------------------------------------------------------
 BROKERS = os.getenv("REDPANDA_BROKERS", "127.0.0.1:9092")
+
+# ----------------------------------------------------------------------
+# Thread Pool
+# ----------------------------------------------------------------------
+executor = ThreadPoolExecutor(max_workers=16)
 
 app = faust.App(
     'soc-stream-processor-cluster',
@@ -93,11 +99,11 @@ async def process_traffic(stream):
     async for event in stream:
         try:
             # 1. Feature extraction in a thread to avoid blocking event loop
-            features = await asyncio.to_thread(extract_features, event)
+            features = await asyncio.get_event_loop().run_in_executor(executor, extract_features, event)
             
             # 2. Run rule engine and ML model concurrently with timeouts to prevent stalling
-            rule_task = asyncio.to_thread(evaluate_rules, event, features)
-            ml_task   = asyncio.to_thread(app.orchestrator.evaluate, event, features)
+            rule_task = asyncio.get_event_loop().run_in_executor(executor, evaluate_rules, event, features)
+            ml_task   = asyncio.get_event_loop().run_in_executor(executor, app.orchestrator.evaluate, event, features)
             rule_res, ml_res = await asyncio.wait_for(asyncio.gather(rule_task, ml_task), timeout=5.0)
             
             detections = []
@@ -115,7 +121,7 @@ async def process_traffic(stream):
                     await send_fut
                     
                     # Correlation in a thread
-                    incident = await asyncio.to_thread(app.correlator.add_alert, alert)
+                    incident = await asyncio.get_event_loop().run_in_executor(executor, app.correlator.add_alert, alert)
                     if incident:
                         inc_fut = await incidents_topic.send(value=incident)
                         await inc_fut
@@ -125,7 +131,6 @@ async def process_traffic(stream):
             logger.exception("[DLQ] Pipeline crash prevented. Routing to dead-letter")
             safe_event = {k: v for k, v in event.items() if k not in {"id.orig_h", "id.resp_h", "uid", "payload"}}
             await dlq_topic.send(value={"raw_event": safe_event, "error": str(e), "timestamp": datetime.now(timezone.utc).isoformat()})
-            raise
 
 if __name__ == '__main__':
     app.main()
