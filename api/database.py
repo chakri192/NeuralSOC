@@ -10,7 +10,7 @@ if not SQLALCHEMY_DATABASE_URL:
 # Connect args specific to SQLite vs Postgres
 connect_args = {"connect_timeout": 5}
 if SQLALCHEMY_DATABASE_URL.startswith("sqlite"):
-    connect_args["check_same_thread"] = False
+    pass # check_same_thread=False removed for safety
 
 engine = create_engine(SQLALCHEMY_DATABASE_URL, pool_pre_ping=True, pool_size=10, max_overflow=5, pool_recycle=3600, connect_args=connect_args)
 

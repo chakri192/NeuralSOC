@@ -53,7 +53,7 @@ spec:
             - python
             - -c
             - "import urllib.request; urllib.request.urlopen('http://localhost:6066/')"
-          failureThreshold: 30
+          failureThreshold: 3
           periodSeconds: 10
         livenessProbe:
           exec:
@@ -138,7 +138,7 @@ spec:
           httpGet:
             path: /healthz
             port: 8000
-          failureThreshold: 30
+          failureThreshold: 3
           periodSeconds: 5
         livenessProbe:
           httpGet:

@@ -35,15 +35,16 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
 def get_remote_address(req: Request):
-    # Only trust headers if the physical TCP connection comes from our trusted Kubernetes Ingress IP ranges
-    trusted_proxies = ["10.0.", "172.16.", "172.17.", "172.18.", "172.19.", "172.2", "172.30.", "172.31.", "192.168."]
+    import ipaddress
+    trusted_networks = [ipaddress.ip_network(n) for n in ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]]
     client_host = req.client.host
-    
-    is_trusted = any(client_host.startswith(p) for p in trusted_proxies)
+    try:
+        client_ip = ipaddress.ip_address(client_host)
+        is_trusted = any(client_ip in net for net in trusted_networks)
+    except ValueError:
+        is_trusted = False
+        
     if is_trusted:
-        real_ip = req.headers.get("X-Real-IP")
-        if real_ip:
-            return real_ip.strip()
         xff = req.headers.get("X-Forwarded-For")
         if xff:
             return xff.split(",")[0].strip()
@@ -58,7 +59,7 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 from fastapi.middleware.cors import CORSMiddleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv("ALLOWED_ORIGINS", "http://localhost:8501").split(","), # In production restrict this
+    allow_origins=os.getenv("ALLOWED_ORIGINS", "https://dashboard.tsoc.local").split(","), # In production restrict this
     allow_credentials=False,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-API-Key"],

@@ -70,6 +70,10 @@ async def on_stop():
         app.correlator.redis.connection_pool.disconnect()
     except Exception:
         pass
+    try:
+        executor.shutdown(wait=False)
+    except Exception:
+        pass
 
 # ----------------------------------------------------------------------
 # 4. Instantiate heavy objects once per Faust worker
