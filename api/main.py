@@ -13,16 +13,35 @@ API_KEY = "tsoc-prod-key-2026"
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 async def get_api_key(api_key_header: str = Security(api_key_header)):
-    if api_key_header == API_KEY:
+    import secrets
+    if secrets.compare_digest(api_key_header or '', API_KEY):
         return api_key_header
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Invalid or missing API Key. Access Denied."
+        detail="Unauthorized"
     )
 
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="T-SOC API", description="Enterprise SOC Backend")
+
+from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], # In production restrict this
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.get("/healthz")
+def healthcheck():
+    return {"status": "ok", "version": "1.0.0"}
+
+@app.get("/metrics")
+def metrics():
+    return {"active_connections": 0, "cpu_usage": 0.0} # Placeholder for prometheus
+
 
 # 1. SECURITY FIX: Global Exception Handler to prevent Stack Trace Leakage
 @app.exception_handler(Exception)
@@ -37,6 +56,9 @@ def get_db():
     db = SessionLocal()
     try:
         yield db
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()
 
