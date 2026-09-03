@@ -52,7 +52,7 @@ spec:
             command:
             - python
             - -c
-            - "import faust"
+            - "import urllib.request; urllib.request.urlopen('http://localhost:6066/')"
           failureThreshold: 30
           periodSeconds: 10
         livenessProbe:

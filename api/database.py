@@ -8,11 +8,11 @@ if not SQLALCHEMY_DATABASE_URL:
     raise RuntimeError("CRITICAL ERROR: DATABASE_URL environment variable is missing. Halting boot sequence.")
 
 # Connect args specific to SQLite vs Postgres
-connect_args = {}
+connect_args = {"connect_timeout": 5}
 if SQLALCHEMY_DATABASE_URL.startswith("sqlite"):
-    connect_args = {"check_same_thread": False}
+    connect_args["check_same_thread"] = False
 
-engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args=connect_args, pool_pre_ping=True, pool_size=10, max_overflow=5, pool_recycle=3600, connect_args={"connect_timeout": 5})
+engine = create_engine(SQLALCHEMY_DATABASE_URL, pool_pre_ping=True, pool_size=10, max_overflow=5, pool_recycle=3600, connect_args=connect_args)
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()

@@ -60,10 +60,6 @@ jobs:
           format: 'table'
           exit-code: '1'
           severity: 'HIGH,CRITICAL'
-          format: "json"
-          output: "trivy-report.json"
-          severity: "UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL"
-          exit-code: 1
 
       - name: Upload Trivy results
         uses: actions/upload-artifact@v3

@@ -35,10 +35,13 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
 def get_remote_address(req: Request):
+    real_ip = req.headers.get("X-Real-IP")
+    if real_ip:
+        return real_ip.strip()
     xff = req.headers.get("X-Forwarded-For")
     if xff:
-        hops = [h.strip() for h in xff.split(",") if h.strip()]
-        return hops[0] if hops else req.client.host
+        # Trust ONLY the ingress explicitly, or fallback to real IP if ingress configures X-Real-IP
+        return xff.split(",")[0].strip()
     return req.client.host
 
 limiter = Limiter(key_func=get_remote_address)

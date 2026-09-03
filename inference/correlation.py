@@ -13,7 +13,7 @@ from inference.risk import calculate_risk_score
 class IncidentCorrelator:
     def __init__(self):
         redis_host = os.getenv("REDIS_HOST", "localhost")
-        pool = redis.ConnectionPool(host=redis_host, port=6379, db=0, decode_responses=True, socket_timeout=2.0, socket_connect_timeout=2.0, max_connections=100)
+        pool = redis.ConnectionPool(host=redis_host, port=6379, db=0, decode_responses=True, socket_timeout=2.0, socket_connect_timeout=2.0, max_connections=100, password=os.getenv('REDIS_PASSWORD', ''), ssl=True, ssl_cert_reqs='none')
         self.redis = redis.Redis(connection_pool=pool)
         self.time_window_sec = int(os.getenv("CORRELATION_WINDOW", "300"))
         

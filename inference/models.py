@@ -13,7 +13,10 @@ class DeepLearningEngine:
         self.mock_mode = False
         artifact_path = os.getenv("MODEL_PATH", "models/cnn_dga.pt")
         sig_path = artifact_path + ".sig"
-        secret = os.getenv("MODEL_HMAC_SECRET", "enterprise-hmac-secret-2026").encode()
+        secret_env = os.getenv("MODEL_HMAC_SECRET")
+        if not secret_env:
+            raise RuntimeError("CRITICAL: MODEL_HMAC_SECRET is missing. Cannot verify model integrity.")
+        secret = secret_env.encode()
         
         try:
             with open(sig_path, "r") as f:
@@ -48,7 +51,11 @@ class DeepLearningEngine:
         import idna
         normalized = unicodedata.normalize('NFKC', domain)
         try:
-            ascii_domain = idna.encode(normalized, uts46=True).decode('ascii')
+                    ascii_domain = idna.encode(normalized, uts46=True).decode('ascii')
+        
+        # Security Fix: Prevent IDNA drift bypassing padding logic
+        if len(ascii_domain) > 35:
+            raise RuntimeError("SecurityException: Domain exceeds fixed tensor padding window")
         except Exception:
             raise RuntimeError("SecurityException: Homoglyph / IDNA attack blocked")
             
