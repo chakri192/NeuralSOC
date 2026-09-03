@@ -1,4 +1,11 @@
 ---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kube-system
+  labels:
+    kubernetes.io/metadata.name: kube-system
+---
 apiVersion: projectcalico.org/v3
 kind: GlobalNetworkPolicy
 metadata:
@@ -44,12 +51,21 @@ spec:
     - podSelector:
         matchLabels:
           app: kafka
+      namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-nginx
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: ingress-nginx
     ports:
     - protocol: TCP
       port: 9092
   egress:
   - to:
-    - podSelector:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: redis
+      podSelector:
         matchLabels:
           app: redis
     ports:
@@ -59,6 +75,12 @@ spec:
     - podSelector:
         matchLabels:
           app: kafka
+      namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-nginx
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: ingress-nginx
     ports:
     - protocol: TCP
       port: 9092
@@ -89,7 +111,7 @@ spec:
   - from:
     - namespaceSelector:
         matchLabels:
-          name: ingress-nginx
+          kubernetes.io/metadata.name: ingress-nginx
       podSelector:
         matchLabels:
           app.kubernetes.io/name: ingress-nginx
@@ -98,14 +120,20 @@ spec:
       port: 8000
   egress:
   - to:
-    - podSelector:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: redis
+      podSelector:
         matchLabels:
           app: redis
     ports:
     - protocol: TCP
       port: 6379
   - to:
-    - podSelector:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: db-namespace
+      podSelector:
         matchLabels:
           app: postgres
     ports:
@@ -137,13 +165,19 @@ spec:
   - from:
     - namespaceSelector:
         matchLabels:
-          name: ingress-nginx
+          kubernetes.io/metadata.name: ingress-nginx
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: ingress-nginx
     ports:
     - protocol: TCP
       port: 8501
   egress:
   - to:
-    - podSelector:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: api-namespace
+      podSelector:
         matchLabels:
           app: tsoc-api
     ports:
@@ -165,6 +199,28 @@ spec:
     - podSelector:
         matchLabels:
           app: prometheus
+    ports:
+    - protocol: TCP
+      port: 6066
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: stream-processor-api-allow
+spec:
+  podSelector:
+    matchLabels:
+      app: tsoc-stream-processor
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: api-namespace
+      podSelector:
+        matchLabels:
+          app: tsoc-api
     ports:
     - protocol: TCP
       port: 6066

@@ -17,6 +17,9 @@ spec:
       volumes:
       - name: tmp
         emptyDir: {}
+      - name: dlq
+        persistentVolumeClaim:
+          claimName: tsoc-dlq-pvc
       - name: cache
         emptyDir: {}
       containers:
@@ -98,6 +101,9 @@ spec:
       volumes:
       - name: tmp
         emptyDir: {}
+      - name: dlq
+        persistentVolumeClaim:
+          claimName: tsoc-dlq-pvc
       - name: cache
         emptyDir: {}
       containers:

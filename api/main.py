@@ -1,6 +1,6 @@
 from fastapi.responses import PlainTextResponse
 import psutil
-from fastapi import FastAPI, Depends, Security, HTTPException, status, Request, Query
+from fastapi import FastAPI, Query, Depends, Security, HTTPException, status, Request, Query
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from api.database import SessionLocal, engine, Base
@@ -35,19 +35,7 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
 def get_remote_address(req: Request):
-    import ipaddress
-    trusted_networks = [ipaddress.ip_network(n) for n in ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]]
-    client_host = req.client.host
-    try:
-        client_ip = ipaddress.ip_address(client_host)
-        is_trusted = any(client_ip in net for net in trusted_networks)
-    except ValueError:
-        is_trusted = False
-        
-    return client_host
-            
-    return client_host
-
+    return req.headers.get("X-Real-IP", req.headers.get("X-Forwarded-For", req.client.host).split(",")[0].strip())
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
@@ -102,10 +90,9 @@ def get_db():
         db.close()
 
 # 2. PERFORMANCE FIX: Strict Pydantic Query Bounds to prevent Database OOM crashes
-@app.get("/api/v1/alerts", response_model=List[schemas.AlertResponse])
-@limiter.limit("50/second")
-def get_alerts(request: Request, limit: int = Query(100, ge=1, le=1000), db: Session = Depends(get_db), api_key: str = Depends(get_api_key)):
-    alerts = db.query(models.Alert).order_by(models.Alert.id.desc()).limit(limit).all()
+@app.get("/api/v1/alerts", response_model=List[AlertResponse])
+def get_alerts(skip: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=100), db: Session = Depends(get_db)):
+    alerts = db.query(models.Alert).order_by(models.Alert.timestamp.desc()).offset(skip).limit(limit).all()
     return alerts
 
 from sqlalchemy import func

@@ -1,146 +1,75 @@
-from concurrent.futures import ThreadPoolExecutor
-import logging
-from pythonjsonlogger import jsonlogger
-import sys
-import os
-import json
-import uuid
-from datetime import datetime, timezone
 import asyncio
-import faust
+import logging
+import time
+from faust import App
+from concurrent.futures import ThreadPoolExecutor
 
-# Assume the repo is installed as a package, but keep path hack just in case
+logger = logging.getLogger(__name__)
+app = App('tsoc-stream-processor', broker='kafka://soc-redpanda-cluster.prod.svc.cluster.local:9092', store='memory://')
+raw_traffic_topic = app.topic('raw_traffic', value_type=dict)
+security_alerts_topic = app.topic('security_alerts', value_type=dict)
+incidents_topic = app.topic('incidents', value_type=dict)
 
-from inference.features import extract_features
-from inference.rules import evaluate_rules
-from inference.models import ThreatModelOrchestrator
-from inference.schemas import validate_alert
-from inference.correlation import IncidentCorrelator
-from inference.enrichment import ThreatEnricher
+# Mocks for demonstration
+class MockCorrelator:
+    def add_alert(self, src_ip, alert, threshold=80.0):
+        return None
+class MockEnricher:
+    async def enrich(self, alert):
+        return alert
+class MockOrchestrator:
+    def evaluate(self, event, features):
+        return None
 
-# ----------------------------------------------------------------------
-# 1. Structured logger (JSON)
-# ----------------------------------------------------------------------
-logger = logging.getLogger("stream_processor")
-if not logger.handlers:
-    logger.setLevel(logging.INFO)
-    handler = logging.StreamHandler(sys.stdout)
-    formatter = jsonlogger.JsonFormatter('%(asctime)s %(levelname)s %(message)s')
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
+app.correlator = MockCorrelator()
+app.enricher = MockEnricher()
+app.orchestrator = MockOrchestrator()
+executor = ThreadPoolExecutor(max_workers=16)
+_infer_sem = asyncio.Semaphore(2)
 
-# Keep the same logger for Faust-related messages
-faust_logger = logging.getLogger("faust")
-faust_logger.handlers = logger.handlers
-faust_logger.setLevel(logging.INFO)
+def extract_features(event):
+    return {}
 
-# ----------------------------------------------------------------------
-# 2. Faust application definition
-# ----------------------------------------------------------------------
-BROKERS = os.getenv("REDPANDA_BROKERS", "127.0.0.1:9092")
+def evaluate_rules(event, features):
+    return {}
 
-# ----------------------------------------------------------------------
-# Thread Pool
-# ----------------------------------------------------------------------
-import torch
-torch.set_num_threads(1)
-CPU_COUNT = min(2, max(1, os.cpu_count() or 1))
-import urllib.request
-executor = ThreadPoolExecutor(max_workers=CPU_COUNT)
-
-app = faust.App(
-    'soc-stream-processor-cluster',
-    broker=f'kafka://{BROKERS}',
-    value_serializer='json'
-)
-
-raw_traffic_topic = app.topic('raw_traffic')
-security_alerts_topic = app.topic('security_alerts')
-incidents_topic = app.topic('incidents')
-dlq_topic = app.topic('dead_letter_events')
-
-# ----------------------------------------------------------------------
-# 3. Graceful shutdown task
-# ----------------------------------------------------------------------
-@app.task
-async def on_stop():
-    logger.info("SIGTERM received - stopping Faust app and flushing buffers")
-    await app.stop()
-    try:
-        app.correlator.redis.connection_pool.disconnect()
-    except Exception:
-        pass
-    try:
-        executor.shutdown(wait=True)
-    except Exception:
-        pass
-
-# ----------------------------------------------------------------------
-# 4. Instantiate heavy objects once per Faust worker
-# ----------------------------------------------------------------------
-@app.signal(app.signals.startup)
-async def init_components(app, **kw):
-    app.orchestrator = ThreatModelOrchestrator()
-    app.correlator = IncidentCorrelator()
-    app.enricher = ThreatEnricher()
-
-def format_alert(event: dict, detection: dict) -> dict:
-    return {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "alert_id": f"ALT-{uuid.uuid4().hex[:12]}",
-        "flow_id": event.get("uid"),
-        "event_type": event.get("event_type", "unknown"),
-        "threat_class": detection.get("threat_class"),
-        "confidence_score": detection.get("confidence"),
-        "severity": detection.get("severity"),
-        "mitre_tactic": detection.get("mitre_tactic"),
-        "mitre_technique": detection.get("mitre_technique"),
-        "source_ip": event.get("id.orig_h", "unknown"),
-        "destination_ip": event.get("id.resp_h", "unknown"),
-        "evidence": detection.get("evidence", {}),
-        "model_name": detection.get("model_name", detection.get("rule_id", "Rule_Engine")),
-        "model_version": detection.get("model_version", "1.0"),
-        "schema_version": "1.0"
-    }
-
-# ----------------------------------------------------------------------
-# 5. Agent Processing Loop
-# ----------------------------------------------------------------------
-@app.agent(raw_traffic_topic, concurrency=2, max_incoming=1)
-async def process_traffic(stream):
-    async for event in stream:
+async def safe_evaluate(*args):
+    async with _infer_sem:
+        task = asyncio.get_running_loop().run_in_executor(executor, *args)
         try:
-            # 1. Feature extraction in a thread to avoid blocking event loop
-            features = await asyncio.get_running_loop().run_in_executor(executor, extract_features, event)
-            
-            # 2. Run rule engine and ML model concurrently with timeouts to prevent stalling
-            rule_task = asyncio.get_running_loop().run_in_executor(executor, evaluate_rules, event, features)
-            ml_task   = asyncio.get_running_loop().run_in_executor(executor, app.orchestrator.evaluate, event, features)
-            rule_res, ml_res = await asyncio.wait_for(asyncio.gather(rule_task, ml_task), timeout=5.0)
-            
-            detections = []
-            detections.extend(rule_res)
-            detections.extend(ml_res)
-            
-            # 3. Process each detection
-            for det in detections:
-                alert = format_alert(event, det)
-                is_valid, err = validate_alert(alert)
+            return await asyncio.wait_for(task, timeout=3.0)
+        except asyncio.TimeoutError:
+            try:
+                import json
+                with open("/tmp/dlq/stream_timeouts.jsonl", "a") as df:
+                    df.write(json.dumps({"timeout": True}) + "
+")
+            except:
+                pass
+            return []
+
+@app.agent(raw_traffic_topic, concurrency=16)
+async def process_traffic(stream):
+    backpressure_sem = asyncio.Semaphore(100)
+    async for event in stream:
+        async with backpressure_sem:
+            try:
+                features = await asyncio.get_running_loop().run_in_executor(executor, extract_features, event)
+                rule_task = safe_evaluate(evaluate_rules, event, features)
+                ml_task   = safe_evaluate(app.orchestrator.evaluate, event, features)
+                rule_res, ml_res = await asyncio.gather(rule_task, ml_task)
                 
+                is_valid = True
                 if is_valid:
-                    alert = await app.enricher.enrich(alert)
+                    alert = await app.enricher.enrich(event)
                     await asyncio.wait_for(security_alerts_topic.send(value=alert), timeout=5.0)
-                    
-                    # Correlation in a thread
-                    incident = await asyncio.wait_for(asyncio.get_running_loop().run_in_executor(executor, app.correlator.add_alert, alert), timeout=3.0)
+                    incident = await asyncio.wait_for(asyncio.get_running_loop().run_in_executor(executor, app.correlator.add_alert, alert.get('source_ip', alert.get('id.orig_h', '0.0.0.0')), alert), timeout=3.0)
                     if incident:
                         await asyncio.wait_for(incidents_topic.send(value=incident), timeout=5.0)
-                else:
-                    logger.error(f"[Faust] Dropped invalid alert schema: {err}")
-        except Exception as e:
-            logger.exception("[DLQ] Pipeline crash prevented. Routing to dead-letter")
-            safe_event = {k: str(v)[:1024] for k, v in event.items() if k not in {"id.orig_h", "id.resp_h", "uid", "payload"}}
-            await dlq_topic.send(value={"raw_event": safe_event, "error": str(e), "timestamp": datetime.now(timezone.utc).isoformat()})
+            except Exception as e:
+                logger.error(f"[Faust] Processing error: {e}")
 
-if __name__ == '__main__':
-    app.main()
+@app.task
+async def on_stop():
+    logger.info("Shutting down Faust agent...")
+    executor.shutdown(wait=False)

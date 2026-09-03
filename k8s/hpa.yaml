@@ -2,6 +2,9 @@ apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: hpa-stream-processor
+  annotations:
+    terminationGracePeriodSeconds: "60"
+    ephemeral-storage: "1Gi"
 spec:
   scaleTargetRef:
     apiVersion: apps/v1

@@ -42,7 +42,7 @@ jobs:
 
       - name: Run Bandit Python Static Analysis
         run: |
-          bandit -r . -x tests,docs,.github,venv --severity-level high --format json -o bandit-report.json || exit 1
+          bandit -r .  --format json -o bandit-report.json || exit 1
 
       - name: Upload Bandit results
         uses: actions/upload-artifact@v3
@@ -63,7 +63,7 @@ jobs:
           severity: 'HIGH,CRITICAL'
           
       - name: Push image
-        run: docker push tsoc:latest
+        run: docker push tsoc:${{ github.sha }}
 
       - name: Upload Trivy results
         if: always()
