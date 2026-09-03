@@ -9,6 +9,22 @@ from datetime import datetime, timezone
 from shared.data_access import stream_manager
 from dashboard.components.empty_states import render_broker_unavailable
 
+import subprocess
+import requests
+
+@st.cache_data(ttl=3600)
+def check_for_updates():
+    try:
+        local_hash = subprocess.check_output(['git', 'rev-parse', 'HEAD'], stderr=subprocess.DEVNULL).strip().decode('utf-8')
+        resp = requests.get("https://api.github.com/repos/chakri192/NeuralSOC/commits/main", timeout=3)
+        if resp.status_code == 200:
+            remote_hash = resp.json().get('sha', '')
+            if remote_hash and local_hash != remote_hash:
+                return True
+    except Exception:
+        pass
+    return False
+
 st.set_page_config(
     page_title="T-SOC Operations Center",
     layout="wide",
@@ -26,6 +42,10 @@ load_css()
 # Start background data ingestion globally
 stream_manager.start_listeners()
 status = stream_manager.status()
+
+
+if check_for_updates():
+    st.markdown("<div style='background-color: #ff4b4b; padding: 15px; border-radius: 8px; color: white; font-weight: bold; text-align: center; margin-bottom: 25px; border: 1px solid #ff0000;'>UPDATE AVAILABLE: Your local copy of NeuralSOC is outdated. Please run 'git pull origin main' in your terminal to sync with the latest AI models and security patches.</div>", unsafe_allow_html=True)
 
 # Top bar layout - Professional Header
 col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
