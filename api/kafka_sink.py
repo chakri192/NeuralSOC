@@ -56,6 +56,18 @@ def run_sink():
             except Exception as e:
                 db.rollback()
                 logger.error(f"Sink commit error: {e}")
+                try:
+                    import urllib.request
+                    import urllib.parse
+                    import json
+                    req = urllib.request.Request(
+                        os.getenv("SLACK_WEBHOOK_URL", "https://example.com/webhook"),
+                        data=json.dumps({"text": f"CRITICAL SOC ALERT - Database Rollback: {e}"}).encode(),
+                        headers={'Content-Type': 'application/json'}
+                    )
+                    urllib.request.urlopen(req, timeout=2.0)
+                except Exception:
+                    pass
                 for msg in batch:
                     try:
                         import uuid

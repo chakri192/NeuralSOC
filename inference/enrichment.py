@@ -12,10 +12,17 @@ class ThreatEnricher:
 
     async def _fetch_intel(self, ip: str) -> dict:
         loop = asyncio.get_running_loop()
+        # Prevent SSRF: Only query strictly formatted public IPv4 addresses
+        import re
+        if not re.match(r'^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$', ip):
+            return {}
+        if ip.startswith("10.") or ip.startswith("192.168.") or ip.startswith("172.") or ip.startswith("127."):
+            return {}
+            
         try:
             # Query a public IP API for live geolocation and AS data
             req = urllib.request.Request(
-                f"http://ip-api.com/json/{ip}",
+                f"https://ipapi.co/{ip}/json/",
                 headers={'User-Agent': 'NeuralSOC-Enrichment/1.0'}
             )
             # Run blocking URL fetch in executor to avoid hanging event loop
