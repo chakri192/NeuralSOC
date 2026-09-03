@@ -1,3 +1,4 @@
+from redis.lock import Lock
 import uuid
 import time
 import json
@@ -27,7 +28,7 @@ class IncidentCorrelator:
 
     def add_alert(self, alert: dict):
         src_ip = alert.get("source_ip")
-        if not src_ip or src_ip == "unknown" or str(src_ip).strip() == "":
+        if not src_ip or str(src_ip).strip() == "" or ".." in str(src_ip) or "/" in str(src_ip):
             return None
             
         # Basic IP sanity to prevent global key poisoning
@@ -38,37 +39,43 @@ class IncidentCorrelator:
         lock_name = f"lock:{src_ip}"
         
         try:
-            raw_records = self._correlate_script(keys=[key], args=[self.time_window_sec, 100, json.dumps(alert)])
-            
-            records = []
-            for r in raw_records:
-                try:
-                    records.append(json.loads(r))
-                except Exception:
-                    pass
-            
-            tactics = set()
-            highest_risk = 0.0
-            
-            for r in records:
-                if "mitre_tactic" in r:
-                    tactics.add(r["mitre_tactic"])
-                risk = r.get("risk_score", 0.0)
-                if risk > highest_risk:
-                    highest_risk = risk
-            
-            if len(tactics) >= 2 or highest_risk >= 80.0:
-                incident = {
-                    "incident_id": str(uuid.uuid4()),
-                    "source_ip": src_ip,
-                    "severity": "critical" if highest_risk >= 90.0 else "high",
-                    "risk_score": highest_risk,
-                    "related_alerts": len(records),
-                    "timestamp": datetime.now(timezone.utc).isoformat()
-                }
-                self.redis.setex(f"incident:{incident['incident_id']}", self.time_window_sec, json.dumps(incident))
-                return incident
+            with Lock(self.redis, lock_name, timeout=10, blocking_timeout=2):
+                raw_records = self._correlate_script(keys=[key], args=[time_ms, json.dumps(alert), self.time_window_sec, self.threshold])
                 
+                if not raw_records:
+                    return None
+                    
+                incident_data = raw_records[0] if len(raw_records) > 1 else None
+                records = raw_records[1] if len(raw_records) > 1 else raw_records
+                
+                if not records:
+                    return None
+                    
+                tactics = set()
+                highest_risk = 0.0
+                
+                for r in records:
+                    if isinstance(r, (bytes, str)):
+                        try:
+                            parsed = json.loads(r)
+                            tactics.add(parsed.get("tactic", "unknown"))
+                            highest_risk = max(highest_risk, float(parsed.get("risk_score", 0.0)))
+                        except Exception:
+                            continue
+                            
+                if len(tactics) >= 2 or highest_risk >= 80.0:
+                    incident = {
+                        "incident_id": str(uuid.uuid4()),
+                        "source_ip": src_ip,
+                        "tactics": list(tactics),
+                        "max_risk_score": highest_risk,
+                        "evidence_count": len(records),
+                        "timestamp": time_ms
+                    }
+                    self.redis.setex(f"incident:{incident['incident_id']}", self.time_window_sec, json.dumps(incident))
+                    return incident
+                return None
+        except Exception:
             return None
             
         except Exception:

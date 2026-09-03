@@ -33,6 +33,13 @@ spec:
   - to:
     - podSelector:
         matchLabels:
+          app: redpanda
+    ports:
+    - protocol: TCP
+      port: 9092
+  - to:
+    - podSelector:
+        matchLabels:
           app: redis
     ports:
     - protocol: TCP
@@ -72,7 +79,10 @@ spec:
   - from:
     - namespaceSelector:
         matchLabels:
-          kubernetes.io/metadata.name: ingress-nginx
+          name: ingress-nginx
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: ingress-nginx
     ports:
     - protocol: TCP
       port: 8000

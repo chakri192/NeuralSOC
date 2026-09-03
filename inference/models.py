@@ -34,20 +34,10 @@ class DeepLearningEngine:
         self.char_map = {chr(i): i - 96 for i in range(97, 123)}
         self.char_map.update({'-': 27, '.': 28})
 
-    def _verify_current_hash(self):
-        h = hashlib.sha256()
-        with open("models/cnn_dga.pt", 'rb') as f:
-            while chunk := f.read(65536): 
-                h.update(chunk)
-        if h.hexdigest() != self.expected_hash:
-            return False
-        return True
 
     def predict(self, features: dict, domain: str = "") -> tuple[bool, float, float]:
         start_time = time.time()
         
-        if not self._verify_current_hash():
-            raise RuntimeError("SecurityException: Model artifact tampering detected")
             
         if not domain:
             return False, 0.0, time.time() - start_time

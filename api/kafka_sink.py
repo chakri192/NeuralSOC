@@ -64,7 +64,7 @@ def run_sink():
                     batch.append(new_alert)
 
             # Commit if batch size reached or if we have records and a second has passed
-            if len(batch) >= MAX_BATCH_SIZE or (len(batch) > 0 and not records):
+            if (len(batch) >= MAX_BATCH_SIZE) or (len(batch) > 0 and time.time() - last_commit >= 5):
                 try:
                     db.bulk_save_objects(batch)
                     db.commit()
