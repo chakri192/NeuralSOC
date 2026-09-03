@@ -43,7 +43,7 @@ app.add_middleware(
     allow_origins=os.getenv("ALLOWED_ORIGINS", "http://localhost:8501").split(","), # In production restrict this
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["*"],
+    allow_headers=["Authorization", "Content-Type", "X-API-Key"],
 )
 
 @app.get("/healthz")
@@ -62,7 +62,7 @@ from fastapi.responses import JSONResponse
 
 @app.exception_handler(RequestValidationError)
 async def validation_handler(request: Request, exc: RequestValidationError):
-    return JSONResponse(status_code=422, content={"detail": exc.errors()})
+    return JSONResponse(status_code=422, content={"detail": "Validation Error"})
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):

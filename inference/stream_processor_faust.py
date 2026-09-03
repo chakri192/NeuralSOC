@@ -44,7 +44,7 @@ BROKERS = os.getenv("REDPANDA_BROKERS", "127.0.0.1:9092")
 # ----------------------------------------------------------------------
 import torch
 torch.set_num_threads(1)
-CPU_COUNT = max(1, os.cpu_count() or 1)
+CPU_COUNT = min(16, max(1, os.cpu_count() or 1))
 executor = ThreadPoolExecutor(max_workers=CPU_COUNT)
 
 app = faust.App(
