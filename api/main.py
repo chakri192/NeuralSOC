@@ -1,3 +1,4 @@
+from fastapi.responses import PlainTextResponse
 import psutil
 from fastapi import FastAPI, Depends, Security, HTTPException, status, Request, Query
 from fastapi.responses import JSONResponse
@@ -58,10 +59,11 @@ app.add_middleware(
 def healthcheck():
     return {"status": "ok", "version": "1.0.0"}
 
-@app.get("/metrics")
-@limiter.limit("10/second")
+@app.get("/metrics", response_class=PlainTextResponse)
 def metrics():
-    return {"cpu": psutil.cpu_percent(), "mem": psutil.virtual_memory().percent} # Placeholder for prometheus
+    cpu = psutil.cpu_percent()
+    mem = psutil.virtual_memory().percent
+    return f'# HELP tsoc_cpu_usage CPU Usage\n# TYPE tsoc_cpu_usage gauge\ntsoc_cpu_usage {cpu}\n# HELP tsoc_mem_usage Memory Usage\n# TYPE tsoc_mem_usage gauge\ntsoc_mem_usage {mem}\n'
 
 
 # 1. SECURITY FIX: Global Exception Handler to prevent Stack Trace Leakage

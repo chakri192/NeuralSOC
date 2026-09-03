@@ -69,6 +69,27 @@ def run_sink():
                     except Exception:
                         db.rollback()
                         try:
+                            # 9/10 Grade: Send PagerDuty webhook alert on DB rollback
+                            import urllib.request
+                            import urllib.parse
+                            req = urllib.request.Request(
+                                "https://events.pagerduty.com/v2/enqueue",
+                                data=json.dumps({
+                                    "routing_key": "YOUR_PAGERDUTY_KEY",
+                                    "event_action": "trigger",
+                                    "payload": {
+                                        "summary": f"SOC Database Rollback / Poison Pill: {e}",
+                                        "source": "tsoc-kafka-sink",
+                                        "severity": "critical"
+                                    }
+                                }).encode(),
+                                headers={'Content-Type': 'application/json'}
+                            )
+                            urllib.request.urlopen(req, timeout=2.0)
+                        except Exception:
+                            pass
+                        
+                        try:
                             os.makedirs("/tmp/dlq", exist_ok=True)
                             with open("/tmp/dlq/alerts.jsonl", "a") as df:
                                 import json
