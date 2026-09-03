@@ -1,10 +1,9 @@
 import torch
 import hashlib
-import hmac
+import os
 import time
 import logging
 import unicodedata
-import os
 
 logger = logging.getLogger(__name__)
 
@@ -12,23 +11,19 @@ class DeepLearningEngine:
     def __init__(self):
         self.mock_mode = False
         artifact_path = os.getenv("MODEL_PATH", "models/cnn_dga.pt")
-        sig_path = artifact_path + ".sig"
-        secret_env = os.getenv("MODEL_HMAC_SECRET")
-        if not secret_env:
-            raise RuntimeError("CRITICAL: MODEL_HMAC_SECRET is missing. Cannot verify model integrity.")
-        secret = secret_env.encode()
+        sha_path = artifact_path + ".sha256"
         
         try:
-            with open(sig_path, "r") as f:
-                self.expected_sig = f.read().strip()
+            with open(sha_path, "r") as f:
+                expected_sha = f.read().strip()
                 
             with open(artifact_path, 'rb') as f:
                 file_data = f.read()
                 
-            computed_sig = hmac.new(secret, file_data, hashlib.sha256).hexdigest()
+            computed_sha = hashlib.sha256(file_data).hexdigest()
             
-            if not hmac.compare_digest(computed_sig, self.expected_sig):
-                raise RuntimeError(f"FATAL: Model HMAC mismatch! Cryptographic integrity compromised.")
+            if computed_sha != expected_sha:
+                raise RuntimeError(f"FATAL: Model SHA-256 mismatch! Expected {expected_sha}, got {computed_sha}")
                 
             self.model = torch.jit.load(artifact_path, map_location=torch.device('cpu'))
             self.model.eval()

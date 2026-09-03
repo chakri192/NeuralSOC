@@ -35,14 +35,20 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
 def get_remote_address(req: Request):
-    real_ip = req.headers.get("X-Real-IP")
-    if real_ip:
-        return real_ip.strip()
-    xff = req.headers.get("X-Forwarded-For")
-    if xff:
-        # Trust ONLY the ingress explicitly, or fallback to real IP if ingress configures X-Real-IP
-        return xff.split(",")[0].strip()
-    return req.client.host
+    # Only trust headers if the physical TCP connection comes from our trusted Kubernetes Ingress IP ranges
+    trusted_proxies = ["10.0.", "172.16.", "172.17.", "172.18.", "172.19.", "172.2", "172.30.", "172.31.", "192.168."]
+    client_host = req.client.host
+    
+    is_trusted = any(client_host.startswith(p) for p in trusted_proxies)
+    if is_trusted:
+        real_ip = req.headers.get("X-Real-IP")
+        if real_ip:
+            return real_ip.strip()
+        xff = req.headers.get("X-Forwarded-For")
+        if xff:
+            return xff.split(",")[0].strip()
+            
+    return client_host
 
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter

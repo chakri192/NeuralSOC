@@ -13,7 +13,10 @@ from inference.risk import calculate_risk_score
 class IncidentCorrelator:
     def __init__(self):
         redis_host = os.getenv("REDIS_HOST", "localhost")
-        pool = redis.ConnectionPool(host=redis_host, port=6379, db=0, decode_responses=True, socket_timeout=2.0, socket_connect_timeout=2.0, max_connections=100, password=os.getenv('REDIS_PASSWORD', ''), ssl=True, ssl_cert_reqs='none')
+                redis_pass = os.getenv('REDIS_PASSWORD')
+        if not redis_pass:
+            raise RuntimeError("CRITICAL: REDIS_PASSWORD missing. Aborting connection.")
+        pool = redis.ConnectionPool(host=redis_host, port=6379, db=0, decode_responses=True, socket_timeout=2.0, socket_connect_timeout=2.0, max_connections=100, password=redis_pass, ssl=True, ssl_cert_reqs='required', ssl_ca_certs='/certs/ca.crt')
         self.redis = redis.Redis(connection_pool=pool)
         self.time_window_sec = int(os.getenv("CORRELATION_WINDOW", "300"))
         
@@ -38,7 +41,7 @@ class IncidentCorrelator:
         threshold = getattr(self, 'threshold', 80.0)
         
         try:
-            with Lock(self.redis, lock_name=f"lock:{src_ip}", timeout=10, blocking_timeout=2):
+            with Lock(self.redis, lock_name=f"lock:{src_ip}", timeout=30, blocking_timeout=15):
                 raw = self._correlate_script(keys=[key], args=[self.time_window_sec, 100, json.dumps(alert)])
                 if not raw:
                     return None

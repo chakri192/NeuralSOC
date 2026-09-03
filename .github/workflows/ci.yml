@@ -57,9 +57,16 @@ jobs:
         uses: aquasecurity/trivy-action@0.14.0
         with:
           image-ref: 'tsoc:latest'
-          format: 'table'
+          format: 'json'
+          output: 'trivy-report.json'
           exit-code: '1'
           severity: 'HIGH,CRITICAL'
+      - name: Upload Trivy results
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: trivy-report
+          path: trivy-report.json
 
       - name: Upload Trivy results
         uses: actions/upload-artifact@v3

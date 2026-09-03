@@ -33,13 +33,6 @@ spec:
   - to:
     - podSelector:
         matchLabels:
-          app: kafka
-    ports:
-    - protocol: TCP
-      port: 9092
-  - to:
-    - podSelector:
-        matchLabels:
           app: redis
     ports:
     - protocol: TCP
