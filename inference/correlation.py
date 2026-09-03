@@ -13,7 +13,7 @@ from inference.risk import calculate_risk_score
 class IncidentCorrelator:
     def __init__(self):
         redis_host = os.getenv("REDIS_HOST", "localhost")
-                redis_pass = os.getenv('REDIS_PASSWORD')
+        redis_pass = os.getenv('REDIS_PASSWORD')
         if not redis_pass:
             raise RuntimeError("CRITICAL: REDIS_PASSWORD missing. Aborting connection.")
         pool = redis.ConnectionPool(host=redis_host, port=6379, db=0, decode_responses=True, socket_timeout=2.0, socket_connect_timeout=2.0, max_connections=100, password=redis_pass, ssl=True, ssl_cert_reqs='required', ssl_ca_certs='/certs/ca.crt')
@@ -41,39 +41,42 @@ class IncidentCorrelator:
         threshold = getattr(self, 'threshold', 80.0)
         
         try:
-            raw = self._correlate_script(keys=[key], args=[self.time_window_sec, 100, json.dumps(alert)])
-            if not raw:
-                return None
+            from redis.lock import Lock
+            with Lock(self.redis, lock_name=f"lock:{src_ip}", timeout=30, blocking_timeout=5):
+                raw = self._correlate_script(keys=[key], args=[self.time_window_sec, 100, json.dumps(alert)])
+                if not raw:
+                    return None
+                    
+                records = raw
+                if not records:
+                    return None
+                    
+                tactics = set()
+                highest_risk = 0.0
                 
-            records = raw
-            if not records:
+                for r in records:
+                    if isinstance(r, (bytes, str)):
+                        try:
+                            parsed = json.loads(r)
+                            tactics.add(parsed.get("tactic", "unknown"))
+                            highest_risk = max(highest_risk, float(parsed.get("risk_score", 0.0)))
+                        except Exception:
+                            continue
+                            
+                if len(tactics) >= 2 or highest_risk >= threshold:
+                    import uuid
+                    incident = {
+                        "incident_id": str(uuid.uuid4()),
+                        "source_ip": src_ip,
+                        "tactics": list(tactics),
+                        "max_risk_score": highest_risk,
+                        "evidence_count": len(records),
+                        "timestamp": time_ms
+                    }
+                    self.redis.setex(f"incident:{incident['incident_id']}", self.time_window_sec, json.dumps(incident))
+                    self.redis.publish("incidents_channel", json.dumps(incident))
+                    return incident
                 return None
-                
-            tactics = set()
-            highest_risk = 0.0
-            
-            for r in records:
-                if isinstance(r, (bytes, str)):
-                    try:
-                        parsed = json.loads(r)
-                        tactics.add(parsed.get("tactic", "unknown"))
-                        highest_risk = max(highest_risk, float(parsed.get("risk_score", 0.0)))
-                    except Exception:
-                        continue
-                        
-            if len(tactics) >= 2 or highest_risk >= threshold:
-                import uuid
-                incident = {
-                    "incident_id": str(uuid.uuid4()),
-                    "source_ip": src_ip,
-                    "tactics": list(tactics),
-                    "max_risk_score": highest_risk,
-                    "evidence_count": len(records),
-                    "timestamp": time_ms
-                }
-                self.redis.setex(f"incident:{incident['incident_id']}", self.time_window_sec, json.dumps(incident))
-                return incident
-            return None
         except Exception as e:
             logger.error(f"Correlation error: {e}")
             return None

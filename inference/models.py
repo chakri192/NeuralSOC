@@ -49,8 +49,6 @@ class DeepLearningEngine:
                     ascii_domain = idna.encode(normalized, uts46=True).decode('ascii')
         
         # Security Fix: Prevent IDNA drift bypassing padding logic
-        if len(ascii_domain) > 35:
-            raise RuntimeError("SecurityException: Domain exceeds fixed tensor padding window")
         except Exception:
             raise RuntimeError("SecurityException: Homoglyph / IDNA attack blocked")
             

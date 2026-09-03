@@ -125,14 +125,12 @@ async def process_traffic(stream):
                 
                 if is_valid:
                     alert = await app.enricher.enrich(alert)
-                    send_fut = await security_alerts_topic.send(value=alert)
-                    await send_fut
+                    await asyncio.wait_for(security_alerts_topic.send(value=alert), timeout=5.0)
                     
                     # Correlation in a thread
                     incident = await asyncio.wait_for(asyncio.get_running_loop().run_in_executor(executor, app.correlator.add_alert, alert), timeout=3.0)
                     if incident:
-                        inc_fut = await incidents_topic.send(value=incident)
-                        await inc_fut
+                        await asyncio.wait_for(incidents_topic.send(value=incident), timeout=5.0)
                 else:
                     logger.error(f"[Faust] Dropped invalid alert schema: {err}")
         except Exception as e:

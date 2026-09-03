@@ -60,7 +60,7 @@ spec:
             command:
             - python
             - -c
-            - "import faust; print('ok')"
+            - "import urllib.request; urllib.request.urlopen('http://localhost:6066/')"
           initialDelaySeconds: 60
           periodSeconds: 20
         readinessProbe:
@@ -68,7 +68,7 @@ spec:
             command:
             - python
             - -c
-            - "import faust; print('ok')"
+            - "import urllib.request; urllib.request.urlopen('http://localhost:6066/')"
           initialDelaySeconds: 15
           periodSeconds: 10
         securityContext:
