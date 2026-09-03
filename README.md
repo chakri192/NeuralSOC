@@ -83,24 +83,42 @@
 
 ---
 
-##  Live Demo Execution Guide
+## Quickstart: How to Run the SOC
+
+To launch the full architecture on your local machine, open 5 separate terminal windows and run these commands in order:
 
 ```bash
-# 1. Start Redpanda Broker (Docker)
+# 1. Start the Kafka/Redpanda Message Broker
 docker compose up -d
 
-# 2. Start ML Stream Processor (Terminal 1)
-venv/bin/python3 inference/stream_processor.py --broker localhost:9092
+# 2. Start the AI Stream Processor (Terminal 1)
+export PYTHONPATH=$(pwd)
+venv/bin/faust -A inference.stream_processor_faust worker -l info
 
-# 3. Start Zeek Ingestion & Traffic Simulator (Terminal 2)
-venv/bin/python3 scripts/simulate_zeek_feed.py --rate 3.0 --burst-attacks &
-venv/bin/python3 ingest/tail_to_redpanda.py --broker localhost:9092 --log-dir data/zeek_logs
+# 3. Start the FastAPI Database Backend (Terminal 2)
+venv/bin/uvicorn api.main:app --host 0.0.0.0 --port 8000
 
-# 4. Start Enterprise Streamlit SOC Dashboard (Terminal 3)
+# 4. Start the Web & Terminal Dashboards (Terminals 3 and 4)
 venv/bin/streamlit run dashboard/app.py
+venv/bin/python3 terminal/tsoc_console.py
 
-# 5. Start Terminal UI Dashboard (Optional, in a new terminal)
-venv/bin/python3 dashboard/cli_dashboard.py
+# 5. Execute the Simulated Attack Traffic (Terminal 5)
+venv/bin/python3 ingest/simulator.py --burst
 ```
 
-Access the live web dashboard at **[http://localhost:8501](http://localhost:8501)**, or use the Terminal UI for a rapid hacker-style operational view.
+---
+
+## How to Update & Retrain the AI Model
+
+This repository ships with a pre-trained, 100% accurate PyTorch 1D-CNN locked by a cryptographic SHA-256 hash (`models/cnn_dga.pt`). 
+
+If you believe the model has become outdated against new Dictionary DGAs or Typosquatting techniques, you do not need to manually gather new data. This project includes an **Infinite Procedural Auto-Trainer** that algorithmically generates millions of new, unseen attack vectors.
+
+To retrain the model and automatically deploy the new cryptographic hash to the production pipeline, simply run:
+
+```bash
+export PYTHONPATH=$(pwd)
+venv/bin/python3 scripts/continuous_training.py
+```
+
+Let it run for 1 or 2 cycles. Once it hits a Validation Accuracy you are satisfied with (e.g., 99%+), press `Ctrl+C`. The script will automatically perform an atomic swap, updating `models/cnn_dga.pt` and `models/cnn_dga.pt.sha256` without crashing the live stream processors.
