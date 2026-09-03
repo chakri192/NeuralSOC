@@ -43,6 +43,7 @@ jobs:
       - name: Run Bandit Python Static Analysis
         run: |
           bandit -r . -x tests,docs,.github,venv --format json -o bandit-report.json
+          bandit -r . -x tests,docs,.github,venv --severity-level low  # Fails the build if any issue exists
 
       - name: Upload Bandit results
         uses: actions/upload-artifact@v3

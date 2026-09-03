@@ -14,29 +14,19 @@ spec:
       labels:
         app: tsoc-stream-processor
     spec:
+      volumes:
+      - name: model-volume
+        emptyDir: {}
       containers:
       - env:
         - name: REDPANDA_BROKERS
           value: soc-redpanda-cluster.prod.svc.cluster.local:9092
         image: your-registry.com/tsoc/stream-processor:v1.0
-                startupProbe:
-          httpGet:
-            path: /healthz
-            port: 8000
-          failureThreshold: 30
-          periodSeconds: 5
-        livenessProbe:
-          httpGet:
-            path: /healthz
-            port: 6066
-          initialDelaySeconds: 30
-          periodSeconds: 15
-                readinessProbe:
-          tcpSocket:
-            port: 6066
-          initialDelaySeconds: 15
-          periodSeconds: 10
         name: faust-worker
+        volumeMounts:
+        - name: model-volume
+          mountPath: /app/models
+          readOnly: true
         resources:
           limits:
             cpu: 1000m
@@ -103,6 +93,12 @@ spec:
           requests:
             cpu: 250m
             memory: 256Mi
+        startupProbe:
+          httpGet:
+            path: /healthz
+            port: 8000
+          failureThreshold: 30
+          periodSeconds: 5
         livenessProbe:
           httpGet:
             path: /healthz
