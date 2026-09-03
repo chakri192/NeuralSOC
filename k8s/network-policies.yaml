@@ -1,9 +1,18 @@
 ---
+apiVersion: projectcalico.org/v3
+kind: GlobalNetworkPolicy
+metadata:
+  name: default-deny-all-namespaces
+spec:
+  namespaceSelector: all()
+  types:
+  - Ingress
+  - Egress
+---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: default-deny-kube-system
-  namespace: kube-system
 spec:
   podSelector: {}
   policyTypes:
@@ -14,7 +23,6 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: default-deny-all
-  namespace: default
 spec:
   podSelector: {}
   policyTypes:
@@ -26,7 +34,6 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: stream-processor-allow
-  namespace: default
 spec:
   podSelector:
     matchLabels:
@@ -73,7 +80,6 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: api-allow
-  namespace: default
 spec:
   podSelector:
     matchLabels:
@@ -122,7 +128,6 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: dashboard-allow
-  namespace: default
 spec:
   podSelector:
     matchLabels:
