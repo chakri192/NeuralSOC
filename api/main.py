@@ -37,7 +37,7 @@ def get_remote_address(req: Request):
     xff = req.headers.get("X-Forwarded-For")
     if xff:
         hops = [h.strip() for h in xff.split(",") if h.strip()]
-        return hops[-1] if hops else req.client.host
+        return hops[0] if hops else req.client.host
     return req.client.host
     return req.client.host
 
@@ -50,7 +50,7 @@ from fastapi.middleware.cors import CORSMiddleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=os.getenv("ALLOWED_ORIGINS", "http://localhost:8501").split(","), # In production restrict this
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-API-Key"],
 )

@@ -2,6 +2,8 @@ import logging
 import json
 import os
 import time
+import os
+MAX_BATCH_SIZE = 100
 from kafka import KafkaConsumer
 from api.database import SessionLocal, engine, Base
 from api.models import Alert
@@ -22,7 +24,7 @@ def run_sink():
         # DATA LOSS FIX: enable_auto_commit=False prevents dropped alerts
         consumer = KafkaConsumer(
             'security_alerts',
-            bootstrap_servers=[brokers],
+            bootstrap_servers=[b.strip() for b in brokers.split(',') if b.strip()],
             auto_offset_reset='earliest',
             enable_auto_commit=False, 
             group_id='db_sink_group',
@@ -34,6 +36,8 @@ def run_sink():
         
     db = SessionLocal()
     import time
+import os
+MAX_BATCH_SIZE = 100
     batch = []
     last_commit = time.time()
     
@@ -61,6 +65,20 @@ def run_sink():
             except Exception as e:
                 db.rollback()
                 logger.error(f"Sink commit error: {e}")
-                # DLQ logic goes here, but we clear batch so we don't poison pill forever
+                for msg in batch:
+                    try:
+                        import uuid
+                        db.add(Alert(**msg.__dict__ if hasattr(msg, '__dict__') else msg))
+                        db.commit()
+                    except Exception:
+                        db.rollback()
+                        try:
+                            os.makedirs("/tmp/dlq", exist_ok=True)
+                            with open("/tmp/dlq/alerts.jsonl", "a") as df:
+                                import json
+                                df.write(json.dumps({"poison": msg.__dict__ if hasattr(msg, '__dict__') else msg, "err": str(e)}) + "
+")
+                        except Exception:
+                            pass
                 batch.clear()
                 last_commit = time.time()

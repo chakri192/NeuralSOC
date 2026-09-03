@@ -1,3 +1,5 @@
+import logging
+logger = logging.getLogger(__name__)
 from redis.lock import Lock
 import uuid
 import time
@@ -41,7 +43,7 @@ class IncidentCorrelator:
                 if not raw:
                     return None
                     
-                records = raw[1:] if len(raw) > 1 else raw
+                records = raw
                 if not records:
                     return None
                     

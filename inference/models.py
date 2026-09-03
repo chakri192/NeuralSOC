@@ -54,6 +54,9 @@ class DeepLearningEngine:
             
         encoded = [self.char_map.get(c, 0) for c in domain]
         
+        if len(encoded) != len(domain) or any(c == 0 for c in encoded):
+            raise RuntimeError("SecurityException: Unmapped homoglyph detected")
+        
         if len(encoded) > 35:
             raise RuntimeError("SecurityException: Domain exceeds maximum length bound of 35")
         
