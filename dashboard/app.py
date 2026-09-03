@@ -12,18 +12,6 @@ from dashboard.components.empty_states import render_broker_unavailable
 import subprocess
 import requests
 
-@st.cache_data(ttl=3600)
-def check_for_updates():
-    try:
-        local_hash = subprocess.check_output(['git', 'rev-parse', 'HEAD'], stderr=subprocess.DEVNULL).strip().decode('utf-8')
-        resp = requests.get("https://api.github.com/repos/chakri192/NeuralSOC/commits/main", timeout=3)
-        if resp.status_code == 200:
-            remote_hash = resp.json().get('sha', '')
-            if remote_hash and local_hash != remote_hash:
-                return True
-    except Exception:
-        pass
-    return False
 
 st.set_page_config(
     page_title="T-SOC Operations Center",
