@@ -71,7 +71,7 @@ async def on_stop():
     except Exception:
         pass
     try:
-        executor.shutdown(wait=False)
+        executor.shutdown(wait=True)
     except Exception:
         pass
 
@@ -139,7 +139,7 @@ async def process_traffic(stream):
                     logger.error(f"[Faust] Dropped invalid alert schema: {err}")
         except Exception as e:
             logger.exception("[DLQ] Pipeline crash prevented. Routing to dead-letter")
-            safe_event = {k: v for k, v in event.items() if k not in {"id.orig_h", "id.resp_h", "uid", "payload"}}
+            safe_event = {k: str(v)[:1024] for k, v in event.items() if k not in {"id.orig_h", "id.resp_h", "uid", "payload"}}
             await dlq_topic.send(value={"raw_event": safe_event, "error": str(e), "timestamp": datetime.now(timezone.utc).isoformat()})
 
 if __name__ == '__main__':

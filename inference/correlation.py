@@ -24,9 +24,17 @@ class IncidentCorrelator:
             local key = KEYS[1]
             local window = tonumber(ARGV[1])
             local max_records = tonumber(ARGV[2])
-            redis.call('LPUSH', key, ARGV[3])
+            local alert_data = ARGV[3]
+            local dedup_key = ARGV[4]
+            
+            if redis.call('EXISTS', dedup_key) == 1 then
+                return nil
+            end
+            
+            redis.call('LPUSH', key, alert_data)
             redis.call('LTRIM', key, 0, max_records - 1)
             redis.call('EXPIRE', key, window)
+            
             local records = redis.call('LRANGE', key, 0, -1)
             return records
         ''')
@@ -43,7 +51,7 @@ class IncidentCorrelator:
         try:
             from redis.lock import Lock
             with Lock(self.redis, lock_name=f"lock:{src_ip}", timeout=30, blocking_timeout=5):
-                raw = self._correlate_script(keys=[key], args=[self.time_window_sec, 100, json.dumps(alert)])
+                raw = self._correlate_script(keys=[key], args=[self.time_window_sec, 100, json.dumps(alert), f"dedup:{src_ip}"])
                 if not raw:
                     return None
                     

@@ -44,10 +44,7 @@ def get_remote_address(req: Request):
     except ValueError:
         is_trusted = False
         
-    if is_trusted:
-        xff = req.headers.get("X-Forwarded-For")
-        if xff:
-            return xff.split(",")[0].strip()
+    return client_host
             
     return client_host
 

@@ -16,7 +16,7 @@ class ThreatEnricher:
         import re
         if not re.match(r'^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$', ip):
             return {}
-        if ip.startswith("10.") or ip.startswith("192.168.") or ip.startswith("172.") or ip.startswith("127."):
+        if ip.startswith("169.254.") or ip.startswith("10.") or ip.startswith("192.168.") or ip.startswith("172.") or ip.startswith("127."):
             return {}
             
         try:
@@ -29,7 +29,7 @@ class ThreatEnricher:
             response = await loop.run_in_executor(
                 None, 
                 urllib.request.urlopen, 
-                req
+                req, timeout=5.0
             )
             return json.loads(response.read().decode())
         except Exception as e:
