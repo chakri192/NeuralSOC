@@ -1,4 +1,8 @@
+import os
+from fastapi import HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+
+API_KEY = os.getenv("TSOC_API_KEY", "default-dev-key")
 security = HTTPBearer()
 import os
 import traceback
@@ -19,8 +23,11 @@ from slowapi.errors import RateLimitExceeded
 logging.basicConfig(level=logging.INFO, handlers=[logging.StreamHandler()])
 logger = logging.getLogger(__name__)
 
-def get_remote_address(req: Request):
-    return req.client.host if req.client else "127.0.0.1"
+def get_remote_address(request: Request):
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "127.0.0.1"
 
 limiter = Limiter(key_func=get_remote_address)
 app = FastAPI()
@@ -66,6 +73,8 @@ def healthz(): return {'status': 'ok'}
 @app.get("/api/v1/alerts", response_model=List[AlertResponse])
 @limiter.limit("100/minute")
 def get_alerts(request: Request, cursor: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=100), db: Session = Depends(get_db), token: HTTPAuthorizationCredentials = Depends(security)):
+    if token.credentials != API_KEY:
+        raise HTTPException(status_code=403, detail="Invalid API Key")
     if cursor == 0:
         return db.query(models.Alert).order_by(models.Alert.id.desc()).limit(limit).all()
     return db.query(models.Alert).filter(models.Alert.id < cursor).order_by(models.Alert.id.desc()).limit(limit).all()

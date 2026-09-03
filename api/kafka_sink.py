@@ -56,8 +56,8 @@ def run_sink():
             if (len(batch) >= MAX_BATCH_SIZE) or (len(batch) > 0 and time.time() - last_commit >= 5):
                 try:
                     db.bulk_save_objects(batch)
-                    consumer.commit()  # Kafka first
-                    db.commit()        # Postgres second
+                    db.commit()        # Commit Postgres FIRST
+                    consumer.commit()   # Commit Kafka offsets SECOND
                 except Exception as e:
                     db.rollback()
                     logger.error(f"Sink commit error: {e}")
