@@ -96,8 +96,6 @@ class ThreatModelOrchestrator:
         ml_alerts = []
         
         # Filter out the massive background Zeek dataset to keep the 7 hackathon attacks perfectly proportionate
-        if not event.get("simulated", False):
-            return ml_alerts
             
         evt_type = event.get("event_type")
         

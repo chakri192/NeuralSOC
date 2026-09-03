@@ -26,7 +26,7 @@ jobs:
 
       - name: Run Bandit Python Static Analysis
         run: |
-          bandit -r . -ll -x tests,docs,.github,venv --format json -o bandit-report.json || true
+          bandit -r . -ll -x tests,docs,.github,venv --format json -o bandit-report.json
 
       - name: Upload Bandit results
         uses: actions/upload-artifact@v3
@@ -41,6 +41,7 @@ jobs:
           format: "json"
           output: "trivy-report.json"
           severity: "HIGH,CRITICAL"
+          exit-code: 1
 
       - name: Upload Trivy results
         uses: actions/upload-artifact@v3
