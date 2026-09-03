@@ -1,3 +1,4 @@
+import jsonschema
 import logging
 import json
 import os
@@ -24,7 +25,7 @@ def run_sink():
         value_deserializer=lambda m: m
     )
     
-    db = SessionLocal()
+    db = SessionLocal(expire_on_commit=False)
     MAX_BATCH_SIZE = 100
     batch = []
     last_commit = time.time()
@@ -37,37 +38,41 @@ def run_sink():
                     for msg in messages:
                         try:
                             data = json.loads(msg.value.decode("utf-8"))
+                            jsonschema.validate(data, {"type": "object", "properties": {"event_type": {"type": "string"}}, "required": ["event_type"]})
                             if not data.get("alert_id"): continue
-                            batch.append(Alert(**data))
+                            batch.append(Alert(**{k: v for k, v in data.items() if hasattr(Alert, k)}))
                         except Exception as e:
                             logger.error(f"Skip bad message: {e}")
+                            import os, json, fcntl
                             try:
-                                import os, json
                                 os.makedirs("/tmp/dlq", exist_ok=True)
                                 with open("/tmp/dlq/alerts.jsonl", "a") as df:
-                                    df.write(json.dumps({"poison_pill": True, "err": str(e)}) + "
-")
+                                    fcntl.flock(df, fcntl.LOCK_EX)
+                                    df.write(json.dumps({"poison_pill": True, "err": str(e)}) + "\n")
+                                    fcntl.flock(df, fcntl.LOCK_UN)
                             except:
                                 pass
                             
             if (len(batch) >= MAX_BATCH_SIZE) or (len(batch) > 0 and time.time() - last_commit >= 5):
                 try:
                     db.bulk_save_objects(batch)
-                    db.flush()
-                    consumer.commit()
-                    db.commit()
+                    consumer.commit()  # Kafka first
+                    db.commit()        # Postgres second
                 except Exception as e:
                     db.rollback()
                     logger.error(f"Sink commit error: {e}")
                     try:
-                        import os, json
+                        import os, json, fcntl
                         os.makedirs("/tmp/dlq", exist_ok=True)
                         with open("/tmp/dlq/alerts.jsonl", "a") as df:
-                            df.write(json.dumps({"batch_len": len(batch), "err": str(e)}) + "\n")
-                    except:
+                            fcntl.flock(df, fcntl.LOCK_EX)
+                            df.write(json.dumps({"batch_len": len(batch), "err": str(e), "alerts": [{c.name: str(getattr(a, c.name)) for c in a.__table__.columns} for a in batch]}) + "\n")
+                            df.flush() # Force flush before unlock
+                            fcntl.flock(df, fcntl.LOCK_UN)
+                    except Exception:
                         pass
                 finally:
-                    batch.clear()
+                    batch.clear() # ALWAYS clear batch to prevent infinite retry loops
                     last_commit = time.time()
     finally:
         db.close()

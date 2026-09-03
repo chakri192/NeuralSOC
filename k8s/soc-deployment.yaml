@@ -14,14 +14,17 @@ spec:
       labels:
         app: tsoc-stream-processor
     spec:
+      terminationGracePeriodSeconds: 60
       volumes:
       - name: tmp
-        emptyDir: {}
+        emptyDir:
+          sizeLimit: 50Mi
       - name: dlq
-        persistentVolumeClaim:
-          claimName: tsoc-dlq-pvc
+        emptyDir:
+          sizeLimit: 50Mi
       - name: cache
-        emptyDir: {}
+        emptyDir:
+          sizeLimit: 50Mi
       containers:
       - env:
         - name: SLACK_WEBHOOK_URL
@@ -36,44 +39,44 @@ spec:
               key: pagerduty_routing_key
         - name: REDPANDA_BROKERS
           value: soc-redpanda-cluster.prod.svc.cluster.local:9092
+        - name: REDIS_HOST
+          value: redis.redis.svc.cluster.local
         image: your-registry.com/tsoc/stream-processor:v1.0
         name: faust-worker
         volumeMounts:
         - name: tmp
           mountPath: /tmp
+        - name: dlq
+          mountPath: /tmp/dlq
         - name: cache
           mountPath: /var/lib/app
         resources:
           limits:
             cpu: 1000m
             memory: 2Gi
+            ephemeral-storage: 1Gi
           requests:
             cpu: 500m
             memory: 1Gi
         startupProbe:
-          exec:
-            command:
-            - curl
-            - -f
-            - http://localhost:6066/agent/health
+          httpGet:
+            path: /healthz
+            port: 6066
           failureThreshold: 3
           periodSeconds: 10
         livenessProbe:
-          exec:
-            command:
-            - curl
-            - -f
-            - http://localhost:6066/agent/health
+          httpGet:
+            path: /healthz
+            port: 6066
           initialDelaySeconds: 60
           periodSeconds: 20
         readinessProbe:
-          exec:
-            command:
-            - curl
-            - -f
-            - http://localhost:6066/agent/health
+          httpGet:
+            path: /healthz
+            port: 6066
           initialDelaySeconds: 15
           periodSeconds: 10
+
         securityContext:
           readOnlyRootFilesystem: true
           runAsNonRoot: true
@@ -98,14 +101,17 @@ spec:
       labels:
         app: tsoc-api
     spec:
+      terminationGracePeriodSeconds: 60
       volumes:
       - name: tmp
-        emptyDir: {}
+        emptyDir:
+          sizeLimit: 50Mi
       - name: dlq
-        persistentVolumeClaim:
-          claimName: tsoc-dlq-pvc
+        emptyDir:
+          sizeLimit: 50Mi
       - name: cache
-        emptyDir: {}
+        emptyDir:
+          sizeLimit: 50Mi
       containers:
       - env:
         - name: SLACK_WEBHOOK_URL
@@ -123,8 +129,14 @@ spec:
             secretKeyRef:
               key: api-key
               name: tsoc-secrets
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: tsoc-secrets
+              key: DATABASE_URL
         image: your-registry.com/tsoc/api:v1.0
         name: fastapi
+        command: ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
         ports:
         - name: http
           containerPort: 8000
@@ -132,6 +144,8 @@ spec:
         volumeMounts:
         - name: tmp
           mountPath: /tmp
+        - name: dlq
+          mountPath: /tmp/dlq
         - name: cache
           mountPath: /var/lib/app
         resources:
@@ -146,18 +160,18 @@ spec:
             path: /healthz
             port: 8000
           failureThreshold: 3
-          periodSeconds: 5
+          periodSeconds: 10
         livenessProbe:
           httpGet:
             path: /healthz
             port: 8000
-          initialDelaySeconds: 15
+          initialDelaySeconds: 60
           periodSeconds: 20
         readinessProbe:
           httpGet:
             path: /healthz
             port: 8000
-          initialDelaySeconds: 5
+          initialDelaySeconds: 15
           periodSeconds: 10
         securityContext:
           readOnlyRootFilesystem: true

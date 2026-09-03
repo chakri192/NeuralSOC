@@ -2,9 +2,9 @@ apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: pdb-stream-processor
-  namespace: default
+  namespace: tsoc
 spec:
-  minAvailable: 50%
+  maxUnavailable: 1
   selector:
     matchLabels:
       app: tsoc-stream-processor
@@ -13,9 +13,9 @@ apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: pdb-api
-  namespace: default
+  namespace: tsoc
 spec:
-  minAvailable: 50%
+  maxUnavailable: 1
   selector:
     matchLabels:
       app: tsoc-api

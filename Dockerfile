@@ -8,6 +8,7 @@ RUN pip install --user --no-cache-dir jsonschema python-dateutil faust-cchardet
 
 # Stage 2: Production
 FROM python:3.9-slim-bullseye
+RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 RUN useradd --create-home --no-log-init soc_user
 WORKDIR /app
 COPY --from=builder /root/.local /home/soc_user/.local
@@ -16,5 +17,5 @@ COPY --chown=soc_user:soc_user . .
 USER soc_user
 ENV PYTHONUNBUFFERED=1
 # HEALTHCHECK instruction added for Docker runtime resilience
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD python -c "import sys; sys.exit(0)"
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD curl -f http://localhost:6066/healthz || curl -f http://localhost:8000/healthz || exit 1
 CMD ["python", "inference/stream_processor_faust.py", "worker", "-l", "info"]

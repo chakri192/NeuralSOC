@@ -1,66 +1,17 @@
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
 metadata:
-  name: hpa-stream-processor
-  annotations:
-    terminationGracePeriodSeconds: "60"
-    ephemeral-storage: "1Gi"
+  name: stream-processor-scaler
+  namespace: tsoc
 spec:
   scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
     name: tsoc-stream-processor
-  minReplicas: 2
-  maxReplicas: 10
-  behavior:
-    scaleDown:
-      stabilizationWindowSeconds: 300
-      policies:
-      - type: Pods
-        value: 1
-        periodSeconds: 60
-  metrics:
-  - type: Resource
-    resource:
-      name: cpu
-      target:
-        type: Utilization
-        averageUtilization: 70
-  - type: Resource
-    resource:
-      name: memory
-      target:
-        type: Utilization
-        averageUtilization: 80
----
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  name: hpa-api
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: tsoc-api
-  minReplicas: 2
-  maxReplicas: 6
-  behavior:
-    scaleDown:
-      stabilizationWindowSeconds: 300
-      policies:
-      - type: Pods
-        value: 1
-        periodSeconds: 60
-  metrics:
-  - type: Resource
-    resource:
-      name: cpu
-      target:
-        type: Utilization
-        averageUtilization: 70
-  - type: Resource
-    resource:
-      name: memory
-      target:
-        type: Utilization
-        averageUtilization: 80
+  minReplicaCount: 2
+  maxReplicaCount: 4
+  triggers:
+  - type: kafka
+    metadata:
+      bootstrapServers: soc-redpanda-cluster.prod.svc.cluster.local:9092
+      consumerGroup: tsoc-stream-processor
+      topic: raw_traffic
+      lagThreshold: "1000"

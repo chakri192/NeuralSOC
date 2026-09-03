@@ -1,115 +1,71 @@
-from fastapi.responses import PlainTextResponse
-import psutil
-from fastapi import FastAPI, Query, Depends, Security, HTTPException, status, Request, Query
-from fastapi.responses import JSONResponse
-from sqlalchemy.orm import Session
-from api.database import SessionLocal, engine, Base
-from api import models, schemas
-from typing import List
-import logging
-
-from fastapi.security.api_key import APIKeyHeader
-
-logger = logging.getLogger("api")
-
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+security = HTTPBearer()
 import os
-API_KEY = os.getenv("TSOC_API_KEY")
-if not API_KEY:
-    raise RuntimeError("TSOC_API_KEY environment variable is required")
-api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
-
-async def get_api_key(api_key_header: str = Security(api_key_header)):
-    import secrets
-    if secrets.compare_digest(api_key_header or '', API_KEY):
-        return api_key_header
-    raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Unauthorized"
-    )
-
-
-app = FastAPI(title="T-SOC API", description="Enterprise SOC Backend")
-
+import traceback
+import logging
+from fastapi import FastAPI, Request, Query, Depends
+from prometheus_fastapi_instrumentator import Instrumentator
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.orm import Session
+from typing import List
+from api.database import get_db
+from api import models
+from pydantic import BaseModel
 from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
+logging.basicConfig(level=logging.INFO, handlers=[logging.StreamHandler()])
+logger = logging.getLogger(__name__)
+
 def get_remote_address(req: Request):
-    return req.headers.get("X-Real-IP", req.headers.get("X-Forwarded-For", req.client.host).split(",")[0].strip())
+    return req.client.host if req.client else "127.0.0.1"
+
 limiter = Limiter(key_func=get_remote_address)
+app = FastAPI()
+Instrumentator().instrument(app).expose(app)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-
-from fastapi.middleware.cors import CORSMiddleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv("ALLOWED_ORIGINS", "https://dashboard.tsoc.local").split(","), # In production restrict this
-    allow_credentials=False,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-API-Key"],
+    allow_origins=["https://dashboard.tsoc.local"],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
+    expose_headers=[]
 )
-
-@app.get("/healthz")
-def healthcheck():
-    return {"status": "ok", "version": "1.0.0"}
-
-@app.get("/metrics", response_class=PlainTextResponse)
-def metrics():
-    cpu = psutil.cpu_percent()
-    mem = psutil.virtual_memory().percent
-    return f'# HELP tsoc_cpu_usage CPU Usage\n# TYPE tsoc_cpu_usage gauge\ntsoc_cpu_usage {cpu}\n# HELP tsoc_mem_usage Memory Usage\n# TYPE tsoc_mem_usage gauge\ntsoc_mem_usage {mem}\n'
-
-
-# 1. SECURITY FIX: Global Exception Handler to prevent Stack Trace Leakage
-from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
 
 @app.exception_handler(RequestValidationError)
 async def validation_handler(request: Request, exc: RequestValidationError):
-    return JSONResponse(status_code=422, content={"detail": "Validation Error"})
+    return JSONResponse(status_code=422, content={"detail": exc.errors()})
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    if isinstance(exc, HTTPException):
-        raise exc
-    logger.error(f"[API Crash Guard] Unhandled exception on {request.url.path}: {str(exc)}")
-    return JSONResponse(
-        status_code=500,
-        content={"error": "Internal Server Error", "message": "An unexpected error occurred. Please contact the SOC administrator."}
-    )
+    logger.error(f"Internal Error: {traceback.format_exc()}")
+    return JSONResponse(status_code=500, content={"message": "Internal Server Error"})
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    except Exception:
-        db.rollback()
-        raise
-    finally:
-        db.close()
+from typing import Optional
+class AlertResponse(BaseModel):
+    id: int
+    alert_id: str
+    timestamp: str
+    source_ip: str
+    destination_ip: str
+    threat_class: Optional[str]
+    severity: Optional[str]
+    confidence_score: float
+    evidence: Optional[str]
+    class Config:
+        orm_mode = True
 
-# 2. PERFORMANCE FIX: Strict Pydantic Query Bounds to prevent Database OOM crashes
+@app.get("/healthz")
+def healthz(): return {'status': 'ok'}
+
 @app.get("/api/v1/alerts", response_model=List[AlertResponse])
-def get_alerts(skip: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=100), db: Session = Depends(get_db)):
-    alerts = db.query(models.Alert).order_by(models.Alert.timestamp.desc()).offset(skip).limit(limit).all()
-    return alerts
-
-from sqlalchemy import func
-@app.get("/api/v1/stats", response_model=schemas.StatsResponse)
-@limiter.limit("50/second")
-def get_stats(request: Request, db: Session = Depends(get_db), api_key: str = Depends(get_api_key)):
-    # Consolidate into a single DB round-trip
-    results = db.query(
-        func.count(models.Alert.id).label('total'),
-        func.sum(func.case((models.Alert.severity == 'critical', 1), else_=0)).label('critical'),
-        func.sum(func.case((models.Alert.severity == 'high', 1), else_=0)).label('high'),
-        func.sum(func.case((models.Alert.severity == 'medium', 1), else_=0)).label('medium')
-    ).first()
-    
-    return {
-        "total_alerts": results.total or 0,
-        "critical": results.critical or 0,
-        "high": results.high or 0,
-        "medium": results.medium or 0
-    }
+@limiter.limit("100/minute")
+def get_alerts(request: Request, cursor: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=100), db: Session = Depends(get_db), token: HTTPAuthorizationCredentials = Depends(security)):
+    if cursor == 0:
+        return db.query(models.Alert).order_by(models.Alert.id.desc()).limit(limit).all()
+    return db.query(models.Alert).filter(models.Alert.id < cursor).order_by(models.Alert.id.desc()).limit(limit).all()

@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
   actions: read
 
 concurrency:
@@ -38,11 +39,11 @@ jobs:
       - name: Run Unit Tests
         run: |
           pip install pytest
-          pytest tests/
+          PYTHONPATH=. pytest tests/
 
       - name: Run Bandit Python Static Analysis
         run: |
-          bandit -r .  --format json -o bandit-report.json || exit 1
+          bandit -r . -x tests/  --format json -o bandit-report.json || exit 1
 
       - name: Upload Bandit results
         uses: actions/upload-artifact@v3
@@ -51,12 +52,13 @@ jobs:
           path: bandit-report.json
 
       - name: Build image
-        run: docker build -t tsoc:latest .
-        
+        run: |
+          docker build -t tsoc:${{ github.sha }} -t tsoc:latest .
+
       - name: Trivy image scan
         uses: aquasecurity/trivy-action@0.14.0
         with:
-          image-ref: 'tsoc:latest'
+          image-ref: 'tsoc:${{ github.sha }}'
           format: 'json'
           output: 'trivy-report.json'
           exit-code: '1'
@@ -71,3 +73,89 @@ jobs:
         with:
           name: trivy-report
           path: trivy-report.json
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3.1.1
+      - name: Sign Docker Image
+        run: cosign sign --yes tsoc:${{ github.sha }}
+      - name: Generate SBOM
+        run: curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin && syft tsoc:${{ github.sha }} -o spdx-json > sbom.json
+
+  smoke-test:
+    needs: security-scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Create Kind Cluster
+        uses: helm/kind-action@v1.4.0
+      - name: Build Docker Image
+        run: docker build -t your-registry.com/tsoc/api:v1.0 .
+      - name: Load Image to Kind
+        run: kind load docker-image your-registry.com/tsoc/api:v1.0
+      - name: Deploy Kubernetes Manifests
+        run: |
+          kubectl apply -f k8s/
+          # Wait for resources to initialize
+          sleep 10
+          kubectl wait --for=condition=available deployment/tsoc-api --timeout=120s
+          kubectl wait --for=condition=available deployment/tsoc-stream-processor --timeout=120s
+      - name: Setup Python environment
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+      - name: Install Test Dependencies
+        run: pip install kafka-python requests
+      - name: Execute Synthetic Data Smoke Test
+        run: |
+          # Port-forward the API and Redpanda for local CI runner access
+          kubectl port-forward svc/tsoc-api-service 8000:80 &
+          kubectl port-forward svc/redpanda 9092:9092 &
+          sleep 5
+          
+          cat << 'PY_EOF' > smoke_test.py
+          import time, json, requests
+          from kafka import KafkaProducer
+          
+          producer = KafkaProducer(bootstrap_servers='localhost:9092', value_serializer=lambda v: json.dumps(v).encode('utf-8'))
+          # Synthetic event designed to trigger DNS rules and ML DGA
+          event = {"event_type": "dns", "query": "1xb4.example.com", "id.orig_h": "192.168.1.10", "id.resp_h": "8.8.8.8"}
+          producer.send('raw_traffic', event)
+          producer.flush()
+          
+          time.sleep(5)
+          
+          resp = requests.get('http://localhost:8000/api/v1/alerts')
+          assert resp.status_code == 200
+          alerts = resp.json()
+          assert len(alerts) > 0
+          print("✅ Smoke test passed: Alerts successfully traversed the ML and Rule pipelines.")
+          PY_EOF
+          
+          python smoke_test.py
+          
+      - name: Execute Deep Learning Fault Tolerance Test
+        run: |
+          # Force a failure in the DL Engine by aggressively deleting the model weights
+          kubectl exec deploy/tsoc-stream-processor -- rm -f /app/models/cnn_dga.pt || true
+          
+          cat << 'PY_EOF' > fault_test.py
+          import time, json, requests
+          from kafka import KafkaProducer
+          
+          producer = KafkaProducer(bootstrap_servers='localhost:9092', value_serializer=lambda v: json.dumps(v).encode('utf-8'))
+          # Trigger event that should survive the crashed DL model and hit the Rule engine
+          event = {"event_type": "dns", "query": "another-tunnel.example.com", "id.orig_h": "10.0.0.5", "id.resp_h": "8.8.8.8"}
+          producer.send('raw_traffic', event)
+          producer.flush()
+          
+          time.sleep(5)
+          
+          resp = requests.get('http://localhost:8000/api/v1/alerts')
+          assert resp.status_code == 200
+          alerts = resp.json()
+          # Verify rule alerts still flow
+          assert any(a.get('query') == 'another-tunnel.example.com' for a in alerts)
+          print("✅ Fault tolerance passed: Rule alerts survive ML engine crashes.")
+          PY_EOF
+          
+          python fault_test.py

@@ -47,7 +47,7 @@ def process_log(file_path, log_type):
         open(file_path, 'a').close()
 
     try:
-        proc = subprocess.Popen(['tail', '-F', file_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        proc = subprocess.Popen(['tail', '-F', file_path], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
         while running:
             line = proc.stdout.readline()
             if not line:
