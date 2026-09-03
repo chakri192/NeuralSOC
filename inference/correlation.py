@@ -27,7 +27,11 @@ class IncidentCorrelator:
 
     def add_alert(self, alert: dict):
         src_ip = alert.get("source_ip")
-        if not src_ip or src_ip == "unknown":
+        if not src_ip or src_ip == "unknown" or str(src_ip).strip() == "":
+            return None
+            
+        # Basic IP sanity to prevent global key poisoning
+        if not all(c.isdigit() or c == '.' or c == ':' for c in src_ip):
             return None
 
         key = f"alerts:{src_ip}"
