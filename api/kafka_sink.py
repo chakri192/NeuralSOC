@@ -33,54 +33,34 @@ def run_sink():
         return
         
     db = SessionLocal()
+    import time
     batch = []
-    MAX_BATCH_SIZE = 100
+    last_commit = time.time()
     
-    try:
-        # PERFORMANCE FIX: Micro-batching via polling instead of row-by-row
-        while True:
-            records = consumer.poll(timeout_ms=1000)
-            
-            for topic_partition, messages in records.items():
-                for message in messages:
-                    data = message.value
-                    
-                    # Deduplication
-                    existing = db.query(Alert).filter(Alert.alert_id == data.get("alert_id")).first()
-                    if existing:
+    while True:
+        records = consumer.poll(timeout_ms=1000)
+        if records:
+            for tp, messages in records.items():
+                for msg in messages:
+                    try:
+                        data = json.loads(msg.value.decode("utf-8"))
+                        if not data.get("alert_id"): continue
+                        batch.append(Alert(**data))
+                    except Exception as e:
+                        logger.error(f"Skip bad message: {e}")
                         continue
                         
-                    new_alert = Alert(
-                        alert_id=data.get("alert_id", ""),
-                        timestamp=data.get("timestamp", ""),
-                        event_type=data.get("event_type", ""),
-                        threat_class=data.get("threat_class", ""),
-                        confidence_score=data.get("confidence_score", 0.0),
-                        severity=data.get("severity", "low"),
-                        source_ip=data.get("source_ip", ""),
-                        destination_ip=data.get("destination_ip", ""),
-                        evidence=json.dumps(data.get("evidence", {}))
-                    )
-                    batch.append(new_alert)
-
-            # Commit if batch size reached or if we have records and a second has passed
-            if (len(batch) >= MAX_BATCH_SIZE) or (len(batch) > 0 and time.time() - last_commit >= 5):
-                try:
-                    db.bulk_save_objects(batch)
-                    db.commit()
-                    consumer.commit() # Securely acknowledge Kafka offset ONLY after DB flush
-                    logger.info(f"[Sink] Bulk committed {len(batch)} alerts to disk.")
-                    batch.clear()
-                except Exception as e:
-                    # SILENT DEATH FIX: Rollback bad transactions to keep worker alive
-                    db.rollback()
-                    logger.error(f"[Sink] Database Integrity Error. Rolled back batch. Error: {e}")
-                    batch.clear()
-                    
-    except KeyboardInterrupt:
-        logger.info("Stopping sink.")
-    finally:
-        db.close()
-
-if __name__ == "__main__":
-    run_sink()
+        if len(batch) >= MAX_BATCH_SIZE or (len(batch) > 0 and time.time() - last_commit >= 5):
+            try:
+                db.bulk_save_objects(batch)
+                db.flush()
+                db.commit()
+                consumer.commit()
+                batch.clear()
+                last_commit = time.time()
+            except Exception as e:
+                db.rollback()
+                logger.error(f"Sink commit error: {e}")
+                # DLQ logic goes here, but we clear batch so we don't poison pill forever
+                batch.clear()
+                last_commit = time.time()

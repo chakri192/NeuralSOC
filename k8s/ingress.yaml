@@ -3,6 +3,8 @@ kind: Ingress
 metadata:
   name: tsoc-api-ingress
   annotations:
+    nginx.ingress.kubernetes.io/whitelist-source-range: "0.0.0.0/0"
+    nginx.ingress.kubernetes.io/limit-rps: "10"
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
 spec:
   ingressClassName: nginx

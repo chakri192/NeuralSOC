@@ -31,23 +31,17 @@ class IncidentCorrelator:
         if not src_ip or str(src_ip).strip() == "" or ".." in str(src_ip) or "/" in str(src_ip):
             return None
             
-        # Basic IP sanity to prevent global key poisoning
-        if not all(c.isdigit() or c == '.' or c == ':' for c in src_ip):
-            return None
-
         key = f"alerts:{src_ip}"
-        lock_name = f"lock:{src_ip}"
+        time_ms = int(time.time() * 1000)
+        threshold = getattr(self, 'threshold', 80.0)
         
         try:
-            with Lock(self.redis, lock_name, timeout=10, blocking_timeout=2):
-                raw_records = self._correlate_script(keys=[key], args=[time_ms, json.dumps(alert), self.time_window_sec, self.threshold])
-                
-                if not raw_records:
+            with Lock(self.redis, lock_name=f"lock:{src_ip}", timeout=10, blocking_timeout=2):
+                raw = self._correlate_script(keys=[key], args=[self.time_window_sec, json.dumps(alert), 100])
+                if not raw:
                     return None
                     
-                incident_data = raw_records[0] if len(raw_records) > 1 else None
-                records = raw_records[1] if len(raw_records) > 1 else raw_records
-                
+                records = raw[1:] if len(raw) > 1 else raw
                 if not records:
                     return None
                     
@@ -63,7 +57,7 @@ class IncidentCorrelator:
                         except Exception:
                             continue
                             
-                if len(tactics) >= 2 or highest_risk >= 80.0:
+                if len(tactics) >= 2 or highest_risk >= threshold:
                     incident = {
                         "incident_id": str(uuid.uuid4()),
                         "source_ip": src_ip,
@@ -75,9 +69,6 @@ class IncidentCorrelator:
                     self.redis.setex(f"incident:{incident['incident_id']}", self.time_window_sec, json.dumps(incident))
                     return incident
                 return None
-        except Exception:
+        except Exception as e:
+            logger.error(f"Correlation error: {e}")
             return None
-            
-        except Exception:
-            return None
-

@@ -37,8 +37,8 @@ def get_remote_address(req: Request):
     xff = req.headers.get("X-Forwarded-For")
     if xff:
         hops = [h.strip() for h in xff.split(",") if h.strip()]
-        if hops:
-            return req.client.host
+        return hops[-1] if hops else req.client.host
+    return req.client.host
     return req.client.host
 
 limiter = Limiter(key_func=get_remote_address)

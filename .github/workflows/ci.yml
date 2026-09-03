@@ -51,10 +51,15 @@ jobs:
           name: bandit-report
           path: bandit-report.json
 
-      - name: Install Trivy
-        uses: aquasecurity/trivy-action@0.14.0
+      - name: Build image
+        run: docker build -t tsoc:latest .
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@master
         with:
-          scan-type: "fs"
+          image-ref: 'tsoc:latest'
+          format: 'table'
+          exit-code: '1'
+          severity: 'HIGH,CRITICAL'
           format: "json"
           output: "trivy-report.json"
           severity: "UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL"
