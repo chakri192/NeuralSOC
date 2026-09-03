@@ -14,7 +14,9 @@ Base.metadata.create_all(bind=engine)
 
 def run_sink():
     logger.info("[*] Starting High-Throughput Redpanda-to-Database Sink...")
-    brokers = os.environ.get("REDPANDA_BROKERS", "127.0.0.1:9092")
+    brokers = os.environ.get("REDPANDA_BROKERS")
+    if not brokers:
+        raise RuntimeError("REDPANDA_BROKERS environment variable is missing")
     
     try:
         # DATA LOSS FIX: enable_auto_commit=False prevents dropped alerts
