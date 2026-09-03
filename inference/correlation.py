@@ -68,7 +68,6 @@ class IncidentCorrelator:
                     dedup_key = f"dedup:{src_ip}"
                     if not self.redis.set(dedup_key, "1", ex=self.time_window_sec, nx=True):
                         return None
-                    
                     import uuid
                     incident = {
                         "incident_id": str(uuid.uuid4()),
