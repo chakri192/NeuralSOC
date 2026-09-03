@@ -9,7 +9,10 @@ from fastapi.security.api_key import APIKeyHeader
 
 logger = logging.getLogger("api")
 
-API_KEY = "tsoc-prod-key-2026"
+import os
+API_KEY = os.getenv("TSOC_API_KEY")
+if not API_KEY:
+    raise RuntimeError("TSOC_API_KEY environment variable is required")
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 async def get_api_key(api_key_header: str = Security(api_key_header)):
@@ -21,14 +24,13 @@ async def get_api_key(api_key_header: str = Security(api_key_header)):
         detail="Unauthorized"
     )
 
-Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="T-SOC API", description="Enterprise SOC Backend")
 
 from fastapi.middleware.cors import CORSMiddleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # In production restrict this
+    allow_origins=os.getenv("ALLOWED_ORIGINS", "http://localhost:8501").split(","), # In production restrict this
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -68,16 +70,20 @@ def get_alerts(limit: int = Query(100, ge=1, le=1000), db: Session = Depends(get
     alerts = db.query(models.Alert).order_by(models.Alert.id.desc()).limit(limit).all()
     return alerts
 
+from sqlalchemy import func
 @app.get("/api/v1/stats")
 def get_stats(db: Session = Depends(get_db), api_key: str = Depends(get_api_key)):
-    total = db.query(models.Alert).count()
-    critical = db.query(models.Alert).filter(models.Alert.severity == "critical").count()
-    high = db.query(models.Alert).filter(models.Alert.severity == "high").count()
-    medium = db.query(models.Alert).filter(models.Alert.severity == "medium").count()
+    # Consolidate into a single DB round-trip
+    results = db.query(
+        func.count(models.Alert.id).label('total'),
+        func.sum(func.case((models.Alert.severity == 'critical', 1), else_=0)).label('critical'),
+        func.sum(func.case((models.Alert.severity == 'high', 1), else_=0)).label('high'),
+        func.sum(func.case((models.Alert.severity == 'medium', 1), else_=0)).label('medium')
+    ).first()
     
     return {
-        "total_alerts": total, 
-        "critical": critical, 
-        "high": high,
-        "medium": medium
+        "total_alerts": results.total or 0,
+        "critical": results.critical or 0,
+        "high": results.high or 0,
+        "medium": results.medium or 0
     }
