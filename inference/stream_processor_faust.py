@@ -102,7 +102,7 @@ def format_alert(event: dict, detection: dict) -> dict:
 # ----------------------------------------------------------------------
 # 5. Agent Processing Loop
 # ----------------------------------------------------------------------
-@app.agent(raw_traffic_topic, concurrency=2, max_incoming=5)
+@app.agent(raw_traffic_topic, concurrency=2, max_incoming=1)
 async def process_traffic(stream):
     async for event in stream:
         try:
