@@ -106,11 +106,11 @@ async def process_traffic(stream):
     async for event in stream:
         try:
             # 1. Feature extraction in a thread to avoid blocking event loop
-            features = await asyncio.get_event_loop().run_in_executor(executor, extract_features, event)
+            features = await asyncio.get_running_loop().run_in_executor(executor, extract_features, event)
             
             # 2. Run rule engine and ML model concurrently with timeouts to prevent stalling
-            rule_task = asyncio.get_event_loop().run_in_executor(executor, evaluate_rules, event, features)
-            ml_task   = asyncio.get_event_loop().run_in_executor(executor, app.orchestrator.evaluate, event, features)
+            rule_task = asyncio.get_running_loop().run_in_executor(executor, evaluate_rules, event, features)
+            ml_task   = asyncio.get_running_loop().run_in_executor(executor, app.orchestrator.evaluate, event, features)
             rule_res, ml_res = await asyncio.wait_for(asyncio.gather(rule_task, ml_task), timeout=5.0)
             
             detections = []
@@ -128,7 +128,7 @@ async def process_traffic(stream):
                     await send_fut
                     
                     # Correlation in a thread
-                    incident = await asyncio.get_event_loop().run_in_executor(executor, app.correlator.add_alert, alert)
+                    incident = await asyncio.wait_for(asyncio.get_running_loop().run_in_executor(executor, app.correlator.add_alert, alert), timeout=3.0)
                     if incident:
                         inc_fut = await incidents_topic.send(value=incident)
                         await inc_fut

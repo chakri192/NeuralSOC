@@ -25,7 +25,7 @@ spec:
   - from:
     - podSelector:
         matchLabels:
-          app: redpanda
+          app: kafka
     ports:
     - protocol: TCP
       port: 9092
@@ -33,7 +33,7 @@ spec:
   - to:
     - podSelector:
         matchLabels:
-          app: redpanda
+          app: kafka
     ports:
     - protocol: TCP
       port: 9092
@@ -47,7 +47,7 @@ spec:
   - to:
     - podSelector:
         matchLabels:
-          app: redpanda
+          app: kafka
     ports:
     - protocol: TCP
       port: 9092
