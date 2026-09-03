@@ -36,8 +36,8 @@ from slowapi.errors import RateLimitExceeded
 def get_remote_address(req: Request):
     xff = req.headers.get("X-Forwarded-For")
     if xff:
-        hops = [h.strip() for h in xff.split(",")]
-        return hops[0]  # Trust first hop (closest to ingress)
+        hops = [h.strip() for h in xff.split(",") if h.strip()]
+        return hops[-1] if hops else req.client.host
     return req.client.host
 
 limiter = Limiter(key_func=get_remote_address)

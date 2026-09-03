@@ -34,25 +34,38 @@ class DeepLearningEngine:
         self.char_map = {chr(i): i - 96 for i in range(97, 123)}
         self.char_map.update({'-': 27, '.': 28})
 
+    def _verify_current_hash(self):
+        h = hashlib.sha256()
+        with open("models/cnn_dga.pt", 'rb') as f:
+            while chunk := f.read(65536): 
+                h.update(chunk)
+        if h.hexdigest() != self.expected_hash:
+            return False
+        return True
+
     def predict(self, features: dict, domain: str = "") -> tuple[bool, float, float]:
         start_time = time.time()
         
+        if not self._verify_current_hash():
+            raise RuntimeError("SecurityException: Model artifact tampering detected")
+            
         if not domain:
             return False, 0.0, time.time() - start_time
             
         # IDNA Defense
+        import idna
         normalized = unicodedata.normalize('NFKC', domain)
         try:
-            ascii_domain = normalized.encode('idna').decode('ascii')
+            ascii_domain = idna.encode(normalized, uts46=True).decode('ascii')
         except Exception:
-            ascii_domain = normalized.encode('ascii', 'ignore').decode('ascii')
+            raise RuntimeError("SecurityException: Homoglyph / IDNA attack blocked")
             
         domain = ascii_domain.lower()
             
         encoded = [self.char_map.get(c, 0) for c in domain]
         
         if len(encoded) > 35:
-            logger.warning(f"[Models] Domain truncated to 35 chars: {domain}")
+            raise RuntimeError("SecurityException: Domain exceeds maximum length bound of 35")
         
         encoded = encoded[:35] + [0] * max(0, 35 - len(encoded))
         tensor = torch.tensor([encoded], dtype=torch.float32)
