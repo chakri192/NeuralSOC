@@ -42,7 +42,7 @@ class DeepLearningEngine:
         model.eval()
         return model, computed_sha
 
-    def __init__(self, start_verifier: bool = False, verify_interval: int = 60):
+    def __init__(self, start_verifier: bool = True, verify_interval: int = 60):
         self.model = None
         self._inference_count = 0
         self._inference_lock = threading.Lock()

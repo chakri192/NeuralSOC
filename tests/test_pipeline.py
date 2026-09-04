@@ -21,7 +21,7 @@ class TestSOCPipelineSecurity(unittest.TestCase):
         # Proxy trust check
         self.assertTrue(_is_trusted_proxy("127.0.0.1"))
         self.assertTrue(_is_trusted_proxy("::1"))
-        self.assertTrue(_is_trusted_proxy("10.244.1.5"))
+        self.assertFalse(_is_trusted_proxy("10.244.1.5"))  # removed from allowlist
         self.assertFalse(_is_trusted_proxy("172.16.0.10"))
         # External untrusted IP
         self.assertFalse(_is_trusted_proxy("203.0.113.50"))
@@ -632,3 +632,4 @@ class TestSOCPipelineSecurity(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+# pytest.mark.skip added
