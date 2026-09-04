@@ -22,12 +22,12 @@ jobs:
   security-scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936cb7b
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@0a5c61591373683505ea898e09a3ea4b9b8ed
+        uses: actions/setup-python@v5
         with:
           python-version: '3.9'
 
@@ -50,7 +50,7 @@ jobs:
           bandit -r . -x ./venv -ll -ii --format json -o bandit-report.json || exit 1
 
       - name: Upload Bandit results
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: bandit-report
           path: bandit-report.json
@@ -60,7 +60,7 @@ jobs:
           docker build --no-cache -t ghcr.io/${{ github.repository }}/tsoc:${{ github.sha }} -t ghcr.io/${{ github.repository }}/tsoc:latest .
 
       - name: Trivy image scan
-        uses: aquasecurity/trivy-action@0.14.0
+        uses: aquasecurity/trivy-action@0.29.0
         with:
           image-ref: 'ghcr.io/${{ github.repository }}/tsoc:${{ github.sha }}'
           format: 'json'
@@ -79,7 +79,7 @@ jobs:
 
       - name: Upload Trivy results
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: trivy-report
           path: trivy-report.json
@@ -105,7 +105,7 @@ jobs:
     needs: security-scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936cb7b
+      - uses: actions/checkout@v4
       - name: Create Kind Cluster
         uses: helm/kind-action@v1.4.0
       - name: Build Docker Image
@@ -130,7 +130,7 @@ jobs:
           kubectl wait --for=condition=available deployment/tsoc-api --timeout=120s
           kubectl wait --for=condition=available deployment/tsoc-stream-processor --timeout=120s
       - name: Setup Python environment
-        uses: actions/setup-python@0a5c61591373683505ea898e09a3ea4b9b8ed
+        uses: actions/setup-python@v5
         with:
           python-version: '3.9'
       - name: Install Test Dependencies
