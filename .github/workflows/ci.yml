@@ -59,7 +59,7 @@ jobs:
           docker build --no-cache -t ghcr.io/${{ github.repository }}/tsoc:${{ github.sha }} -t ghcr.io/${{ github.repository }}/tsoc:latest .
 
       - name: Trivy image scan
-        uses: aquasecurity/trivy-action@0.20.0
+        uses: aquasecurity/trivy-action@0.15.0
         with:
           image-ref: 'ghcr.io/${{ github.repository }}/tsoc:${{ github.sha }}'
           format: 'json'
