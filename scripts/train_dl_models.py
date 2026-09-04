@@ -4,13 +4,14 @@ train_dl_models.py
 ==================
 Generates synthetic data and trains PyTorch Deep Learning models
 for advanced cyber threat detection.
-- Model 1: 1D CNN for Dictionary DGA Detection
+- Model 1: 1D CNN for Dictionary DGA Detection (TorchScript traced)
 - Model 2: Autoencoder for Zero-Day Flow Anomaly Detection
 """
 
 import os
 import random
 import string
+import hashlib
 import numpy as np
 
 try:
@@ -29,18 +30,17 @@ os.makedirs(MODEL_DIR, exist_ok=True)
 # 1. CNN for Dictionary DGA Detection
 # -------------------------------------------------------------------------
 
-# Vocabulary: a-z, 0-9, -, . (38 chars max)
 CHARS = string.ascii_lowercase + string.digits + "-."
 CHAR_TO_IDX = {c: i + 1 for i, c in enumerate(CHARS)}
 VOCAB_SIZE = len(CHARS) + 1
-MAX_LEN = 64
+MAX_LEN = 35
 
 class DGA_CNN(nn.Module):
-    def __init__(self, vocab_size, embed_dim=32, num_filters=64):
+    def __init__(self, vocab_size=VOCAB_SIZE, embed_dim=32, num_filters=64):
         super(DGA_CNN, self).__init__()
         self.embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
         self.conv1 = nn.Conv1d(embed_dim, num_filters, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv1d(num_filters, num_filters, kernel_size=5, padding=2)
+        self.conv2 = nn.Conv1d(num_filters, num_filters, kernel_size=3, padding=1)
         self.pool = nn.AdaptiveMaxPool1d(1)
         self.fc1 = nn.Linear(num_filters, 32)
         self.fc2 = nn.Linear(32, 1)
@@ -49,50 +49,48 @@ class DGA_CNN(nn.Module):
 
     def forward(self, x):
         # x: [batch, max_len]
-        x = self.embedding(x) # [batch, max_len, embed_dim]
-        x = x.transpose(1, 2) # [batch, embed_dim, max_len] (Conv1d expects channels first)
+        x = self.embedding(x)  # [batch, max_len, embed_dim]
+        x = x.transpose(1, 2)  # [batch, embed_dim, max_len]
         x = self.relu(self.conv1(x))
         x = self.relu(self.conv2(x))
-        x = self.pool(x).squeeze(-1) # [batch, num_filters]
+        x = self.pool(x).squeeze(-1)  # [batch, num_filters]
         x = self.relu(self.fc1(x))
         x = self.sigmoid(self.fc2(x))
         return x
 
 def encode_domain(domain):
-    encoded = [CHAR_TO_IDX.get(c, 0) for c in domain.lower()[:MAX_LEN]]
+    clean = "".join(c if c in CHAR_TO_IDX else "-" for c in domain.lower())
+    encoded = [CHAR_TO_IDX.get(c, 0) for c in clean[:MAX_LEN]]
     if len(encoded) < MAX_LEN:
         encoded += [0] * (MAX_LEN - len(encoded))
     return encoded
 
 def train_cnn():
     print("[*] Generating Data for DGA CNN...")
-    # Synthetic Benign (Normal English-like domains)
-    benign_words = ["google", "apple", "microsoft", "amazon", "netflix", "bankofamerica", "github", "linkedin"]
-    benign = [f"{random.choice(benign_words)}{random.randint(1,100)}.com" for _ in range(2000)]
-    
-    # Synthetic Dictionary DGA (E.g. SolarWinds style: valid words strung together)
-    dict_words = ["purple", "ocean", "chair", "quantum", "liquid", "shadow", "forest", "crypto"]
-    dgas = [f"{random.choice(dict_words)}-{random.choice(dict_words)}-{random.choice(dict_words)}.net" for _ in range(2000)]
-    
-    # Random DGA (just in case)
-    random_dgas = ["".join(random.choices(string.ascii_lowercase, k=random.randint(10,25))) + ".org" for _ in range(1000)]
-    
+    benign_words = ["google", "apple", "microsoft", "amazon", "netflix", "bankofamerica", "github", "linkedin", "wikipedia", "yahoo"]
+    benign = [f"{random.choice(benign_words)}{random.randint(1,100)}.com" for _ in range(3000)]
+    benign += [f"{random.choice(['api', 'mail', 'cdn', 'app'])}.{random.choice(benign_words)}.com" for _ in range(2000)]
+
+    dict_words = ["purple", "ocean", "chair", "quantum", "liquid", "shadow", "forest", "crypto", "tunnel", "beacon", "exfil", "payload"]
+    dgas = [f"{random.choice(dict_words)}-{random.choice(dict_words)}-{random.choice(dict_words)}.net" for _ in range(3000)]
+    random_dgas = ["".join(random.choices(string.ascii_lowercase + string.digits, k=random.randint(12, 25))) + ".com" for _ in range(2000)]
+
     X_raw = benign + dgas + random_dgas
-    y_raw = [0]*len(benign) + [1]*len(dgas) + [1]*len(random_dgas)
-    
+    y_raw = [0.0]*len(benign) + [1.0]*len(dgas) + [1.0]*len(random_dgas)
+
     X = torch.tensor([encode_domain(d) for d in X_raw], dtype=torch.long)
     y = torch.tensor(y_raw, dtype=torch.float32).unsqueeze(1)
-    
+
     dataset = TensorDataset(X, y)
-    loader = DataLoader(dataset, batch_size=64, shuffle=True)
-    
+    loader = DataLoader(dataset, batch_size=128, shuffle=True)
+
     print("[*] Training CNN Model...")
-    model = DGA_CNN(VOCAB_SIZE)
+    model = DGA_CNN()
     criterion = nn.BCELoss()
-    optimizer = optim.Adam(model.parameters(), lr=0.005)
-    
+    optimizer = optim.Adam(model.parameters(), lr=0.003)
+
     model.train()
-    for epoch in range(5):
+    for epoch in range(8):
         total_loss = 0
         for batch_x, batch_y in loader:
             optimizer.zero_grad()
@@ -101,11 +99,22 @@ def train_cnn():
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
-        print(f"  Epoch {epoch+1}/5 - Loss: {total_loss/len(loader):.4f}")
-        
+        print(f"  Epoch {epoch+1}/8 - Loss: {total_loss/len(loader):.4f}")
+
+    model.eval()
     save_path = os.path.join(MODEL_DIR, "cnn_dga.pt")
-    torch.save(model.state_dict(), save_path)
-    print(f"[+] Saved DGA CNN to {save_path}")
+    sha_path = save_path + ".sha256"
+
+    traced_model = torch.jit.trace(model, torch.zeros((1, MAX_LEN), dtype=torch.long))
+    traced_model.save(save_path)
+
+    with open(save_path, "rb") as f:
+        file_hash = hashlib.sha256(f.read()).hexdigest()
+    with open(sha_path, "w") as f:
+        f.write(file_hash + "\n")
+
+    print(f"[+] Saved Traced DGA CNN to {save_path}")
+    print(f"[+] SHA256: {file_hash}")
 
 # -------------------------------------------------------------------------
 # 2. Autoencoder for Zero-Day Flow Anomaly
@@ -114,15 +123,13 @@ def train_cnn():
 class FlowAutoencoder(nn.Module):
     def __init__(self, input_dim=5):
         super(FlowAutoencoder, self).__init__()
-        # Compression
         self.encoder = nn.Sequential(
             nn.Linear(input_dim, 16),
             nn.ReLU(),
             nn.Linear(16, 8),
             nn.ReLU(),
-            nn.Linear(8, 3) # Latent space
+            nn.Linear(8, 3)
         )
-        # Reconstruction
         self.decoder = nn.Sequential(
             nn.Linear(3, 8),
             nn.ReLU(),
@@ -138,40 +145,35 @@ class FlowAutoencoder(nn.Module):
 
 def train_autoencoder():
     print("\n[*] Generating Benign Flow Data for Autoencoder...")
-    # Features: [log_orig_bytes, log_resp_bytes, log_duration, log_pkts, asymmetry_ratio]
-    # We train ONLY on benign data so it learns to reconstruct normal traffic well.
-    
     X_train = []
     for _ in range(5000):
-        # Web browsing profile
         orig_b = random.uniform(500, 2000)
         resp_b = random.uniform(5000, 500000)
         dur = random.uniform(0.1, 10.0)
         pkts = random.uniform(10, 500)
         ratio = resp_b / max(1.0, orig_b)
-        
+
         vec = [
-            np.log1p(orig_b), 
-            np.log1p(resp_b), 
-            np.log1p(dur), 
-            np.log1p(pkts), 
+            np.log1p(orig_b),
+            np.log1p(resp_b),
+            np.log1p(dur),
+            np.log1p(pkts),
             np.log1p(ratio)
         ]
         X_train.append(vec)
-        
+
     X_tensor = torch.tensor(X_train, dtype=torch.float32)
-    # Normalize features roughly to 0-1 range for training stability (using fixed scaling factors for simplicity)
     scaling_factors = torch.tensor([15.0, 15.0, 10.0, 10.0, 10.0], dtype=torch.float32)
     X_tensor = X_tensor / scaling_factors
-    
-    dataset = TensorDataset(X_tensor, X_tensor) # Autoencoder tries to output its input
+
+    dataset = TensorDataset(X_tensor, X_tensor)
     loader = DataLoader(dataset, batch_size=128, shuffle=True)
-    
+
     print("[*] Training Flow Autoencoder...")
     model = FlowAutoencoder(input_dim=5)
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=0.01)
-    
+
     model.train()
     for epoch in range(10):
         total_loss = 0
@@ -188,7 +190,6 @@ def train_autoencoder():
     save_path = os.path.join(MODEL_DIR, "autoencoder_flow.pt")
     torch.save(model.state_dict(), save_path)
     print(f"[+] Saved Flow Autoencoder to {save_path}")
-
 
 if __name__ == "__main__":
     train_cnn()

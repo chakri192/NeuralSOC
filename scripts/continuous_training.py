@@ -186,19 +186,22 @@ def continuous_train_loop():
                     
                     traced_model = torch.jit.trace(model, torch.zeros((1, 35), dtype=torch.long))
                     traced_model.save("models/cnn_dga_temp.pt")
+
+                    # Pre-calculate hash for the temp model to ensure atomicity
+                    with open("models/cnn_dga_temp.pt", 'rb') as f:
+                        new_hash = hashlib.sha256(f.read()).hexdigest()
+                    with open("models/cnn_dga_temp.pt.sha256", 'w') as f:
+                        f.write(new_hash)
                 else:
                     print(f"    Epoch {epoch:02d} | Val Accuracy: {acc_val:.3f}%")
                     epochs_no_improve += 1
-                    
+
             print(f"[*] Cycle {cycle} Complete. Max Accuracy: {best_acc:.3f}%. Deploying to production...")
-            
+
+            # Atomic deployment: update hash FIRST, then replace model file
+            os.replace("models/cnn_dga_temp.pt.sha256", "models/cnn_dga.pt.sha256")
             os.replace("models/cnn_dga_temp.pt", "models/cnn_dga.pt")
-            
-            with open("models/cnn_dga.pt", 'rb') as f:
-                new_hash = hashlib.sha256(f.read()).hexdigest()
-            with open("models/cnn_dga.pt.sha256", 'w') as f:
-                f.write(new_hash)
-                
+
             print(f"[+] Deployed New Secure Model Hash: {new_hash}")
             cycle += 1
             

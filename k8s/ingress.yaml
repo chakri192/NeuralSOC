@@ -1,15 +1,28 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
+  annotations:
+    nginx.ingress.kubernetes.io/enable-modsecurity: "true"
+    nginx.ingress.kubernetes.io/enable-owasp-core-rules: "true"
   name: tsoc-api-ingress
   namespace: tsoc
   annotations:
     nginx.ingress.kubernetes.io/auth-url: "https://auth.tsoc.local/verify"
+    nginx.ingress.kubernetes.io/auth-response-headers: "X-User,X-Role"
+    nginx.ingress.kubernetes.io/auth-snippet: |
+      proxy_intercept_errors on;
+      error_page 401 403 500 502 503 504 =401 /error-auth;
     cert-manager.io/cluster-issuer: "letsencrypt-prod"
-    nginx.ingress.kubernetes.io/whitelist-source-range: "10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16"
-    nginx.ingress.kubernetes.io/limit-rps: "10"
+    nginx.ingress.kubernetes.io/auth-tls-verify-client: "on"
+    nginx.ingress.kubernetes.io/auth-tls-secret: "tsoc/client-cert"
+    nginx.ingress.kubernetes.io/auth-tls-verify-depth: "1"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/limit-rps: "100"
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
     nginx.ingress.kubernetes.io/hsts: "true"
+    nginx.ingress.kubernetes.io/hsts-include-subdomains: "true"
+    nginx.ingress.kubernetes.io/hsts-max-age: "31536000"
 spec:
   ingressClassName: nginx
   tls:
@@ -20,8 +33,22 @@ spec:
   - host: api.tsoc.local
     http:
       paths:
-      - path: /
+      - path: /api/
         pathType: Prefix
+        backend:
+          service:
+            name: tsoc-api-service
+            port:
+              number: 80
+      - path: /livez
+        pathType: Exact
+        backend:
+          service:
+            name: tsoc-api-service
+            port:
+              number: 80
+      - path: /readyz
+        pathType: Exact
         backend:
           service:
             name: tsoc-api-service

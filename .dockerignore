@@ -1,6 +1,9 @@
 .git
 .github
 k8s/
+tests/
+docs/
 *.md
 *.txt
-tests/
+*.log
+venv/

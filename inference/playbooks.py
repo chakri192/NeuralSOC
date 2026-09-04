@@ -130,56 +130,107 @@ PLAYBOOK_TEMPLATES = {
 
 
 import hashlib
+import shlex
+import re
+from typing import Dict, Any
+
+THREAT_CLASS_MAP = {
+    "DDOS": "VOLUMETRIC_PROTOCOL_DDOS",
+    "VOLUMETRIC_PROTOCOL_DDOS": "VOLUMETRIC_PROTOCOL_DDOS",
+    "C2 BEACONING": "BOTNET_C2_BEACONING",
+    "BOTNET_C2_BEACONING": "BOTNET_C2_BEACONING",
+    "DGA / DNS TUNNELLING": "DGA_DOMAIN",
+    "DGA": "DGA_DOMAIN",
+    "DGA_DOMAIN": "DGA_DOMAIN",
+    "DNS TUNNELLING": "DNS_TUNNELING_EXFIL",
+    "DNS_TUNNELING_EXFIL": "DNS_TUNNELING_EXFIL",
+    "ENCRYPTED-TRAFFIC MALWARE": "ENCRYPTED_MALWARE_TLS",
+    "ENCRYPTED_MALWARE_TLS": "ENCRYPTED_MALWARE_TLS",
+    "MALICIOUS_JA3_FINGERPRINT": "MALICIOUS_JA3_FINGERPRINT",
+    "RECONNAISSANCE": "RECON_PORT_SCAN",
+    "RECON_PORT_SCAN": "RECON_PORT_SCAN",
+    "DATA EXFILTRATION": "DATA_EXFILTRATION",
+    "DATA_EXFILTRATION": "DATA_EXFILTRATION",
+}
 
 def enrich_ip_intel(ip_address: str) -> Dict[str, str]:
     """Mock GeoIP and Threat Intelligence Enrichment (Quality of Life Feature)."""
     if not ip_address or ip_address.startswith(("192.168", "10.", "172.16", "127.", "0.")):
         return {"country": "Internal / RFC1918", "asn": "N/A", "reputation": "Trusted"}
-    
+
     # Deterministic mock based on hash to keep it consistent
     h = int(hashlib.md5(ip_address.encode(), usedforsecurity=False).hexdigest(), 16)
     countries = ["RU", "CN", "IR", "KP", "BR", "RO", "US", "NL", "DE"]
     asns = ["AS47764", "AS4134", "AS58224", "AS174", "AS398324", "AS20473"]
-    
+
     country = countries[h % len(countries)]
     asn = asns[(h // 10) % len(asns)]
     rep = "Suspicious (Known Bulletproof Hoster)" if country in ["RU", "CN", "IR", "KP", "RO"] else "Neutral"
-    
+
     return {"country": country, "asn": asn, "reputation": rep}
+
+
+def safe_format_string(template_str: str, **kwargs) -> str:
+    """Safely format string replacing known placeholders without raising KeyError for unknowns."""
+    res = template_str
+    for k, v in kwargs.items():
+        res = res.replace(f"{{{k}}}", str(v))
+    return res
+
+
+def sanitize_input(val: Any, default: str = "") -> str:
+    if val is None:
+        return default
+    # Strip null bytes and control chars
+    clean = re.sub(r'[\r\n\x00]', '', str(val))
+    return clean
 
 
 def generate_playbook(alert: Dict[str, Any]) -> Dict[str, Any]:
     """Generates an actionable incident response playbook tailored to the specific alert."""
-    threat_class = alert.get("threat_class", "DATA_EXFILTRATION")
-    template = PLAYBOOK_TEMPLATES.get(threat_class, PLAYBOOK_TEMPLATES["DATA_EXFILTRATION"])
+    raw_threat_class = alert.get("threat_class") or "DATA_EXFILTRATION"
+    normalized_key = THREAT_CLASS_MAP.get(str(raw_threat_class).strip().upper(), "DATA_EXFILTRATION")
+    template = PLAYBOOK_TEMPLATES.get(normalized_key, PLAYBOOK_TEMPLATES["DATA_EXFILTRATION"])
 
-    src_ip = alert.get("src_ip", "192.168.1.100")
-    dst_ip = alert.get("dst_ip", "198.51.100.1")
-    dst_port = alert.get("dst_port", 443)
-    domain = alert.get("evidence", {}).get("domain") or alert.get("evidence", {}).get("query", "malicious-c2.com")
-    ja3_hash = alert.get("evidence", {}).get("ja3_hash", "a0e9f5d64349fb13191bc781f81f42e1")
+    src_ip = sanitize_input(alert.get("source_ip") or alert.get("src_ip") or alert.get("id.orig_h"), "192.168.1.100")
+    dst_ip = sanitize_input(alert.get("destination_ip") or alert.get("dst_ip") or alert.get("id.resp_h"), "198.51.100.1")
+    dst_port = sanitize_input(alert.get("destination_port") or alert.get("dst_port") or alert.get("id.resp_p"), "443")
+
+    evidence = alert.get("evidence", {})
+    if not isinstance(evidence, dict):
+        evidence = {}
+
+    domain = sanitize_input(evidence.get("domain") or evidence.get("query") or alert.get("query"), "malicious-c2.com")
+    ja3_hash = sanitize_input(evidence.get("ja3_hash") or evidence.get("ja4"), "a0e9f5d64349fb13191bc781f81f42e1")
 
     # Threat Intel Enrichment
     dst_intel = enrich_ip_intel(dst_ip)
     src_intel = enrich_ip_intel(src_ip)
 
-    # Format dynamic fields into firewall rules
-    formatted_rule = template["firewall_rule"].format(
-        src_ip=src_ip,
-        dst_ip=dst_ip,
-        dst_port=dst_port,
-        domain=domain,
-        ja3_hash=ja3_hash,
+    # Sanitize and quote shell arguments to prevent Command Injection in SOAR automation
+    quoted_src_ip = shlex.quote(src_ip)
+    quoted_dst_ip = shlex.quote(dst_ip)
+    quoted_dst_port = shlex.quote(str(dst_port))
+    quoted_domain = shlex.quote(domain)
+    quoted_ja3 = shlex.quote(ja3_hash)
+
+    formatted_rule = safe_format_string(
+        template["firewall_rule"],
+        src_ip=quoted_src_ip,
+        dst_ip=quoted_dst_ip,
+        dst_port=quoted_dst_port,
+        domain=quoted_domain,
+        ja3_hash=quoted_ja3,
     )
 
     return {
         "title": template["title"],
-        "threat_class": threat_class,
+        "threat_class": raw_threat_class,
         "severity": alert.get("severity", "HIGH"),
         "containment_steps": template["containment_steps"],
         "recommended_firewall_rule": formatted_rule,
         "forensic_checklist": [
-            item.format(src_ip=src_ip, dst_ip=dst_ip, domain=domain, ja3_hash=ja3_hash)
+            safe_format_string(item, src_ip=src_ip, dst_ip=dst_ip, domain=domain, ja3_hash=ja3_hash)
             for item in template["forensic_checklist"]
         ],
         "mitre_mitigations": template["mitre_mitigations"],

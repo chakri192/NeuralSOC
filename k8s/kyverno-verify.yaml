@@ -1,0 +1,28 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: verify-tsoc-images
+spec:
+  validationFailureAction: Enforce
+  rules:
+  - name: require-signed-images
+    match:
+      resources:
+        kinds:
+        - Pod
+    validate:
+      message: "TSOC images must be signed and use Always pull"
+      pattern:
+        spec:
+          containers:
+          - imagePullPolicy: Always
+  - name: require-digest-pin
+    match:
+      resources:
+        kinds: [Pod]
+    validate:
+      message: "Image must use sha256 digest, not mutable tag"
+      pattern:
+        spec:
+          containers:
+          - image: "*@sha256:*"
