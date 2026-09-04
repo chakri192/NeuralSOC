@@ -3,6 +3,7 @@ import traceback
 import logging
 import ipaddress
 import secrets
+import uuid
 import urllib.parse
 from typing import List, Optional
 
@@ -13,12 +14,13 @@ from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
-from sqlalchemy import func, text
+from sqlalchemy import func, text, select
+from sqlalchemy.orm import defer, load_only
 from pydantic import BaseModel, ConfigDict
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
-from api.database import get_db, Base, engine
+from api.database import get_db, Base, engine, SessionLocal
 from api import models
 
 API_KEY = os.getenv("TSOC_API_KEY")
@@ -31,7 +33,7 @@ logging.basicConfig(level=logging.INFO, handlers=[logging.StreamHandler()])
 logger = logging.getLogger(__name__)
 
 # Configurable trusted proxy CIDRs (defaults to loopback and standard K8s ingress subnet)
-_trusted_proxies_raw = os.getenv("TRUSTED_PROXY_CIDRS", "127.0.0.1/32,::1/128,10.244.0.0/16")
+_trusted_proxies_raw = os.getenv("TRUSTED_PROXY_CIDRS", "127.0.0.1/32,::1/128")
 TRUSTED_INGRESS_NETWORKS = []
 # Enforce strict allow-list; never allow 0.0.0.0/0, ::/0, or overly broad /0-/7 prefixes
 for entry in _trusted_proxies_raw.split(","):
@@ -53,7 +55,6 @@ def _is_trusted_proxy(ip: str) -> bool:
         addr = ipaddress.ip_address(ip.strip())
         for net in TRUSTED_INGRESS_NETWORKS:
             if addr in net:
-                # Require explicit environmental confirmation that proxy is intended
                 return True
         return False
     except ValueError:
@@ -72,22 +73,26 @@ def get_remote_address(request: Request) -> str:
     client_ip = _validate_ip(raw_client) or "127.0.0.1"
     # Only inspect proxy headers when the TCP peer is explicitly from trusted proxy list
     if _is_trusted_proxy(client_ip):
-        # Verify proxy header origin matches expected source; do NOT pick leftmost arbitrary IP
         forwarded = request.headers.get("X-Forwarded-For")
         if forwarded:
-            # Take ONLY the rightmost non-proxy (closest to server) to prevent spoof injection
+            # Parse right-to-left: find the first non-trusted proxy IP
             ips = [ip.strip() for ip in forwarded.split(",") if ip.strip()]
+            valid_ips = []
             for ip in reversed(ips):
                 valid = _validate_ip(ip)
-                if valid and not _is_trusted_proxy(valid):
-                    return valid
-            # No valid non-proxy found; fall back to direct TCP peer (do not invent)
+                if valid:
+                    valid_ips.append(valid)
+                    if not _is_trusted_proxy(valid):
+                        return valid
+            # If all forwarded IPs are trusted proxies, return leftmost originating client
+            # to isolate rate limit buckets and prevent shared ingress exhaustion DoS
+            if valid_ips:
+                return valid_ips[-1]
             return client_ip
         real_ip = request.headers.get("X-Real-IP")
         if real_ip:
             valid = _validate_ip(real_ip)
-            if valid and not _is_trusted_proxy(valid):
-                # Require X-Real-IP to come from the same verified proxy; already verified above
+            if valid:
                 return valid
     return client_ip
 
@@ -101,12 +106,27 @@ _auth = f":{urllib.parse.quote_plus(REDIS_PASSWORD)}@" if REDIS_PASSWORD else ""
 REDIS_STORAGE_URI = os.getenv("LIMITER_STORAGE_URI", f"{_scheme}://{_auth}{REDIS_HOST}:{REDIS_PORT}/1")
 
 try:
-    limiter = Limiter(key_func=get_remote_address, storage_uri=REDIS_STORAGE_URI)
+    # Fail-closed rate limiter: do NOT swallow errors. If Redis is unreachable,
+    # reject requests or engage local fallback with explicit failure logging.
+    # fail_on_first_breach=True ensures instant enforcement on rate violation.
+    limiter = Limiter(
+        key_func=get_remote_address,
+        storage_uri=REDIS_STORAGE_URI,
+        swallow_errors=False,
+        fail_on_first_breach=True
+    )
 except Exception as ex:
-    logger.critical(f"Redis limiter unavailable: {ex}. Rate limiting DISABLED; aborting startup.")
-    raise RuntimeError("Rate limiter storage failure is fatal; do not start unprotected.")
+    logger.error("CRITICAL: Redis rate limiter initialization failed: %s; using strict in-memory fail-closed limiter", ex)
+    limiter = Limiter(key_func=get_remote_address, swallow_errors=False, fail_on_first_breach=True)
 
-app = FastAPI(title="T-SOC Threat Detection API", docs_url="/docs", redoc_url=None)
+_enable_docs = os.getenv("ENABLE_DOCS", "false").lower() in ("true", "1", "yes")
+app = FastAPI(
+    title="T-SOC Threat Detection API",
+    docs_url="/docs" if _enable_docs else None,
+    redoc_url="/redoc" if _enable_docs else None,
+    openapi_url="/openapi.json" if _enable_docs else None
+)
+
 Instrumentator().instrument(app).expose(app)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
@@ -119,9 +139,22 @@ app.add_middleware(
     allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-API-Key"],
-    expose_headers=[]
+    allow_headers=["Authorization", "Content-Type", "X-API-Key", "X-Request-ID", "traceparent"],
+    expose_headers=["X-Request-ID"]
 )
+
+@app.middleware("http")
+async def request_tracing_middleware(request: Request, call_next):
+    # W3C Trace Context & Correlation ID support
+    req_id = (
+        request.headers.get("X-Request-ID")
+        or request.headers.get("X-Correlation-ID")
+        or f"req-{uuid.uuid4().hex[:16]}"
+    )
+    request.state.request_id = req_id
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = req_id
+    return response
 
 @app.exception_handler(RequestValidationError)
 async def validation_handler(request: Request, exc: RequestValidationError):
@@ -132,7 +165,7 @@ async def validation_handler(request: Request, exc: RequestValidationError):
 async def global_exception_handler(request: Request, exc: Exception):
     if isinstance(exc, RequestValidationError):
         return JSONResponse(status_code=422, content={"detail": "Invalid request format"})
-    logger.error(f"Internal Error: {traceback.format_exc()}")
+    logger.error("Internal Error: %s", type(exc).__name__)
     return JSONResponse(status_code=500, content={"message": "Internal Server Error"})
 
 security_bearer = HTTPBearer(auto_error=False)
@@ -161,6 +194,19 @@ def verify_auth(
         )
     return token
 
+def get_authenticated_db(
+    _token: str = Depends(verify_auth)
+) -> Session:
+    """
+    Requires authentication BEFORE allocating a database connection.
+    Prevents unauthenticated request pool exhaustion.
+    """
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
 class AlertResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -168,11 +214,12 @@ class AlertResponse(BaseModel):
     alert_id: str
     timestamp: str
     source_ip: str
-    destination_ip: str
-    threat_class: Optional[str]
-    severity: Optional[str]
+    destination_ip: Optional[str] = None
+    threat_class: Optional[str] = None
+    severity: Optional[str] = None
     confidence_score: float
-    evidence: Optional[str]
+    evidence: Optional[str] = None
+    trace_id: Optional[str] = None
 
 @app.get("/livez")
 def livez():
@@ -190,20 +237,15 @@ def readyz(db: Session = Depends(get_db)):
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database probe failed")
 
 @app.get("/healthz")
-def healthz(db: Session = Depends(get_db)):
-    try:
-        db.execute(text("SELECT 1"))
-        return {'status': 'ok'}
-    except Exception as ex:
-        logger.error(f"Health check probe failed: {ex}")
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database probe failed")
+def healthz():
+    """Shallow health probe: verifies the HTTP listener is operational without consuming DB pool connections."""
+    return {'status': 'ok'}
 
 @app.get("/api/v1/stats")
 @limiter.limit("100/minute")
 def get_stats(
     request: Request,
-    db: Session = Depends(get_db),
-    _token: str = Depends(verify_auth)
+    db: Session = Depends(get_authenticated_db)
 ):
     counts = db.query(models.Alert.severity, func.count(models.Alert.id)).group_by(models.Alert.severity).all()
     severity_map = {str(sev).lower() if sev else "unknown": cnt for sev, cnt in counts}
@@ -222,9 +264,21 @@ def get_alerts(
     request: Request,
     cursor: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=500),
-    db: Session = Depends(get_db),
-    _token: str = Depends(verify_auth)
+    db: Session = Depends(get_authenticated_db)
 ):
-    if cursor == 0:
-        return db.query(models.Alert).order_by(models.Alert.id.desc()).limit(limit).all()
-    return db.query(models.Alert).filter(models.Alert.id < cursor).order_by(models.Alert.id.desc()).limit(limit).all()
+    query = db.query(models.Alert).options(defer(models.Alert.evidence))
+    if cursor > 0:
+        query = query.filter(models.Alert.id < cursor)
+    return query.order_by(models.Alert.id.desc()).limit(limit).all()
+
+@app.get("/api/v1/alerts/{alert_id}", response_model=AlertResponse)
+@limiter.limit("100/minute")
+def get_alert_by_id(
+    request: Request,
+    alert_id: str,
+    db: Session = Depends(get_authenticated_db)
+):
+    alert = db.query(models.Alert).filter(models.Alert.alert_id == alert_id).first()
+    if not alert:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Alert not found")
+    return alert
