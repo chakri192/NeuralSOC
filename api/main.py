@@ -226,14 +226,16 @@ def livez():
     """Shallow liveness probe: verifies the process is up and serving without dependency coupling."""
     return {'status': 'alive'}
 
+# Auth-first DB dependency: token is verified BEFORE any DB session opens.
+# Prevents unauthenticated connection pool exhaustion.
 @app.get("/readyz")
-def readyz(db: Session = Depends(get_db)):
-    """Deep readiness probe: verifies downstream database connectivity."""
+@limiter.limit("10/minute")
+def readyz(request: Request, _token: str = Depends(verify_auth), db: Session = Depends(get_db)):
     try:
         db.execute(text("SELECT 1"))
         return {'status': 'ready'}
     except Exception as ex:
-        logger.error(f"Readiness probe failed: {ex}")
+        logger.error("Readiness probe failed: %s", type(ex).__name__)
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database probe failed")
 
 @app.get("/healthz")
