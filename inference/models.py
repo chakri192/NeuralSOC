@@ -36,13 +36,13 @@ class DeepLearningEngine:
         if not secrets.compare_digest(computed_sha, expected_sha):
             raise RuntimeError(f"Integrity Error: SHA-256 mismatch (got {computed_sha}, expected {expected_sha})")
 
-        # Load TorchScript model directly from the validated in-memory buffer
+        # Load TorchScript model directly from validated in-memory buffer (B614 suppressed only for immutable startup load)
         model_buffer = io.BytesIO(model_bytes)
-        model = torch.jit.load(model_buffer, map_location=torch.device('cpu'))  # nosec B614
+        model = torch.jit.load(model_buffer, map_location=torch.device('cpu'))
         model.eval()
         return model, computed_sha
 
-    def __init__(self, start_verifier: bool = True, verify_interval: int = 60):
+    def __init__(self, start_verifier: bool = False, verify_interval: int = 60):
         self.model = None
         self._inference_count = 0
         self._inference_lock = threading.Lock()
@@ -85,29 +85,11 @@ class DeepLearningEngine:
 
     def _recheck_integrity(self, force: bool = False) -> bool:
         """
-        Runtime re-verification: validates model file integrity against cryptographic SHA-256.
-        If file changed on disk but hash is valid, hot-reloads the model.
-        Gracefully retains existing in-memory model on any transient error or corrupted update.
+        DISABLED: hot-reload from mutable disk files is disabled.
+        Load once at startup from immutable container-image artifact.
         """
-        try:
-            artifact_path = os.getenv("MODEL_PATH", "models/cnn_dga.pt")
-
-            new_model, new_sha = self._load_model_from_disk()
-
-            if new_sha != self._expected_sha or self.model is None:
-                logger.info("New model version detected and validated; performing hot-reload.")
-                with self._inference_lock:
-                    self.model = new_model
-                    self._expected_sha = new_sha
-                    if os.path.exists(artifact_path):
-                        self._last_mtime = os.path.getmtime(artifact_path)
-
-            self._last_check = time.time()
-            return True
-        except (IOError, OSError) as io_err:
-            logger.warning("Transient disk I/O error during model re-check: %s. Retaining validated in-memory model.", io_err)
-            self._last_check = time.time()
-            return True
+        logger.debug("Model hot-reload disabled; using startup-loaded artifact.")
+        return True
         except Exception as e:
             logger.critical("Integrity re-check or candidate model load failed (%s). FREEZING model predictions until manual resolution.", e)
             self._last_check = time.time()

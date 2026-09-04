@@ -116,10 +116,10 @@ jobs:
         run: |
           kubectl create namespace tsoc || true
           kubectl create secret generic tsoc-secrets -n tsoc \
-            --from-literal=api-key="test-ci-key" \
+            --from-literal=api-key="$(openssl rand -hex 32)" \
             --from-literal=DATABASE_URL="sqlite:////tmp/test.db" \
             --from-literal=slack_webhook_url="https://localhost" \
-            --from-literal=pagerduty_routing_key="test" \
+            --from-literal=pagerduty_routing_key="$(openssl rand -hex 16)" \
             --dry-run=client -o yaml | kubectl apply -f -
 
       - name: Deploy Kubernetes Manifests

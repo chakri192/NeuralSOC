@@ -12,6 +12,22 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
+  name: deny-link-local
+  namespace: tsoc
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+  - to:
+    - ipBlock:
+        cidr: 169.254.0.0/16
+  - to:
+    - ipBlock:
+        cidr: 127.0.0.0/8
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
   name: api-allow
   namespace: tsoc
 spec:

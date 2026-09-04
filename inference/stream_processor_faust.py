@@ -43,6 +43,22 @@ _submitted_cpu_futures = set()
 _submitted_io_futures = set()
 _futures_lock = threading.Lock()
 
+# SIGTERM handler for graceful shutdown (prevents shutdown race)
+import signal
+
+def _graceful_shutdown(signum, frame):
+    with _futures_lock:
+        for f in list(_submitted_cpu_futures):
+            f.cancel()
+        for f in list(_submitted_io_futures):
+            f.cancel()
+    cpu_executor.shutdown(wait=False, cancel_futures=True)
+    io_executor.shutdown(wait=False, cancel_futures=True)
+    raise SystemExit(0)
+
+signal.signal(signal.SIGTERM, _graceful_shutdown)
+signal.signal(signal.SIGINT, _graceful_shutdown)
+
 class _LazySemaphore:
     def __init__(self, value: int):
         self._value = value
