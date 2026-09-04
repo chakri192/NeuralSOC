@@ -56,12 +56,12 @@ jobs:
 
       - name: Build image
         run: |
-          docker build --no-cache -t ghcr.io/${{ github.repository }}/tsoc:${{ github.sha }} -t ghcr.io/${{ github.repository }}/tsoc:latest .
+          docker build --no-cache -t ghcr.io/chakri192/neuralsoc/tsoc:latest -t ghcr.io/${{ github.repository }}/tsoc:latest .
 
       - name: Trivy image scan (CLI)
         run: |
           pip install trivy
-          trivy image --exit-code 1 --severity HIGH,CRITICAL --format json --output trivy-report.json ghcr.io/${{ github.repository }}/tsoc:${{ github.sha }}
+          trivy image --exit-code 1 --severity HIGH,CRITICAL --format json --output trivy-report.json ghcr.io/chakri192/neuralsoc/tsoc:latest
 
       - name: Push image
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -69,7 +69,7 @@ jobs:
           GHCR_PASSWORD: ${{ secrets.GHCR_PASSWORD }}
         run: |
           echo "$GHCR_PASSWORD" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          docker push ghcr.io/${{ github.repository }}/tsoc:${{ github.sha }}
+          docker push ghcr.io/chakri192/neuralsoc/tsoc:latest
           docker push ghcr.io/${{ github.repository }}/tsoc:latest
 
       - name: Upload Trivy results
@@ -87,12 +87,12 @@ jobs:
         env:
           COSIGN_EXPERIMENTAL: 1
         run: |
-          cosign sign --yes --output-file cosign.sig ghcr.io/${{ github.repository }}/tsoc:${{ github.sha }}
+          cosign sign --yes --output-file cosign.sig ghcr.io/chakri192/neuralsoc/tsoc:latest
       - name: Verify SBOM checksum before use
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
           curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
-          syft ghcr.io/${{ github.repository }}/tsoc:${{ github.sha }} -o spdx-json > sbom.json
+          syft ghcr.io/chakri192/neuralsoc/tsoc:latest -o spdx-json > sbom.json
           # Verify SBOM is non-empty and contains at least one package
           python -c "import json; d=json.load(open('sbom.json')); assert len(d.get('packages', [])) > 0, 'Empty SBOM'; print('SBOM verified')"
 
