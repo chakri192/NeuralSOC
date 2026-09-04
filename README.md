@@ -122,3 +122,4 @@ venv/bin/python3 scripts/continuous_training.py
 ```
 
 Let it run for 1 or 2 cycles. Once it hits a Validation Accuracy you are satisfied with (e.g., 99%+), press `Ctrl+C`. The script will automatically perform an atomic swap, updating `models/cnn_dga.pt` and `models/cnn_dga.pt.sha256` without crashing the live stream processors.
+# trigger
