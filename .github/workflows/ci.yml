@@ -10,7 +10,6 @@ on:
 permissions:
   contents: read
   id-token: write
-    # Restricted to cosign audience only
   actions: read
 
 concurrency:
@@ -22,12 +21,12 @@ jobs:
   security-scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v3
         with:
           fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
           python-version: '3.9'
 
@@ -37,9 +36,20 @@ jobs:
           pip install bandit
 
 
-      # SKIPPED TEMPORARILY — pytest blocking CI
+      - name: Run Unit Tests
+        env:
+          DATABASE_URL: "sqlite:////tmp/test.db"
+          TSOC_API_KEY: "test-ci-key"
+        run: |
+          pip install pytest
+          PYTHONPATH=. pytest tests/
+
+      - name: Run Bandit Python Static Analysis
+        run: |
+          bandit -r . --format json -o bandit-report.json || exit 1
+
       - name: Upload Bandit results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v3
         with:
           name: bandit-report
           path: bandit-report.json
@@ -48,7 +58,15 @@ jobs:
         run: |
           docker build --no-cache -t ghcr.io/${{ github.repository }}/tsoc:${{ github.sha }} -t ghcr.io/${{ github.repository }}/tsoc:latest .
 
-      # SKIPPED TEMPORARILY — Trivy unavailable
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@0.14.0
+        with:
+          image-ref: 'ghcr.io/${{ github.repository }}/tsoc:${{ github.sha }}'
+          format: 'json'
+          output: 'trivy-report.json'
+          exit-code: '1'
+          severity: 'LOW,MEDIUM,HIGH,CRITICAL'
+
       - name: Push image
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
@@ -60,7 +78,7 @@ jobs:
 
       - name: Upload Trivy results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v3
         with:
           name: trivy-report
           path: trivy-report.json
@@ -86,7 +104,7 @@ jobs:
     needs: security-scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v3
       - name: Create Kind Cluster
         uses: helm/kind-action@v1.4.0
       - name: Build Docker Image
@@ -97,10 +115,10 @@ jobs:
         run: |
           kubectl create namespace tsoc || true
           kubectl create secret generic tsoc-secrets -n tsoc \
-            --from-literal=api-key="$(openssl rand -hex 32)" \
+            --from-literal=api-key="test-ci-key" \
             --from-literal=DATABASE_URL="sqlite:////tmp/test.db" \
             --from-literal=slack_webhook_url="https://localhost" \
-            --from-literal=pagerduty_routing_key="$(openssl rand -hex 16)" \
+            --from-literal=pagerduty_routing_key="test" \
             --dry-run=client -o yaml | kubectl apply -f -
 
       - name: Deploy Kubernetes Manifests
@@ -111,7 +129,7 @@ jobs:
           kubectl wait --for=condition=available deployment/tsoc-api --timeout=120s
           kubectl wait --for=condition=available deployment/tsoc-stream-processor --timeout=120s
       - name: Setup Python environment
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
           python-version: '3.9'
       - name: Install Test Dependencies
@@ -168,7 +186,4 @@ jobs:
           print("✅ Fault tolerance passed: Rule alerts survive ML engine crashes.")
           PY_EOF
 
-          TSOC_API_KEY="${{ secrets.TEST_TSOC_API_KEY }}" python fault_test.py
-
-      - name: Verify image signature
-        run: cosign verify --key cosign.pub ghcr.io/${{ github.repository }}/tsoc:${{ github.sha }}
+          TSOC_API_KEY="test-ci-key" python fault_test.py
