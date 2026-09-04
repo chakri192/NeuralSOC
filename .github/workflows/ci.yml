@@ -56,7 +56,7 @@ jobs:
 
       - name: Build image
         run: |
-          docker build --no-cache -t ghcr.io/chakri192/neuralsoc/tsoc:latest -t ghcr.io/${{ github.repository }}/tsoc:latest .
+          docker build --no-cache -t ghcr.io/chakri192/neuralsoc/tsoc:latest -t ghcr.io/chakri192/neuralsoc/tsoc:latest .
 
       - name: Trivy image scan (CLI)
         run: |
@@ -70,7 +70,7 @@ jobs:
         run: |
           echo "$GHCR_PASSWORD" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           docker push ghcr.io/chakri192/neuralsoc/tsoc:latest
-          docker push ghcr.io/${{ github.repository }}/tsoc:latest
+          docker push ghcr.io/chakri192/neuralsoc/tsoc:latest
 
       - name: Upload Trivy results
         if: always()
