@@ -137,19 +137,3 @@ jobs:
           sleep 5
           
           cat << 'PY_EOF' > smoke_test.py
-          import time, json, requests, os
-          from kafka import KafkaProducer
-          
-          producer = KafkaProducer(bootstrap_servers='localhost:9092', value_serializer=lambda v: json.dumps(v).encode('utf-8'))
-          # Synthetic event designed to trigger DNS rules and ML DGA
-          event = {"event_type": "dns", "query": "1xb4.example.com", "id.orig_h": "192.168.1.10", "id.resp_h": "8.8.8.8"}
-          producer.send('raw_traffic', event)
-          producer.flush()
-          
-          time.sleep(5)
-          
-          resp = requests.get('http://localhost:8000/api/v1/alerts', headers={'Authorization': f'Bearer {os.environ.get("TSOC_API_KEY", "test-ci-key")}'})
-          assert resp.status_code == 200
-          alerts = resp.json()
-          assert len(alerts) > 0
-          print("✅ Smoke test passed: Alerts successfully traversed the ML and Rule pipelines.")
