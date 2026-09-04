@@ -20,13 +20,15 @@ def safe_int(val) -> int:
         return 0
 
 def shannon_entropy(data: str) -> float:
-    if not data: return 0.0
+    if not data:
+        return 0.0
     entropy = 0.0
     length = len(data)
-    for x in set(data):
-        p_x = float(data.count(x)) / length
+    counts = collections.Counter(data)
+    for count in counts.values():
+        p_x = count / length
         if p_x > 0:
-            entropy += - p_x * math.log2(p_x)
+            entropy -= p_x * math.log2(p_x)
     return entropy
 
 def extract_dns_features(event: dict) -> dict:

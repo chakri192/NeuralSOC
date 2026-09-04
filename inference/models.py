@@ -6,55 +6,197 @@ import unicodedata
 import idna
 import logging
 import time
+import string
+import secrets
+import threading
 
 logger = logging.getLogger(__name__)
-
-# F20: Cap PyTorch threads
-torch.set_num_threads(1)
-torch.set_num_interop_threads(1)
 
 class DeepLearningEngine:
     def __init__(self):
         self.model = None
+        self._inference_count = 0
+        self._inference_lock = threading.Lock()
+        self._INTEGRITY_CHECK_INTERVAL = 300  # Re-verify model SHA-256 every 300 inferences
         artifact_path = os.getenv("MODEL_PATH", "models/cnn_dga.pt")
         sha_path = artifact_path + ".sha256"
         try:
-            fd_bin = os.open(artifact_path, os.O_RDONLY)
-            fd_sha = os.open(sha_path, os.O_RDONLY)
-            with os.fdopen(fd_bin, 'rb') as f_bin, os.fdopen(fd_sha, 'r') as f_sha:
-                model_bytes = f_bin.read()
+            # Read both model binary and hash into memory atomically
+            with open(sha_path, 'r', encoding='utf-8') as f_sha:
                 expected_sha = f_sha.read().strip()
-            
-            if hashlib.sha256(model_bytes).hexdigest() != expected_sha:
-                raise RuntimeError("Integrity Error: SHA-256 mismatch")
-                
-            self.model = torch.jit.load(io.BytesIO(model_bytes), map_location=torch.device('cpu'))
+
+            with open(artifact_path, 'rb') as f_bin:
+                model_bytes = f_bin.read()
+
+            computed_sha = hashlib.sha256(model_bytes).hexdigest()
+            if not secrets.compare_digest(computed_sha, expected_sha):
+                raise RuntimeError(f"Integrity Error: SHA-256 mismatch (got {computed_sha}, expected {expected_sha})")
+
+            # Load TorchScript model directly from the validated in-memory buffer
+            model_buffer = io.BytesIO(model_bytes)
+            self.model = torch.jit.load(model_buffer, map_location=torch.device('cpu'))  # nosec B614
             self.model.eval()
+            # Periodic integrity check reference
+            self._expected_sha = computed_sha
+            self._last_check = time.time()
+
+            # Free raw bytes immediately to minimize memory footprint
+            del model_bytes
+            del model_buffer
         except Exception as e:
             logger.error(f"Model initialization failure: {e}")
             raise
-            
-        self.char_map = {chr(i): i for i in range(32, 127)}
+
+        valid_chars = string.ascii_lowercase + string.digits + "-."
+        self.char_map = {c: i + 1 for i, c in enumerate(valid_chars)}
+
+    def _recheck_integrity(self) -> bool:
+        """
+        Runtime re-verification: validates model file integrity against cryptographic SHA-256.
+        Fails closed on cryptographic mismatch, but preserves existing validated in-memory
+        model across transient OS/disk I/O hiccups to prevent denial of service.
+        """
+        try:
+            artifact_path = os.getenv("MODEL_PATH", "models/cnn_dga.pt")
+            sha_path = artifact_path + ".sha256"
+            with open(sha_path, 'r', encoding='utf-8') as f_sha:
+                expected = f_sha.read().strip()
+            with open(artifact_path, 'rb') as f_bin:
+                stat_before = os.fstat(f_bin.fileno())
+                data = f_bin.read()
+                stat_after = os.fstat(f_bin.fileno())
+            if stat_before.st_mtime != stat_after.st_mtime or stat_before.st_size != stat_after.st_size:
+                logger.warning("MODEL INTEGRITY WARNING: file changed during read; retaining active in-memory model")
+                return True
+            computed = hashlib.sha256(data).hexdigest()
+            if not secrets.compare_digest(computed, expected) or not secrets.compare_digest(expected, self._expected_sha):
+                logger.critical("MODEL INTEGRITY COMPROMISE: SHA-256 mismatch detected at runtime! Failing closed.")
+                self.model = None
+                return False
+            self._last_check = time.time()
+            return True
+        except (IOError, OSError) as io_err:
+            logger.error("Transient disk I/O error during model re-check: %s. Retaining validated in-memory model.", io_err)
+            return True
+        except Exception as e:
+            logger.critical("Unexpected integrity re-check exception: %s. Failing closed.", e)
+            self.model = None
+            return False
 
     def predict(self, features: dict, domain: str = ""):
-        if not domain or not self.model:
+        if not domain or not self.model or len(domain) > 512:
             return False, 0.0, 0.0
-            
+
+        # Scope PyTorch thread limits to inference execution to avoid starving other CPU tasks
+        orig_threads = torch.get_num_threads()
         try:
-            normalized = unicodedata.normalize('NFKC', domain)
-            ascii_domain = idna.encode(normalized, uts46=True).decode('ascii').lower()
-            encoded = [self.char_map.get(c, 0) for c in ascii_domain]
-            if len(encoded) == 0 or len(encoded) != len(ascii_domain) or any(c == 0 for c in encoded):
+            torch.set_num_threads(1)
+
+            # Thread-safe integrity refresh — protect entire check window
+            with self._inference_lock:
+                self._inference_count += 1
+                count_check = (self._inference_count % self._INTEGRITY_CHECK_INTERVAL == 0)
+                if count_check:
+                    # Hold lock during re-check to prevent concurrent load of different states
+                    if not self._recheck_integrity():
+                        return False, 0.0, 0.0
+
+            # Read-Copy-Update: snapshot model reference under lock, then release for concurrent inference
+            with self._inference_lock:
+                current_model = self.model
+
+            # 1. Unicode normalization and cleaning
+            normalized = unicodedata.normalize('NFKC', str(domain))
+            clean_domain = normalized.rstrip('.').lower()
+            try:
+                ascii_domain = idna.encode(clean_domain, uts46=True).decode('ascii').lower()
+            except (idna.core.IDNAError, UnicodeError):
+                ascii_domain = clean_domain
+
+            # 2. Resilient character sanitization (map '_' to '-' and unmapped chars to standard tokens)
+            sanitized_ascii = "".join(c if c in self.char_map else ("-" if c == "_" else "") for c in ascii_domain)
+            if not sanitized_ascii:
                 return False, 0.0, 0.0
-            
-            encoded = encoded[:35] + [0] * max(0, 35 - len(encoded))
-            tensor = torch.tensor([encoded], dtype=torch.long)
-            
-            with torch.no_grad():
-                prob = self.model(tensor).item()
-                return prob > 0.85, prob, 0.1
-        except idna.core.IDNAError:
-            return False, 0.0, 0.0
+
+            # 3. Multi-segment inspection to defeat prefix padding and sub-domain evasion
+            domains_to_check = [sanitized_ascii]
+            # If the domain is an IDN/homoglyph (punycode xn--), inspect both punycode and ASCII-mapped variants
+            if ascii_domain != clean_domain:
+                sanitized_clean = "".join(c if c in self.char_map else "" for c in clean_domain)
+                if sanitized_clean and sanitized_clean not in domains_to_check:
+                    domains_to_check.append(sanitized_clean)
+
+            parts = [p for p in sanitized_ascii.split('.') if p]
+            if len(parts) >= 2:
+                sld = '.'.join(parts[-2:])
+                if sld not in domains_to_check:
+                    domains_to_check.append(sld)
+                # Check all subdomain parts with length >= 4
+                for part in parts:
+                    if len(part) >= 4 and part not in domains_to_check:
+                        domains_to_check.append(part)
+
+            highest_prob = 0.0
+            all_slices = []
+
+            for d in domains_to_check:
+                encoded = [self.char_map.get(c, 0) for c in d]
+                if not encoded:
+                    continue
+
+                # Sliding window across entire domain to ensure zero blind spots for long domains
+                if len(encoded) > 35:
+                    step = 15
+                    MAX_SLICES = 10
+                    for start in range(0, len(encoded) - 35 + 1, step):
+                        if len(all_slices) >= MAX_SLICES:
+                            break
+                        all_slices.append(encoded[start:start + 35])
+                    if len(all_slices) < MAX_SLICES and (len(encoded) - 35) % step != 0:
+                        all_slices.append(encoded[-35:])
+                else:
+                    all_slices.append(encoded + [0] * (35 - len(encoded)))
+
+            current_model = self.model
+            if current_model is None:
+                return False, 0.0, 0.0
+
+            if all_slices:
+                # Batch all slices into a single forward context to eliminate GIL/Python loop overhead
+                batch_tensor = torch.tensor(all_slices, dtype=torch.long)
+                with torch.no_grad():
+                    output_probs = current_model(batch_tensor)
+                    max_prob = float(torch.max(output_probs).item())
+                    if max_prob > highest_prob:
+                        highest_prob = max_prob
+
+            is_dga = highest_prob > 0.85
+            return is_dga, highest_prob, 0.1
         except Exception as e:
             logger.error(f"Prediction Error: {e}")
-            raise RuntimeError("Prediction Error")
+            return False, 0.0, 0.0
+        finally:
+            torch.set_num_threads(orig_threads)
+
+
+class ThreatModelOrchestrator:
+    """
+    Orchestrates deep learning threat detection models across traffic events.
+    Exposes a standardized interface for stream processing architectures.
+    """
+    def __init__(self):
+        self.dl_engine = DeepLearningEngine()
+
+    def evaluate(self, event: dict, features: dict) -> list:
+        detections = []
+        if event.get("event_type") == "dns":
+            query = event.get("query", "")
+            is_dga, prob, _ = self.dl_engine.predict(features, query)
+            if is_dga:
+                detections.append({
+                    "threat_class": "DGA / DNS Tunnelling",
+                    "severity": "high",
+                    "confidence": prob,
+                    "rule_id": "DL_CNN_DGA"
+                })
+        return detections

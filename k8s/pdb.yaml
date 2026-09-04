@@ -19,3 +19,14 @@ spec:
   selector:
     matchLabels:
       app: tsoc-api
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pdb-kafka-sink
+  namespace: tsoc
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: tsoc-kafka-sink

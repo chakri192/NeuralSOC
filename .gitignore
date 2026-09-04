@@ -16,3 +16,10 @@ soc-stream-processor-cluster-data/
 
 
 k8s/secrets.yaml
+test.db
+.env*
+*.pt
+models/*.sha256
+.pt.sha256
+models/*.pt
+PYTHONUNBUFFERED=1

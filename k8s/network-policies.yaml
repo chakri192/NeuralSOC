@@ -6,6 +6,7 @@ metadata:
 spec:
   podSelector: {}
   ingress: []
+  egress: []
   policyTypes: [Ingress, Egress]
 ---
 apiVersion: networking.k8s.io/v1
@@ -18,6 +19,9 @@ spec:
     matchLabels:
       app: tsoc-api
   policyTypes: [Ingress, Egress]
+  # Identity-enforced via Cilium/Calico: serviceAccount tsoc-api-sa required for ingress
+  # Note: Standard NetworkPolicy lacks SA selectors; enforce via CiliumClusterwideNetworkPolicy
+  # or admission controller (OPA/Gatekeeper) to prevent label-spoof identity bypass.
   ingress:
   - from:
     - namespaceSelector:
@@ -26,6 +30,17 @@ spec:
       podSelector:
         matchLabels:
           app.kubernetes.io/name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: 8000
+  # Allow Prometheus scraping for metrics collection
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: monitoring
+      podSelector:
+        matchLabels:
+          app: prometheus
     ports:
     - protocol: TCP
       port: 8000
@@ -67,13 +82,31 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: stream-processor-egress
+  name: stream-processor-policy
   namespace: tsoc
 spec:
   podSelector:
     matchLabels:
       app: tsoc-stream-processor
-  policyTypes: [Egress]
+  policyTypes: [Ingress, Egress]
+  ingress:
+  # Allow health checks and metrics scraping on port 6066 from Prometheus monitoring namespace or self
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: monitoring
+      podSelector:
+        matchLabels:
+          app: prometheus
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: tsoc
+      podSelector:
+        matchLabels:
+          app: tsoc-stream-processor
+    ports:
+    - protocol: TCP
+      port: 6066
   egress:
   - to:
     - namespaceSelector:
@@ -107,3 +140,62 @@ spec:
     ports:
     - protocol: TCP
       port: 9092
+  # Allow outbound HTTPS to external threat intelligence providers (excluding internal RFC1918 and Cloud Metadata)
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except:
+        - 10.0.0.0/8
+        - 172.16.0.0/12
+        - 192.168.0.0/16
+        - 169.254.0.0/16
+        - 127.0.0.0/8
+        - 100.64.0.0/10
+    ports:
+    - protocol: TCP
+      port: 443
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kafka-sink-policy
+  namespace: tsoc
+spec:
+  podSelector:
+    matchLabels:
+      app: tsoc-kafka-sink
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: prod
+      podSelector:
+        matchLabels:
+          app: redpanda
+    ports:
+    - protocol: TCP
+      port: 9092
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: db-namespace
+      podSelector:
+        matchLabels:
+          app: postgres
+    ports:
+    - protocol: TCP
+      port: 5432

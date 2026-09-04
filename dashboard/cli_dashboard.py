@@ -10,14 +10,16 @@ and professional single-pane-of-glass view.
 import time
 import json
 import re
-ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+import logging
+import traceback
+
+logger = logging.getLogger("cli_dashboard")
+
+ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\].*?(?:\x07|\x1B\\))')
+
 def sanitize_ansi(text: str) -> str:
-    if not isinstance(text, str): return str(text)
-    return ANSI_ESCAPE.sub('', text)
-import re
-ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-def sanitize_ansi(text: str) -> str:
-    if not isinstance(text, str): return str(text)
+    if not isinstance(text, str):
+        return str(text)
     return ANSI_ESCAPE.sub('', text)
 import argparse
 from datetime import datetime, timezone
@@ -65,7 +67,7 @@ class CLIDashboard:
             return KafkaConsumer(
                 *self.topics,
                 bootstrap_servers=self.broker.split(","),
-                group_id=f"cli-dashboard-{int(time.time())}",
+                group_id="cli-dashboard-live",
                 auto_offset_reset="latest",
                 enable_auto_commit=True,
                 value_deserializer=lambda m: json.loads(m.decode("utf-8")),
@@ -114,9 +116,7 @@ class CLIDashboard:
                     threat = alert.get("threat_class", "UNKNOWN")
                     self.threat_counts[threat] += 1
         except Exception as e:
-            with open("debug.log", "a") as f:
-                import traceback
-                f.write(traceback.format_exc() + "\n")
+            logger.error("poll_alerts error: %s", traceback.format_exc())
 
     def generate_layout(self) -> Layout:
         layout = Layout()
@@ -150,11 +150,6 @@ class CLIDashboard:
         # 2. KPIs
         kpi_table = Table.grid(expand=True)
         for _ in range(4): kpi_table.add_column(ratio=1)
-        
-            # SECURITY FIX: Strip all ANSI terminal injection payloads before rendering
-            threat = sanitize_ansi(str(threat))
-            s_ip = sanitize_ansi(str(s_ip))
-            t_ip = sanitize_ansi(str(t_ip))
         kpi_table.add_row(
             Panel(Align.center(Text(f"{self.stats['total']:,}\nFlows Analysed", style="bold blue")), border_style="#334155"),
             Panel(Align.center(Text(f"{self.stats['CRITICAL']:,}\nCritical Threats", style="bold red")), border_style="#f7768e"),

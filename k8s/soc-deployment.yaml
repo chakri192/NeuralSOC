@@ -4,6 +4,7 @@ metadata:
   labels:
     app: tsoc-stream-processor
   name: tsoc-stream-processor
+  namespace: tsoc
 spec:
   replicas: 3
   selector:
@@ -18,13 +19,13 @@ spec:
       volumes:
       - name: tmp
         emptyDir:
-          sizeLimit: 50Mi
+          sizeLimit: 500Mi
       - name: dlq
         emptyDir:
-          sizeLimit: 50Mi
+          sizeLimit: 1Gi
       - name: cache
         emptyDir:
-          sizeLimit: 50Mi
+          sizeLimit: 500Mi
       containers:
       - env:
         - name: SLACK_WEBHOOK_URL
@@ -86,6 +87,7 @@ spec:
             drop: ["ALL"]
           seccompProfile:
             type: RuntimeDefault
+        serviceAccountName: tsoc-api-sa
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -106,13 +108,13 @@ spec:
       volumes:
       - name: tmp
         emptyDir:
-          sizeLimit: 50Mi
+          sizeLimit: 500Mi
       - name: dlq
         emptyDir:
-          sizeLimit: 50Mi
+          sizeLimit: 1Gi
       - name: cache
         emptyDir:
-          sizeLimit: 50Mi
+          sizeLimit: 500Mi
       containers:
       - env:
         - name: SLACK_WEBHOOK_URL
@@ -135,6 +137,8 @@ spec:
             secretKeyRef:
               name: tsoc-secrets
               key: DATABASE_URL
+        - name: TRUSTED_PROXY_CIDRS
+          value: "127.0.0.1/32,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
         image: your-registry.com/tsoc/api:v1.0
         name: fastapi
         command: ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
@@ -158,19 +162,19 @@ spec:
             memory: 256Mi
         startupProbe:
           httpGet:
-            path: /healthz
+            path: /livez
             port: 8000
           failureThreshold: 3
           periodSeconds: 10
         livenessProbe:
           httpGet:
-            path: /healthz
+            path: /livez
             port: 8000
-          initialDelaySeconds: 60
+          initialDelaySeconds: 30
           periodSeconds: 20
         readinessProbe:
           httpGet:
-            path: /healthz
+            path: /readyz
             port: 8000
           initialDelaySeconds: 15
           periodSeconds: 10
@@ -183,3 +187,70 @@ spec:
             drop: ["ALL"]
           seccompProfile:
             type: RuntimeDefault
+        serviceAccountName: tsoc-api-sa
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tsoc-kafka-sink
+  namespace: tsoc
+  labels:
+    app: tsoc-kafka-sink
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tsoc-kafka-sink
+  template:
+    metadata:
+      labels:
+        app: tsoc-kafka-sink
+    spec:
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - name: tmp
+        emptyDir:
+          sizeLimit: 500Mi
+      - name: dlq
+        emptyDir:
+          sizeLimit: 1Gi
+      containers:
+      - name: kafka-sink
+        image: your-registry.com/tsoc/api:v1.0
+        command: ["python", "-m", "api.kafka_sink"]
+        env:
+        - name: REDPANDA_BROKERS
+          value: soc-redpanda-cluster.prod.svc.cluster.local:9092
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: tsoc-secrets
+              key: DATABASE_URL
+        - name: ALERTS_TOPIC
+          value: security_alerts
+        - name: ALERTS_DLQ_TOPIC
+          value: security_alerts_dlq
+        - name: DLQ_FILE_PATH
+          value: /tmp/dlq/alerts.jsonl
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: dlq
+          mountPath: /tmp/dlq
+        resources:
+          limits:
+            cpu: 500m
+            memory: 512Mi
+          requests:
+            cpu: 250m
+            memory: 256Mi
+        securityContext:
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
+        serviceAccountName: tsoc-api-sa
