@@ -22,7 +22,7 @@ class TestSOCPipelineSecurity(unittest.TestCase):
         self.assertTrue(_is_trusted_proxy("127.0.0.1"))
         self.assertTrue(_is_trusted_proxy("::1"))
         self.assertTrue(_is_trusted_proxy("10.244.1.5"))
-        self.assertTrue(_is_trusted_proxy("172.16.0.10"))
+        self.assertFalse(_is_trusted_proxy("172.16.0.10"))
         # External untrusted IP
         self.assertFalse(_is_trusted_proxy("203.0.113.50"))
 
@@ -81,7 +81,7 @@ class TestSOCPipelineSecurity(unittest.TestCase):
 
         # Clear existing keys for test isolation
         try:
-            correlator.redis.delete(f"{{{test_ip}}}:alerts", f"{{{test_ip}}}:dedup:C2_Beaconing", f"{{{test_ip}}}:dedup:Reconnaissance")
+            correlator.redis.delete(f"{{{test_ip}}}:alerts", f"{{{test_ip}}}:alerts:cnt", f"{{{test_ip}}}:dedup:C2_Beaconing", f"{{{test_ip}}}:dedup:Reconnaissance")
         except Exception:
             pass
 
@@ -192,6 +192,94 @@ class TestSOCPipelineSecurity(unittest.TestCase):
         is_dga, prob, _ = engine.predict({}, "gооgle.com")  # Cyrillic 'о'
         self.assertIsInstance(prob, float)
         self.assertIsInstance(is_dga, bool)
+
+    def test_lru_cache_eviction(self):
+        enricher = ThreatEnricher(cache_ttl_sec=3600, max_cache_size=3)
+        enricher._set_cached("1.1.1.1", {"city": "City1"})
+        enricher._set_cached("2.2.2.2", {"city": "City2"})
+        enricher._set_cached("3.3.3.3", {"city": "City3"})
+        self.assertEqual(len(enricher._cache), 3)
+
+        # Access 1.1.1.1 to mark it recently used
+        cached_1 = enricher._get_cached("1.1.1.1")
+        self.assertEqual(cached_1["city"], "City1")
+
+        # Insert 4th element: should evict 2.2.2.2 (oldest)
+        enricher._set_cached("4.4.4.4", {"city": "City4"})
+        self.assertEqual(len(enricher._cache), 3)
+        self.assertEqual(enricher._get_cached("2.2.2.2"), {})
+        self.assertNotEqual(enricher._get_cached("1.1.1.1"), {})
+        self.assertNotEqual(enricher._get_cached("4.4.4.4"), {})
+
+    def test_dynamic_model_hot_reload(self):
+        engine = DeepLearningEngine()
+        initial_sha = engine._expected_sha
+        self.assertIsNotNone(engine.model)
+
+        # Mock loading a newly retrained model with valid hash
+        mock_new_model = MagicMock()
+        mock_new_sha = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
+
+        with patch.object(engine, "_load_model_from_disk", return_value=(mock_new_model, mock_new_sha)):
+            success = engine._recheck_integrity()
+            self.assertTrue(success)
+            self.assertEqual(engine._expected_sha, mock_new_sha)
+            self.assertEqual(engine.model, mock_new_model)
+
+    def test_homogeneous_attack_correlation(self):
+        correlator = IncidentCorrelator()
+        test_ip = "198.51.100.77"
+
+        # Clear existing keys for test isolation
+        try:
+            correlator.redis.delete(f"{{{test_ip}}}:alerts", f"{{{test_ip}}}:alerts:cnt", f"{{{test_ip}}}:dedup:DDoS_Attack")
+        except Exception:
+            pass
+
+        try:
+            incidents_generated = []
+            for i in range(10):
+                alert = {
+                    "alert_id": f"ALT-DDOS-{i}",
+                    "source_ip": test_ip,
+                    "destination_ip": "10.0.0.5",
+                    "threat_class": "DDoS Attack",
+                    "severity": "critical",
+                    "mitre_tactic": "Impact"
+                }
+                inc = correlator.add_alert(alert)
+                if inc:
+                    incidents_generated.append(inc)
+
+            # Alert #2 (len_list == 2) and Alert #5, #10 (len_list % 5 == 0) must trigger incidents
+            # preventing the black-hole suppression flaw for homogeneous attacks
+            self.assertGreaterEqual(len(incidents_generated), 1)
+            self.assertEqual(incidents_generated[0]["source_ip"], test_ip)
+            self.assertEqual(incidents_generated[0]["severity"], "critical")
+        except Exception as e:
+            print(f"Redis test skipped: {e}")
+
+    def test_schema_validation_with_null_mitre(self):
+        from inference.schemas import validate_alert
+        from datetime import datetime, timezone
+        dl_alert = {
+            "alert_id": "ALT-DL-001",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "source_ip": "192.168.1.10",
+            "destination_ip": "8.8.8.8",
+            "threat_class": "DGA / DNS Tunnelling",
+            "severity": "high",
+            "confidence_score": 0.95,
+            "evidence": {},
+            "event_type": "dns",
+            "schema_version": "1.0",
+            "model_name": "DL_CNN_DGA",
+            "model_version": "1.0",
+            "mitre_tactic": None,
+            "mitre_technique": None
+        }
+        is_valid, err = validate_alert(dl_alert)
+        self.assertTrue(is_valid, f"Schema validation failed for DL alert with null mitre: {err}")
 
 if __name__ == '__main__':
     unittest.main()

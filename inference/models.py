@@ -9,40 +9,50 @@ import time
 import string
 import secrets
 import threading
+from typing import Tuple
 
 logger = logging.getLogger(__name__)
 
 class DeepLearningEngine:
+    def _load_model_from_disk(self) -> Tuple[torch.jit.ScriptModule, str]:
+        """Loads and validates model from disk. Returns (model, sha)."""
+        artifact_path = os.getenv("MODEL_PATH", "models/cnn_dga.pt")
+        sha_path = artifact_path + ".sha256"
+        with open(sha_path, 'r', encoding='utf-8') as f_sha:
+            expected_sha = f_sha.read().split()[0].strip()
+
+        with open(artifact_path, 'rb') as f_bin:
+            model_bytes = f_bin.read()
+
+        computed_sha = hashlib.sha256(model_bytes).hexdigest()
+        if not secrets.compare_digest(computed_sha, expected_sha):
+            raise RuntimeError(f"Integrity Error: SHA-256 mismatch (got {computed_sha}, expected {expected_sha})")
+
+        # Load TorchScript model directly from the validated in-memory buffer
+        model_buffer = io.BytesIO(model_bytes)
+        model = torch.jit.load(model_buffer, map_location=torch.device('cpu'))  # nosec B614
+        model.eval()
+        return model, computed_sha
+
     def __init__(self):
         self.model = None
         self._inference_count = 0
         self._inference_lock = threading.Lock()
         self._INTEGRITY_CHECK_INTERVAL = 300  # Re-verify model SHA-256 every 300 inferences
-        artifact_path = os.getenv("MODEL_PATH", "models/cnn_dga.pt")
-        sha_path = artifact_path + ".sha256"
+        self._last_mtime = 0.0
+
+        # Lock PyTorch intra-op CPU threads once globally at initialization to prevent threadpool racing
         try:
-            # Read both model binary and hash into memory atomically
-            with open(sha_path, 'r', encoding='utf-8') as f_sha:
-                expected_sha = f_sha.read().strip()
+            torch.set_num_threads(1)
+        except Exception as e:
+            logger.debug(f"Could not set PyTorch thread count: {e}")
 
-            with open(artifact_path, 'rb') as f_bin:
-                model_bytes = f_bin.read()
-
-            computed_sha = hashlib.sha256(model_bytes).hexdigest()
-            if not secrets.compare_digest(computed_sha, expected_sha):
-                raise RuntimeError(f"Integrity Error: SHA-256 mismatch (got {computed_sha}, expected {expected_sha})")
-
-            # Load TorchScript model directly from the validated in-memory buffer
-            model_buffer = io.BytesIO(model_bytes)
-            self.model = torch.jit.load(model_buffer, map_location=torch.device('cpu'))  # nosec B614
-            self.model.eval()
-            # Periodic integrity check reference
-            self._expected_sha = computed_sha
+        try:
+            artifact_path = os.getenv("MODEL_PATH", "models/cnn_dga.pt")
+            if os.path.exists(artifact_path):
+                self._last_mtime = os.path.getmtime(artifact_path)
+            self.model, self._expected_sha = self._load_model_from_disk()
             self._last_check = time.time()
-
-            # Free raw bytes immediately to minimize memory footprint
-            del model_bytes
-            del model_buffer
         except Exception as e:
             logger.error(f"Model initialization failure: {e}")
             raise
@@ -53,26 +63,21 @@ class DeepLearningEngine:
     def _recheck_integrity(self) -> bool:
         """
         Runtime re-verification: validates model file integrity against cryptographic SHA-256.
-        Fails closed on cryptographic mismatch, but preserves existing validated in-memory
-        model across transient OS/disk I/O hiccups to prevent denial of service.
+        If file changed on disk but hash is valid, hot-reloads the model.
+        Fails closed on cryptographic mismatch.
         """
         try:
             artifact_path = os.getenv("MODEL_PATH", "models/cnn_dga.pt")
-            sha_path = artifact_path + ".sha256"
-            with open(sha_path, 'r', encoding='utf-8') as f_sha:
-                expected = f_sha.read().strip()
-            with open(artifact_path, 'rb') as f_bin:
-                stat_before = os.fstat(f_bin.fileno())
-                data = f_bin.read()
-                stat_after = os.fstat(f_bin.fileno())
-            if stat_before.st_mtime != stat_after.st_mtime or stat_before.st_size != stat_after.st_size:
-                logger.warning("MODEL INTEGRITY WARNING: file changed during read; retaining active in-memory model")
-                return True
-            computed = hashlib.sha256(data).hexdigest()
-            if not secrets.compare_digest(computed, expected) or not secrets.compare_digest(expected, self._expected_sha):
-                logger.critical("MODEL INTEGRITY COMPROMISE: SHA-256 mismatch detected at runtime! Failing closed.")
-                self.model = None
-                return False
+            new_model, new_sha = self._load_model_from_disk()
+
+            if new_sha != self._expected_sha:
+                logger.info("New model version detected and validated; performing hot-reload.")
+                with self._inference_lock:
+                    self.model = new_model
+                    self._expected_sha = new_sha
+                    if os.path.exists(artifact_path):
+                        self._last_mtime = os.path.getmtime(artifact_path)
+
             self._last_check = time.time()
             return True
         except (IOError, OSError) as io_err:
@@ -80,18 +85,15 @@ class DeepLearningEngine:
             return True
         except Exception as e:
             logger.critical("Unexpected integrity re-check exception: %s. Failing closed.", e)
-            self.model = None
+            with self._inference_lock:
+                self.model = None
             return False
 
     def predict(self, features: dict, domain: str = ""):
         if not domain or not self.model or len(domain) > 512:
             return False, 0.0, 0.0
 
-        # Scope PyTorch thread limits to inference execution to avoid starving other CPU tasks
-        orig_threads = torch.get_num_threads()
         try:
-            torch.set_num_threads(1)
-
             # Thread-safe integrity refresh — protect entire check window
             with self._inference_lock:
                 self._inference_count += 1
@@ -175,8 +177,6 @@ class DeepLearningEngine:
         except Exception as e:
             logger.error(f"Prediction Error: {e}")
             return False, 0.0, 0.0
-        finally:
-            torch.set_num_threads(orig_threads)
 
 
 class ThreatModelOrchestrator:

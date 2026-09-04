@@ -4,35 +4,49 @@ import os
 import redis
 import uuid
 import logging
+import ipaddress
+import ssl
 from inference.risk import calculate_risk_score
 
 logger = logging.getLogger(__name__)
 
-# Atomic Lua script: push + trim + expire + len + nx dedup (without heavy snapshot return)
+# Atomic Lua script: push + trim + expire + window total count + dedup with priority (optimized snapshot return)
 CORRELATE_LUA = """
 local key_name = KEYS[1]
 local dedup_name = KEYS[2]
 local alert_json = ARGV[1]
 local window = tonumber(ARGV[2])
 local safe_threat = ARGV[3]
+local severity_score = tonumber(ARGV[4])
 
 redis.call('lpush', key_name, alert_json)
 redis.call('ltrim', key_name, 0, 99)
 redis.call('expire', key_name, window)
-redis.call('expire', dedup_name, window)
-local len_list = redis.call('llen', key_name)
+
+local count_key = key_name .. ":cnt"
+local total_count = redis.call('incr', count_key)
+redis.call('expire', count_key, window)
+
+local current_max = tonumber(redis.call('get', dedup_name) or "0")
 local incident = 0
-if len_list >= 2 then
-    local was_set = redis.call('set', dedup_name, '1', 'nx', 'ex', window)
-    if was_set == 1 or was_set == true or was_set == 'OK' then
+
+if total_count >= 2 then
+    if current_max == 0 or severity_score > current_max or total_count == 2 or (total_count > 2 and total_count % 5 == 0) then
         incident = 1
-    else
-        incident = 0
     end
-else
-    incident = 0
 end
-return {len_list, incident, redis.call('lrange', key_name, 0, -1)}
+
+if severity_score > current_max or current_max == 0 then
+    redis.call('set', dedup_name, tostring(severity_score), 'ex', window)
+else
+    redis.call('expire', dedup_name, window)
+end
+
+local alerts_snapshot = {}
+if incident == 1 then
+    alerts_snapshot = redis.call('lrange', key_name, 0, -1)
+end
+return {total_count, incident, alerts_snapshot}
 """
 
 class IncidentCorrelator:
@@ -42,7 +56,7 @@ class IncidentCorrelator:
         redis_password = os.getenv("REDIS_PASSWORD", None)
         redis_ssl = os.getenv("REDIS_SSL", "false").lower() in ("true", "1", "yes")
 
-        pool = redis.ConnectionPool(
+        pool_kwargs = dict(
             host=redis_host,
             port=redis_port,
             password=redis_password,
@@ -52,21 +66,44 @@ class IncidentCorrelator:
             socket_timeout=2.0,
             max_connections=50,
             retry_on_timeout=True,
-            health_check_interval=30
+            health_check_interval=30,
         )
+        # Enforce TLS certificate verification when SSL is enabled to prevent MITM
+        if redis_ssl:
+            pool_kwargs["ssl_cert_reqs"] = "required"
+            redis_ca_cert = os.getenv("REDIS_CA_CERT_PATH")
+            if redis_ca_cert and os.path.exists(redis_ca_cert):
+                pool_kwargs["ssl_ca_certs"] = redis_ca_cert
+            else:
+                try:
+                    import certifi
+                    pool_kwargs["ssl_ca_certs"] = certifi.where()
+                except ImportError:
+                    paths = ssl.get_default_verify_paths()
+                    if paths.cafile:
+                        pool_kwargs["ssl_ca_certs"] = paths.cafile
+                    elif paths.capath:
+                        pool_kwargs["ssl_ca_path"] = paths.capath
+
+        pool = redis.ConnectionPool(**pool_kwargs)
         self.redis = redis.Redis(connection_pool=pool)
         self.time_window_sec = 300
         self._lua = self.redis.register_script(CORRELATE_LUA)
 
     def add_alert(self, alert, threshold=80.0):
         import re
-        # Strict allow-list: alphanumeric, dot, hyphen, colon (IPv6), underscore only; reject injection chars
-        safe_re = re.compile(r"^[A-Za-z0-9_.:-]+$")
-        raw_src = str(alert.get("source_ip", "127.0.0.1"))
-        src_ip = raw_src.strip()
-        if not safe_re.match(src_ip) or len(src_ip) > 45:
+        raw_src = str(alert.get("source_ip", "127.0.0.1")).strip()
+        # Strict IP validation to prevent Redis key injection and newline attacks
+        try:
+            addr = ipaddress.ip_address(raw_src)
+            src_ip = str(addr)
+        except ValueError:
             logger.warning("Invalid source_ip rejected: %r", raw_src)
             return None
+        if len(src_ip) > 45:
+            logger.warning("Invalid source_ip length rejected: %r", raw_src)
+            return None
+
         threat_class = str(alert.get("threat_class", "unknown"))
         # Strict threat class sanitization: only allow alphanumerics, space->underscore, drop others
         safe_threat = re.sub(r"[^A-Za-z0-9_ ]", "", threat_class)
@@ -76,14 +113,22 @@ class IncidentCorrelator:
         key_name = f"{{{src_ip}}}:alerts"
         dedup_name = f"{{{src_ip}}}:dedup:{safe_threat}"
 
-        # Execute purely atomic Redis Lua script (push + trim + expire + len + nx dedup + snapshot)
+        # Determine numeric severity score for thresholding / escalation
+        sev_weights = {"critical": 100.0, "high": 75.0, "medium": 50.0, "low": 25.0}
+        raw_sev = str(alert.get("severity", "low")).lower().strip()
+        if raw_sev not in sev_weights:
+            raw_sev = "low"
+        sev_score = sev_weights[raw_sev]
+
+        # Execute purely atomic Redis Lua script (push + trim + expire + len + dedup with escalation + snapshot)
         try:
             result = self._lua(
                 keys=[key_name, dedup_name],
                 args=[
                     json.dumps(alert),
                     str(self.time_window_sec),
-                    safe_threat
+                    safe_threat,
+                    str(sev_score)
                 ]
             )
             len_list = int(result[0])
@@ -96,7 +141,6 @@ class IncidentCorrelator:
                 related_alert_ids = []
                 tactics_set = set()
                 parsed_alerts_list = []
-                sev_weights = {"critical": 100.0, "high": 75.0, "medium": 50.0, "low": 25.0}
                 max_sev = alert.get("severity", "high")
 
                 for raw_a in raw_alerts:
@@ -132,7 +176,7 @@ class IncidentCorrelator:
                 threat_list = list(threat_classes_set)
                 entities_list = list(affected_entities_set)
                 calculated_risk = calculate_risk_score(parsed_alerts_list)
-                final_risk = max(calculated_risk, float(threshold))
+                final_risk = float(calculated_risk)
 
                 return {
                     "incident_id": f"INC-{uuid.uuid4().hex[:8].upper()}",

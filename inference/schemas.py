@@ -14,17 +14,22 @@ ALERT_SCHEMA = {
         "threat_class": {"type": "string"},
         "confidence_score": {"type": "number"},
         "severity": {"type": "string", "enum": ["low", "medium", "high", "critical"]},
-        "mitre_tactic": {"type": "string"},
-        "mitre_technique": {"type": "string"},
+        "mitre_tactic": {"type": ["string", "null"]},
+        "mitre_technique": {"type": ["string", "null"]},
         "source_ip": {"type": "string", "pattern": IP_REGEX},
-        "destination_ip": {"type": "string", "pattern": IP_REGEX},
-        "evidence": {"type": "object"},
+        "destination_ip": {
+            "anyOf": [
+                {"type": "null"},
+                {"type": "string", "pattern": IP_REGEX}
+            ]
+        },
+        "evidence": {"type": ["object", "null"]},
         "model_name": {"type": "string"},
         "model_version": {"type": "string"},
         "schema_version": {"type": "string", "enum": ["1.0"]}
     },
     "required": [
-        "timestamp", "alert_id", "event_type", "threat_class", 
+        "timestamp", "alert_id", "event_type", "threat_class",
         "confidence_score", "severity", "source_ip", "schema_version"
     ],
     "additionalProperties": False

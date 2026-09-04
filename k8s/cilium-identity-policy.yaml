@@ -1,0 +1,49 @@
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: tsoc-stream-processor-egress-complete
+  namespace: tsoc
+spec:
+  endpointSelector:
+    matchLabels:
+      app: tsoc-stream-processor
+  egress:
+    # CoreDNS / kube-dns (required for Kafka broker FQDN resolution + service discovery)
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+          rules:
+            dns:
+              - matchPattern: "*"
+    # Redis correlation state (atomic Lua scripts + windowed correlation)
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: redis
+            app: redis
+      toPorts:
+        - ports:
+            - port: "6379"
+              protocol: TCP
+    # Redpanda / Kafka broker clusters (durable offset commits + DLQ)
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: prod
+            app: redpanda
+      toPorts:
+        - ports:
+            - port: "9092"
+              protocol: TCP
+    # FQDN-based Threat Intelligence API (ipapi.co) via TLS with endpoint identity
+    - toFQDNs:
+        - matchName: "ipapi.co"
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP

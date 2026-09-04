@@ -1,3 +1,33 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tsoc
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tsoc-api-sa
+  namespace: tsoc
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tsoc-stream-sa
+  namespace: tsoc
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tsoc-sink-sa
+  namespace: tsoc
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -42,6 +72,14 @@ spec:
           value: soc-redpanda-cluster.prod.svc.cluster.local:9092
         - name: REDIS_HOST
           value: redis.redis.svc.cluster.local
+        - name: REDIS_PORT
+          value: "6379"
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: tsoc-secrets
+              key: redis_password
+              optional: true
         image: your-registry.com/tsoc/stream-processor:v1.0
         name: faust-worker
         volumeMounts:
@@ -87,7 +125,7 @@ spec:
             drop: ["ALL"]
           seccompProfile:
             type: RuntimeDefault
-        serviceAccountName: tsoc-api-sa
+      serviceAccountName: tsoc-stream-sa
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -138,7 +176,19 @@ spec:
               name: tsoc-secrets
               key: DATABASE_URL
         - name: TRUSTED_PROXY_CIDRS
-          value: "127.0.0.1/32,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+          value: "127.0.0.1/32,::1/128,10.244.0.0/16"
+        - name: REDIS_HOST
+          value: redis.redis.svc.cluster.local
+        - name: REDIS_PORT
+          value: "6379"
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: tsoc-secrets
+              key: redis_password
+              optional: true
+        - name: LIMITER_STORAGE_URI
+          value: "redis://redis.redis.svc.cluster.local:6379/1"
         image: your-registry.com/tsoc/api:v1.0
         name: fastapi
         command: ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
@@ -187,7 +237,7 @@ spec:
             drop: ["ALL"]
           seccompProfile:
             type: RuntimeDefault
-        serviceAccountName: tsoc-api-sa
+      serviceAccountName: tsoc-api-sa
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -212,8 +262,8 @@ spec:
         emptyDir:
           sizeLimit: 500Mi
       - name: dlq
-        emptyDir:
-          sizeLimit: 1Gi
+        persistentVolumeClaim:
+          claimName: kafka-sink-dlq-pvc
       containers:
       - name: kafka-sink
         image: your-registry.com/tsoc/api:v1.0
@@ -253,4 +303,21 @@ spec:
             drop: ["ALL"]
           seccompProfile:
             type: RuntimeDefault
-        serviceAccountName: tsoc-api-sa
+        startupProbe:
+          exec:
+            command: ["python", "-c", "import time; time.sleep(2)"]
+          failureThreshold: 30
+          periodSeconds: 10
+        livenessProbe:
+          exec:
+            command: ["python", "-c", "import time; time.sleep(1)"]
+          initialDelaySeconds: 30
+          failureThreshold: 3
+          periodSeconds: 20
+        readinessProbe:
+          exec:
+            command: ["python", "-c", "import time; time.sleep(1)"]
+          initialDelaySeconds: 15
+          failureThreshold: 3
+          periodSeconds: 10
+      serviceAccountName: tsoc-sink-sa

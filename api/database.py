@@ -15,7 +15,7 @@ engine_kwargs = {
 
 if "postgresql" in SQLALCHEMY_DATABASE_URL:
     connect_args["connect_timeout"] = 5
-    connect_args["sslmode"] = os.getenv("DB_SSLMODE", "require")
+    connect_args["sslmode"] = os.getenv("DB_SSLMODE", "verify-full")
     engine_kwargs.update({
         "pool_size": 20,
         "max_overflow": 20,

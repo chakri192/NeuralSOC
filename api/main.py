@@ -3,6 +3,7 @@ import traceback
 import logging
 import ipaddress
 import secrets
+import urllib.parse
 from typing import List, Optional
 
 from fastapi import FastAPI, Request, Query, Depends, HTTPException, status
@@ -29,8 +30,8 @@ Base.metadata.create_all(bind=engine)
 logging.basicConfig(level=logging.INFO, handlers=[logging.StreamHandler()])
 logger = logging.getLogger(__name__)
 
-# Configurable trusted proxy CIDRs (defaults to loopback and standard RFC1918 private subnets for K8s ingress)
-_trusted_proxies_raw = os.getenv("TRUSTED_PROXY_CIDRS", "127.0.0.1/32,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16")
+# Configurable trusted proxy CIDRs (defaults to loopback and standard K8s ingress subnet)
+_trusted_proxies_raw = os.getenv("TRUSTED_PROXY_CIDRS", "127.0.0.1/32,::1/128,10.244.0.0/16")
 TRUSTED_INGRESS_NETWORKS = []
 # Enforce strict allow-list; never allow 0.0.0.0/0, ::/0, or overly broad /0-/7 prefixes
 for entry in _trusted_proxies_raw.split(","):
@@ -96,7 +97,7 @@ REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", None)
 REDIS_SSL = os.getenv("REDIS_SSL", "false").lower() in ("true", "1", "yes")
 
 _scheme = "rediss" if REDIS_SSL else "redis"
-_auth = f":{REDIS_PASSWORD}@" if REDIS_PASSWORD else ""
+_auth = f":{urllib.parse.quote_plus(REDIS_PASSWORD)}@" if REDIS_PASSWORD else ""
 REDIS_STORAGE_URI = os.getenv("LIMITER_STORAGE_URI", f"{_scheme}://{_auth}{REDIS_HOST}:{REDIS_PORT}/1")
 
 try:

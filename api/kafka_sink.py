@@ -5,6 +5,8 @@ import os
 import time
 import uuid
 import fcntl
+import signal
+import sys
 import threading
 from kafka import KafkaConsumer, KafkaProducer
 from kafka.structs import OffsetAndMetadata, TopicPartition
@@ -16,7 +18,19 @@ logger = logging.getLogger(__name__)
 brokers = os.getenv("REDPANDA_BROKERS", "soc-redpanda-cluster.prod.svc.cluster.local:9092")
 topic = os.getenv("ALERTS_TOPIC", "security_alerts")
 DLQ_TOPIC = os.getenv("ALERTS_DLQ_TOPIC", "security_alerts_dlq")
-DLQ_PATH = os.getenv("DLQ_FILE_PATH", "/tmp/dlq/alerts.jsonl")  # nosec B108
+
+# Path Sanitization and Directory Whitelisting to prevent path traversal
+_raw_dlq_path = os.getenv("DLQ_FILE_PATH", "/tmp/dlq/alerts.jsonl")  # nosec B108
+_allowed_base_dir = os.path.abspath("/tmp/dlq")  # nosec B108
+_resolved_dlq_path = os.path.abspath(_raw_dlq_path)
+
+if not _resolved_dlq_path.startswith(_allowed_base_dir):
+    logger.warning("Dangerous or out-of-bounds DLQ path rejected (%s); defaulting to %s", _raw_dlq_path, "/tmp/dlq/alerts.jsonl")  # nosec B108
+    DLQ_PATH = "/tmp/dlq/alerts.jsonl"  # nosec B108
+else:
+    DLQ_PATH = _resolved_dlq_path
+
+DLQ_LOCK_PATH = f"{DLQ_PATH}.lock"
 DLQ_MAX_SIZE_MB = int(os.getenv("DLQ_MAX_SIZE_MB", "100"))
 DLQ_ROTATE_COUNT = int(os.getenv("DLQ_ROTATE_COUNT", "5"))
 
@@ -25,15 +39,15 @@ import shutil
 def _rotate_dlq_if_needed():
     """Rotate DLQ file when it exceeds size limit using atomic temp-rename."""
     try:
-        if os.path.exists(DLQ_PATH) and os.path.getsize(DLQ_PATH) / (1024 * 1024) > DLQ_MAX_SIZE_MB:
-            tmp_path = f"{DLQ_PATH}.tmp"
+        if os.path.exists(DLQ_PATH) and (os.path.getsize(DLQ_PATH) / (1024 * 1024)) > DLQ_MAX_SIZE_MB:
             for i in range(DLQ_ROTATE_COUNT - 1, 0, -1):
                 src, dst = f"{DLQ_PATH}.{i}", f"{DLQ_PATH}.{i + 1}"
-                if os.path.exists(src): os.replace(src, dst)
+                if os.path.exists(src):
+                    os.replace(src, dst)
             os.replace(DLQ_PATH, f"{DLQ_PATH}.1")
             # Recreate empty DLQ file atomically
             open(DLQ_PATH, 'a').close()
-            logger.info(f"Atomic rotated DLQ file.")
+            logger.info("Atomic rotated DLQ file.")
     except Exception as e:
         logger.error(f"DLQ rotation failed: {e}")
 
@@ -51,23 +65,25 @@ def get_dlq_producer():
         logger.warning(f"Could not connect DLQ KafkaProducer: {e}")
         return None
 
-_dlq_file_lock = threading.Lock()
+_dlq_thread_lock = threading.Lock()
 
 def write_to_file_dlq(item, error_msg):
     try:
         dlq_dir = os.path.dirname(DLQ_PATH)
         if dlq_dir:
             os.makedirs(dlq_dir, exist_ok=True)
-        _rotate_dlq_if_needed()
-        with _dlq_file_lock:
-            with open(DLQ_PATH, "a", encoding="utf-8") as f:
-                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        with _dlq_thread_lock:
+            # Process-safe inter-pod/inter-process lock file
+            with open(DLQ_LOCK_PATH, "a", encoding="utf-8") as lock_file:
                 try:
-                    f.write(json.dumps({"error": str(error_msg), "alert": item, "timestamp": time.time()}) + "\n")
-                    f.flush()
-                    os.fsync(f.fileno())
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                    _rotate_dlq_if_needed()
+                    with open(DLQ_PATH, "a", encoding="utf-8") as f:
+                        f.write(json.dumps({"error": str(error_msg), "alert": item, "timestamp": time.time()}) + "\n")
+                        f.flush()
+                        os.fsync(f.fileno())
                 finally:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
     except Exception as ex:
         logger.error(f"Fallback file DLQ append failed: {ex}")
 
@@ -116,20 +132,18 @@ def run_sink():
         offsets_map = {}
         db = SessionLocal(expire_on_commit=False)
         try:
-            for alert_obj, raw_item, tp, offset in current_batch:
+            for raw_item, tp, offset in current_batch:
                 try:
+                    alert_dict = {k: v for k, v in raw_item.items() if hasattr(Alert, k)}
+                    aid = alert_dict.get("alert_id")
                     with db.begin_nested():
-                        existing = db.query(Alert).filter(Alert.alert_id == alert_obj.alert_id).first()
+                        existing = db.query(Alert).filter(Alert.alert_id == aid).first()
                         if existing:
-                            existing.severity = alert_obj.severity
-                            existing.confidence_score = alert_obj.confidence_score
-                            existing.evidence = alert_obj.evidence
-                            existing.timestamp = alert_obj.timestamp
-                            existing.threat_class = alert_obj.threat_class
-                            existing.event_type = alert_obj.event_type
-                            existing.source_ip = alert_obj.source_ip
-                            existing.destination_ip = alert_obj.destination_ip
+                            for k, v in alert_dict.items():
+                                if k != "id":
+                                    setattr(existing, k, v)
                         else:
+                            alert_obj = Alert(**alert_dict)
                             db.add(alert_obj)
                         db.flush()
                     offsets_map[tp] = max(offsets_map.get(tp, -1), offset + 1)
@@ -151,9 +165,21 @@ def run_sink():
     consecutive_commit_failures = 0
     MAX_CONSECUTIVE_FAILURES = 5
 
-    PANIC_BATCH_SIZE = 150  # Hard guard: never allow batch to grow beyond this; force DLQ immediately
+    # Hard panic guard raised: 500 allows normal flush cycles to run long before triggering emergency evacuation.
+    # 150 was too low, causing unnecessary mass exfiltration to DLQ under moderate load.
+    PANIC_BATCH_SIZE = 500
 
-    while True:
+    running = True
+
+    def _handle_shutdown_signal(sig, frame):
+        nonlocal running
+        logger.info("Shutdown signal (%s) received. Commencing graceful Kafka sink termination...", sig)
+        running = False
+
+    signal.signal(signal.SIGTERM, _handle_shutdown_signal)
+    signal.signal(signal.SIGINT, _handle_shutdown_signal)
+
+    while running:
         # Flow control: do not poll new records if current batch is at capacity or commit is failing
         if len(batch) < MAX_BATCH_SIZE:
             try:
@@ -170,8 +196,7 @@ def run_sink():
                                 continue
                             if isinstance(data.get("evidence"), (dict, list)):
                                 data["evidence"] = json.dumps(data["evidence"])
-                            alert_obj = Alert(**{k: v for k, v in data.items() if hasattr(Alert, k)})
-                            batch.append((alert_obj, data, tp, msg.offset))
+                            batch.append((data, tp, msg.offset))
                         except Exception as e:
                             logger.error("Skip bad message: %s", e)
         else:
@@ -208,13 +233,37 @@ def run_sink():
                     # If failures persist beyond threshold, route current batch to emergency DLQ to prevent indefinite stall
                     if consecutive_commit_failures >= MAX_CONSECUTIVE_FAILURES:
                         logger.critical("Persistent Kafka commit failure threshold reached. Evacuating %d alerts to file DLQ.", len(batch))
-                        for alert_obj, raw_item, tp, offset in batch:
+                        max_offsets = {}
+                        for raw_item, tp, offset in batch:
                             _atomic_dlq_write(raw_item, "KafkaCommitFailureThresholdExceeded")
+                            max_offsets[tp] = max(max_offsets.get(tp, -1), offset + 1)
+                        if max_offsets:
+                            try:
+                                consumer.commit(offsets={tp: OffsetAndMetadata(off, '') for tp, off in max_offsets.items()})
+                            except Exception as ex:
+                                logger.warning("Failed committing offsets after Kafka DLQ evacuation: %s", ex)
                         batch.clear()
                         last_commit = time.time()
                         consecutive_commit_failures = 0
             else:
-                last_commit = time.time()
+                consecutive_commit_failures += 1
+                logger.warning("Database commit failed (failure count: %d); batch retained for retry", consecutive_commit_failures)
+                backoff_delay = min(5.0, 0.5 * (2 ** min(consecutive_commit_failures, 4)))
+                time.sleep(backoff_delay)
+                if consecutive_commit_failures >= MAX_CONSECUTIVE_FAILURES:
+                    logger.critical("Persistent Database commit failure threshold reached. Evacuating %d alerts.", len(batch))
+                    max_offsets = {}
+                    for raw_item, tp, offset in batch:
+                        _atomic_dlq_write(raw_item, "DatabaseCommitFailureThresholdExceeded")
+                        max_offsets[tp] = max(max_offsets.get(tp, -1), offset + 1)
+                    if max_offsets:
+                        try:
+                            consumer.commit(offsets={tp: OffsetAndMetadata(off, '') for tp, off in max_offsets.items()})
+                        except Exception as ex:
+                            logger.warning("Failed committing offsets after DB DLQ evacuation: %s", ex)
+                    batch.clear()
+                    last_commit = time.time()
+                    consecutive_commit_failures = 0
 
             # Flush DLQ if any
             if dlq_producer:
@@ -225,8 +274,15 @@ def run_sink():
 
         if len(batch) >= PANIC_BATCH_SIZE:
             logger.critical("PANIC: Batch exceeded hard guard (%d); evacuating to DLQ immediately.", len(batch))
-            for alert_obj, raw_item, tp, offset in batch:
+            max_offsets = {}
+            for raw_item, tp, offset in batch:
                 _atomic_dlq_write(raw_item, "BatchPanicThresholdExceeded")
+                max_offsets[tp] = max(max_offsets.get(tp, -1), offset + 1)
+            if max_offsets:
+                try:
+                    consumer.commit(offsets={tp: OffsetAndMetadata(off, '') for tp, off in max_offsets.items()})
+                except Exception as ex:
+                    logger.warning("Failed committing offsets after panic DLQ evacuation: %s", ex)
             batch.clear()
             last_commit = time.time()
             consecutive_commit_failures = 0
@@ -234,6 +290,24 @@ def run_sink():
         # Sleep briefly to avoid tight loop when idle
         if not records:
             time.sleep(0.1)
+
+    logger.info("Graceful shutdown: loop exited. Processing any remaining %d items in batch...", len(batch))
+    if len(batch) > 0:
+        processed_offsets = process_batch(batch)
+        if processed_offsets:
+            try:
+                offsets_to_commit = {tp: OffsetAndMetadata(off, '') for tp, off in processed_offsets.items()}
+                consumer.commit(offsets=offsets_to_commit)
+                logger.info("Graceful shutdown: Successfully committed final batch offsets.")
+            except Exception as commit_err:
+                logger.error("Graceful shutdown: Final Kafka offset commit failed: %s", commit_err)
+    if dlq_producer:
+        logger.info("Graceful shutdown: Flushing DLQ producer...")
+        dlq_producer.flush(timeout=5)
+        dlq_producer.close()
+    logger.info("Graceful shutdown: Closing Kafka consumer...")
+    consumer.close(autocommit=False)
+    logger.info("Kafka sink graceful shutdown complete.")
 
 
 if __name__ == "__main__":

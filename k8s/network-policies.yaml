@@ -140,17 +140,12 @@ spec:
     ports:
     - protocol: TCP
       port: 9092
-  # Allow outbound HTTPS to external threat intelligence providers (excluding internal RFC1918 and Cloud Metadata)
+  # Strictly restricted egress: allow outbound HTTPS to verified Cloudflare Anycast CIDRs for ipapi.co threat intel
   - to:
     - ipBlock:
-        cidr: 0.0.0.0/0
-        except:
-        - 10.0.0.0/8
-        - 172.16.0.0/12
-        - 192.168.0.0/16
-        - 169.254.0.0/16
-        - 127.0.0.0/8
-        - 100.64.0.0/10
+        cidr: 104.16.0.0/12  # Cloudflare Anycast IP range (includes 104.21.x.x, 104.26.x.x)
+    - ipBlock:
+        cidr: 172.64.0.0/13  # Cloudflare Anycast IP range (includes 172.67.x.x)
     ports:
     - protocol: TCP
       port: 443
