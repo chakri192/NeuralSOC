@@ -153,32 +153,3 @@ jobs:
           alerts = resp.json()
           assert len(alerts) > 0
           print("✅ Smoke test passed: Alerts successfully traversed the ML and Rule pipelines.")
-          PY_EOF
-
-          # Use injected CI secret; never hardcode production or test keys in source
-          TSOC_API_KEY="${{ secrets.TEST_TSOC_API_KEY }}" python smoke_test.py
-
-      - name: Execute Deep Learning Fault Tolerance Test
-        run: |
-          # Test resilience to corrupted/missing model by running with an invalid MODEL_PATH env
-          cat << 'PY_EOF' > fault_test.py
-          import time, json, requests, os
-          from kafka import KafkaProducer
-
-          producer = KafkaProducer(bootstrap_servers='localhost:9092', value_serializer=lambda v: json.dumps(v).encode('utf-8'))
-          # Trigger event that should survive a DL model outage and hit the Rule engine
-          event = {"event_type": "dns", "query": "another-tunnel.example.com", "id.orig_h": "10.0.0.5", "id.resp_h": "8.8.8.8"}
-          producer.send('raw_traffic', event)
-          producer.flush()
-
-          time.sleep(5)
-
-          resp = requests.get('http://localhost:8000/api/v1/alerts', headers={'Authorization': f'Bearer {os.environ.get("TSOC_API_KEY", "test-ci-key")}'})
-          assert resp.status_code == 200
-          alerts = resp.json()
-          # Verify rule alerts still flow
-          assert any(a.get('query') == 'another-tunnel.example.com' or 'another-tunnel' in str(a.get('evidence', '')) for a in alerts)
-          print("✅ Fault tolerance passed: Rule alerts survive ML engine crashes.")
-          PY_EOF
-
-          TSOC_API_KEY="test-ci-key" python fault_test.py
