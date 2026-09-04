@@ -107,7 +107,7 @@ spec:
               key: redis_password
               optional: true
         imagePullPolicy: IfNotPresent
-        image: your-registry.com/tsoc/stream-processor:v1.0
+        image: your-registry.com/tsoc/stream-processor@sha256:9f32e2f4ec908b6531b278fa2ae3fe694ad4a2d4f874a3f56248c4ff85f5aa24
         name: faust-worker
         volumeMounts:
         - name: tmp
@@ -225,7 +225,7 @@ spec:
               name: tsoc-secrets
               key: redis_password
               optional: true
-        image: your-registry.com/tsoc/api:v1.0
+        image: your-registry.com/tsoc/api@sha256:9f32e2f4ec908b6531b278fa2ae3fe694ad4a2d4f874a3f56248c4ff85f5aa24
         imagePullPolicy: Always
         name: fastapi
         command: ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
@@ -303,7 +303,7 @@ spec:
           claimName: kafka-sink-dlq-pvc
       containers:
       - name: kafka-sink
-        image: your-registry.com/tsoc/api:v1.0
+        image: your-registry.com/tsoc/api@sha256:9f32e2f4ec908b6531b278fa2ae3fe694ad4a2d4f874a3f56248c4ff85f5aa24
         imagePullPolicy: Always
         command: ["python", "-m", "api.kafka_sink"]
         env:
