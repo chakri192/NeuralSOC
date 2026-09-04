@@ -135,6 +135,8 @@ def run_sink():
             for raw_item, tp, offset in current_batch:
                 try:
                     alert_dict = {k: v for k, v in raw_item.items() if hasattr(Alert, k)}
+                    if isinstance(alert_dict.get("evidence"), (dict, list)):
+                        alert_dict["evidence"] = json.dumps(alert_dict["evidence"])
                     aid = alert_dict.get("alert_id")
                     with db.begin_nested():
                         existing = db.query(Alert).filter(Alert.alert_id == aid).first()
@@ -171,6 +173,16 @@ def run_sink():
 
     running = True
 
+    # Track the highest observed offset per partition even when messages are
+    # deserialization failures, missing required keys, or otherwise invalid.
+    # Without this, a stream of poisoned messages can leave offsets uncommitted
+    # forever — on consumer rebalance, the same garbage replays in a CPU loop.
+    highest_observed_offsets: dict = {}
+    last_committed_offsets: dict = {}
+
+    def _record_offset(tp, offset):
+        highest_observed_offsets[tp] = max(highest_observed_offsets.get(tp, -1), offset + 1)
+
     def _handle_shutdown_signal(sig, frame):
         nonlocal running
         logger.info("Shutdown signal (%s) received. Commencing graceful Kafka sink termination...", sig)
@@ -180,6 +192,7 @@ def run_sink():
     signal.signal(signal.SIGINT, _handle_shutdown_signal)
 
     while running:
+        processed_offsets = {}
         # Flow control: do not poll new records if current batch is at capacity or commit is failing
         if len(batch) < MAX_BATCH_SIZE:
             try:
@@ -190,6 +203,9 @@ def run_sink():
             if records:
                 for tp, messages in records.items():
                     for msg in messages:
+                        # ALWAYS advance the observed offset watermark so poisoned
+                        # messages cannot trap the consumer in an uncommitted state.
+                        _record_offset(tp, msg.offset)
                         try:
                             data = json.loads(msg.value.decode("utf-8"))
                             if not data.get("alert_id"):
@@ -198,7 +214,7 @@ def run_sink():
                                 data["evidence"] = json.dumps(data["evidence"])
                             batch.append((data, tp, msg.offset))
                         except Exception as e:
-                            logger.error("Skip bad message: %s", e)
+                            logger.error("Skip bad message at %s offset %d: %s", tp, msg.offset, e)
         else:
             records = {}
             logger.debug("Batch at capacity (%d); pausing poll until commit succeeds", len(batch))
@@ -215,6 +231,7 @@ def run_sink():
                         consumer.commit(offsets=offsets_to_commit)
                         commit_success = True
                         consecutive_commit_failures = 0
+                        last_committed_offsets.update(processed_offsets)
                         break
                     except Exception as commit_err:
                         logger.error("Kafka offset commit attempt %d failed: %s", attempt + 1, commit_err)
@@ -240,6 +257,7 @@ def run_sink():
                         if max_offsets:
                             try:
                                 consumer.commit(offsets={tp: OffsetAndMetadata(off, '') for tp, off in max_offsets.items()})
+                                last_committed_offsets.update(max_offsets)
                             except Exception as ex:
                                 logger.warning("Failed committing offsets after Kafka DLQ evacuation: %s", ex)
                         batch.clear()
@@ -259,6 +277,7 @@ def run_sink():
                     if max_offsets:
                         try:
                             consumer.commit(offsets={tp: OffsetAndMetadata(off, '') for tp, off in max_offsets.items()})
+                            last_committed_offsets.update(max_offsets)
                         except Exception as ex:
                             logger.warning("Failed committing offsets after DB DLQ evacuation: %s", ex)
                     batch.clear()
@@ -271,6 +290,27 @@ def run_sink():
                     dlq_producer.flush(timeout=5)
                 except Exception as ex:
                     logger.error("DLQ flush error: %s", ex)
+
+        # Always advance offsets even when the batch is empty (all messages had
+        # missing alert_ids or failed deserialization). Without this, a stream of
+        # poisoned messages leaves the consumer permanently uncommitted; on
+        # rebalance the same garbage replays forever.
+        if len(batch) == 0 and highest_observed_offsets:
+            stale_tps = [
+                tp for tp, off in highest_observed_offsets.items()
+                if off > last_committed_offsets.get(tp, -1)
+            ]
+            if stale_tps:
+                try:
+                    commit_map = {
+                        tp: OffsetAndMetadata(highest_observed_offsets[tp], '')
+                        for tp in stale_tps
+                    }
+                    consumer.commit(offsets=commit_map)
+                    last_committed_offsets.update({tp: highest_observed_offsets[tp] for tp in stale_tps})
+                    logger.debug("Committed stale partition offsets after empty-batch cycle: %s", stale_tps)
+                except Exception as commit_stale_err:
+                    logger.warning("Could not commit stale partition offsets: %s", commit_stale_err)
 
         if len(batch) >= PANIC_BATCH_SIZE:
             logger.critical("PANIC: Batch exceeded hard guard (%d); evacuating to DLQ immediately.", len(batch))

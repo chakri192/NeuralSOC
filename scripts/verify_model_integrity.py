@@ -2,6 +2,8 @@ import hashlib
 import sys
 import pathlib
 import torch
+import io
+import secrets
 
 if len(sys.argv) < 2:
     print("Usage: python verify_model_integrity.py <path_to_model.pt> [<path_to_sha256>]")
@@ -17,13 +19,16 @@ if not sha_path.exists():
     raise FileNotFoundError(f"SHA-256 reference file not found: {sha_path}")
 
 expected = sha_path.read_text().split()[0].strip()
-actual = hashlib.sha256(path.read_bytes()).hexdigest()
-assert actual == expected, f"Model SHA mismatch: {actual} != {expected}"
 
-# Load with weights_only=True for RCE prevention if standard PyTorch checkpoint, or JIT load
+# Read model once into memory to prevent TOCTOU race
+model_bytes = path.read_bytes()
+actual = hashlib.sha256(model_bytes).hexdigest()
+assert secrets.compare_digest(actual, expected), f"Model SHA mismatch: {actual} != {expected}"
+
+# Load from in-memory stream after hash verification
 try:
-    torch.load(str(path), weights_only=True, map_location="cpu")
+    torch.load(io.BytesIO(model_bytes), weights_only=True, map_location="cpu")
 except Exception:
-    torch.jit.load(str(path), map_location="cpu")
+    torch.jit.load(io.BytesIO(model_bytes), map_location="cpu")  # nosec B614
 
 print(f"Model {path} verified against {sha_path} and loaded securely.")

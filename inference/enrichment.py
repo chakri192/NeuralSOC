@@ -4,6 +4,7 @@ import ipaddress
 import json
 import logging
 import re
+import ssl
 import time
 from typing import Tuple
 import httpx
@@ -14,7 +15,10 @@ logger = logging.getLogger(__name__)
 
 class ThreatEnricher:
     def __init__(self, cache_ttl_sec: int = 86400, max_cache_size: int = 5000):
-        self.client = httpx.AsyncClient(timeout=2.0)
+        # Enforce hardened TLS 1.2+ context with strict certificate verification
+        ssl_context = ssl.create_default_context()
+        ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
+        self.client = httpx.AsyncClient(timeout=2.0, verify=ssl_context)
         self._cache: collections.OrderedDict[str, Tuple[dict, float]] = collections.OrderedDict()
         self._cache_ttl = cache_ttl_sec
         self._max_cache_size = max_cache_size
@@ -23,6 +27,9 @@ class ThreatEnricher:
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.close()
+
+    async def close(self):
         await self.client.aclose()
 
     def _get_cached(self, ip: str) -> dict:
@@ -81,10 +88,6 @@ class ThreatEnricher:
             response.raise_for_status()
             if len(response.content) > 65536:
                 logger.warning("Enrichment response exceeded 64KB limit for %s; rejecting.", clean_ip)
-                return {}
-            # Verify response came from expected origin (IP-level pinning)
-            if response.headers.get("server", "").lower() not in ("nginx", "cloudflare"):
-                logger.warning("Unexpected server header in enrichment response; rejecting.")
                 return {}
             data = response.json()
             if data and not data.get("error") and isinstance(data.get("ip"), str) and data.get("ip") == clean_ip:

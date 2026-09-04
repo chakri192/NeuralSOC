@@ -1,12 +1,31 @@
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
-  name: tsoc-stream-processor-egress-complete
+  name: tsoc-stream-processor-policy
   namespace: tsoc
 spec:
   endpointSelector:
     matchLabels:
       app: tsoc-stream-processor
+      k8s:io.kubernetes.pod.namespace: tsoc
+  ingress:
+    # Health checks and metrics scraping
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: monitoring
+            app: prometheus
+      toPorts:
+        - ports:
+            - port: "6066"
+              protocol: TCP
+    # Allow Kubelet health/readiness probes from host and remote nodes
+    - fromEntities:
+        - host
+        - remote-node
+      toPorts:
+        - ports:
+            - port: "6066"
+              protocol: TCP
   egress:
     # CoreDNS / kube-dns (required for Kafka broker FQDN resolution + service discovery)
     - toEndpoints:
@@ -46,4 +65,120 @@ spec:
       toPorts:
         - ports:
             - port: "443"
+              protocol: TCP
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: tsoc-api-policy
+  namespace: tsoc
+spec:
+  endpointSelector:
+    matchLabels:
+      app: tsoc-api
+      k8s:io.kubernetes.pod.namespace: tsoc
+  ingress:
+    # Ingress NGINX with namespace and pod identity verification
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: ingress-nginx
+            app.kubernetes.io/name: ingress-nginx
+      toPorts:
+        - ports:
+            - port: "8000"
+              protocol: TCP
+    # Prometheus metrics scraper
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: monitoring
+            app: prometheus
+      toPorts:
+        - ports:
+            - port: "8000"
+              protocol: TCP
+    # Allow Kubelet health/readiness probes from host and remote nodes
+    - fromEntities:
+        - host
+        - remote-node
+      toPorts:
+        - ports:
+            - port: "8000"
+              protocol: TCP
+  egress:
+    # DNS resolution
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+          rules:
+            dns:
+              - matchPattern: "*"
+    # Redis rate-limiting backend
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: redis
+            app: redis
+      toPorts:
+        - ports:
+            - port: "6379"
+              protocol: TCP
+    # PostgreSQL primary database
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: db-namespace
+            app: postgres
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: tsoc-kafka-sink-policy
+  namespace: tsoc
+spec:
+  endpointSelector:
+    matchLabels:
+      app: tsoc-kafka-sink
+      k8s:io.kubernetes.pod.namespace: tsoc
+  ingress: []
+  egress:
+    # DNS resolution
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+          rules:
+            dns:
+              - matchPattern: "*"
+    # Redpanda / Kafka broker cluster
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: prod
+            app: redpanda
+      toPorts:
+        - ports:
+            - port: "9092"
+              protocol: TCP
+    # PostgreSQL storage sink
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: db-namespace
+            app: postgres
+      toPorts:
+        - ports:
+            - port: "5432"
               protocol: TCP

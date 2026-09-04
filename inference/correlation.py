@@ -10,7 +10,7 @@ from inference.risk import calculate_risk_score
 
 logger = logging.getLogger(__name__)
 
-# Atomic Lua script: push + trim + expire + window total count + dedup with priority (optimized snapshot return)
+# Atomic Lua script: push + trim + non-extending window expire + count + dedup with priority (optimized snapshot return)
 CORRELATE_LUA = """
 local key_name = KEYS[1]
 local dedup_name = KEYS[2]
@@ -18,14 +18,36 @@ local alert_json = ARGV[1]
 local window = tonumber(ARGV[2])
 local safe_threat = ARGV[3]
 local severity_score = tonumber(ARGV[4])
+local alert_id = ARGV[5] or ""
+local is_replay = ARGV[6] or "0"
+
+-- Replay defense: deduplicate identical alert_ids within sliding window
+if alert_id ~= "" then
+    local seen_key = key_name .. ":seen"
+    local is_dup = redis.call('sismember', seen_key, alert_id)
+    if is_dup == 1 and is_replay ~= "1" then
+        return {0, 0, {}}
+    end
+    redis.call('sadd', seen_key, alert_id)
+    local ttl_seen = redis.call('ttl', seen_key)
+    if ttl_seen < 0 then
+        redis.call('expire', seen_key, window)
+    end
+end
 
 redis.call('lpush', key_name, alert_json)
 redis.call('ltrim', key_name, 0, 99)
-redis.call('expire', key_name, window)
+local ttl_list = redis.call('ttl', key_name)
+if ttl_list < 0 then
+    redis.call('expire', key_name, window)
+end
 
 local count_key = key_name .. ":cnt"
 local total_count = redis.call('incr', count_key)
-redis.call('expire', count_key, window)
+local ttl_cnt = redis.call('ttl', count_key)
+if ttl_cnt < 0 then
+    redis.call('expire', count_key, window)
+end
 
 local current_max = tonumber(redis.call('get', dedup_name) or "0")
 local incident = 0
@@ -36,10 +58,15 @@ if total_count >= 2 then
     end
 end
 
-if severity_score > current_max or current_max == 0 then
+if current_max == 0 then
     redis.call('set', dedup_name, tostring(severity_score), 'ex', window)
-else
-    redis.call('expire', dedup_name, window)
+elseif severity_score > current_max then
+    local ttl_dedup = redis.call('ttl', dedup_name)
+    if ttl_dedup > 0 then
+        redis.call('set', dedup_name, tostring(severity_score), 'ex', ttl_dedup)
+    else
+        redis.call('set', dedup_name, tostring(severity_score), 'ex', window)
+    end
 end
 
 local alerts_snapshot = {}
@@ -47,6 +74,34 @@ if incident == 1 then
     alerts_snapshot = redis.call('lrange', key_name, 0, -1)
 end
 return {total_count, incident, alerts_snapshot}
+"""
+
+ROLLBACK_LUA = """
+local key_name = KEYS[1]
+local dedup_name = KEYS[2]
+local seen_key = key_name .. ":seen"
+local count_key = key_name .. ":cnt"
+
+local alert_json = ARGV[1]
+local alert_id = ARGV[2]
+local safe_threat = ARGV[3]
+
+if alert_id ~= "" then
+    redis.call('srem', seen_key, alert_id)
+end
+
+if alert_json ~= "" then
+    local removed = redis.call('lrem', key_name, 1, alert_json)
+    if removed > 0 then
+        local current_cnt = tonumber(redis.call('get', count_key) or "0")
+        if current_cnt > 1 then
+            redis.call('decr', count_key)
+        elseif current_cnt == 1 then
+            redis.call('del', count_key)
+        end
+    end
+end
+return 1
 """
 
 class IncidentCorrelator:
@@ -89,6 +144,7 @@ class IncidentCorrelator:
         self.redis = redis.Redis(connection_pool=pool)
         self.time_window_sec = 300
         self._lua = self.redis.register_script(CORRELATE_LUA)
+        self._rollback_lua = self.redis.register_script(ROLLBACK_LUA)
 
     def add_alert(self, alert, threshold=80.0):
         import re
@@ -128,7 +184,9 @@ class IncidentCorrelator:
                     json.dumps(alert),
                     str(self.time_window_sec),
                     safe_threat,
-                    str(sev_score)
+                    str(sev_score),
+                    str(alert.get("alert_id", "")),
+                    "1" if alert.get("is_replay") else "0"
                 ]
             )
             len_list = int(result[0])
@@ -191,9 +249,43 @@ class IncidentCorrelator:
                     "timestamp": int(time.time() * 1000),
                     "status": "active",
                     "evidence_summary": f"Correlated {len(threat_list)} threat vector(s) ({', '.join(threat_list)}) across {len(related_alert_ids)} alert(s) involving {src_ip}",
-                    "related_alert_ids": related_alert_ids
+                    "related_alert_ids": related_alert_ids,
+                    "trace_id": alert.get("trace_id")
                 }
         except redis.RedisError as e:
             logger.error("Redis correlation execution failed for %s: %s", src_ip, e)
             raise
         return None
+
+    def rollback_alert_seen(self, alert: dict):
+        """
+        Compensating transaction: atomically removes alert_id from the seen set,
+        removes the alert from the sliding window list, and decrements the counter
+        in Redis if downstream incident emission fails. Allows DLQ replay to re-evaluate the incident.
+        """
+        try:
+            import re
+            raw_src = str(alert.get("source_ip", "127.0.0.1")).strip()
+            addr = ipaddress.ip_address(raw_src)
+            src_ip = str(addr)
+            aid = str(alert.get("alert_id", "")).strip()
+
+            threat_class = str(alert.get("threat_class", "unknown"))
+            safe_threat = re.sub(r"[^A-Za-z0-9_ ]", "", threat_class)
+            safe_threat = safe_threat.replace(" ", "_")[:64] or "unknown"
+
+            key_name = f"{{{src_ip}}}:alerts"
+            dedup_name = f"{{{src_ip}}}:dedup:{safe_threat}"
+
+            self._rollback_lua(
+                keys=[key_name, dedup_name],
+                args=[
+                    json.dumps(alert),
+                    aid,
+                    safe_threat
+                ]
+            )
+            logger.info("Rolled back alert %s state in Redis for %s", aid, src_ip)
+        except Exception as e:
+            logger.warning("Failed to rollback alert state in Redis: %s", e)
+

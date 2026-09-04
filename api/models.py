@@ -17,3 +17,4 @@ class Alert(Base):
     source_ip = Column(String)
     destination_ip = Column(String)
     evidence = Column(Text) # JSON string representation
+    trace_id = Column(String, index=True, nullable=True)

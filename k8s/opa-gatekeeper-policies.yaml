@@ -1,0 +1,100 @@
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8slabelsecuritytemplate
+  annotations:
+    description: >-
+      Enforces zero-trust identity and prevents label spoofing. Ensures that sensitive
+      TSOC labels (app=tsoc-*) can only be assigned to workloads in the authorized 'tsoc'
+      namespace and are strictly bound to their verified ServiceAccount identities.
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sLabelSecurityConstraint
+      validation:
+        openAPIV3Schema:
+          type: object
+          properties:
+            authorizedNamespace:
+              type: string
+            labelPrefix:
+              type: string
+            serviceAccountBindings:
+              type: object
+              additionalProperties:
+                type: string
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8slabelsecurity
+
+        get_namespace(obj, review) = ns {
+            ns := object.get(obj.metadata, "namespace", review.namespace)
+        }
+
+        # Verify namespace authorization for protected labels
+        violation[{"msg": msg}] {
+            app_label := object.get(object.get(input.review.object, "metadata", {}), "labels", {})["app"]
+            startswith(app_label, input.parameters.labelPrefix)
+            target_ns := get_namespace(input.review.object, input.review)
+            target_ns != input.parameters.authorizedNamespace
+            msg := sprintf("Security Violation: Label 'app: %v' is restricted to namespace '%v', got '%v'", [app_label, input.parameters.authorizedNamespace, target_ns])
+        }
+
+        # Verify Pod ServiceAccount binding (and reject unbound tsoc-* labels)
+        violation[{"msg": msg}] {
+            input.review.object.kind == "Pod"
+            app_label := object.get(object.get(input.review.object, "metadata", {}), "labels", {})["app"]
+            startswith(app_label, input.parameters.labelPrefix)
+            not input.parameters.serviceAccountBindings[app_label]
+            msg := sprintf("Security Violation: Pod label 'app: %v' is not registered in authorized serviceAccountBindings", [app_label])
+        }
+
+        violation[{"msg": msg}] {
+            input.review.object.kind == "Pod"
+            app_label := object.get(object.get(input.review.object, "metadata", {}), "labels", {})["app"]
+            expected_sa := input.parameters.serviceAccountBindings[app_label]
+            actual_sa := object.get(input.review.object.spec, "serviceAccountName", "default")
+            actual_sa != expected_sa
+            msg := sprintf("Security Violation: Pod with label 'app: %v' must use ServiceAccount '%v', got '%v'", [app_label, expected_sa, actual_sa])
+        }
+
+        # Verify Deployment/StatefulSet template ServiceAccount binding
+        violation[{"msg": msg}] {
+            valid_kinds := {"Deployment", "StatefulSet", "DaemonSet", "Job"}
+            valid_kinds[input.review.object.kind]
+            template := input.review.object.spec.template
+            app_label := object.get(object.get(template, "metadata", {}), "labels", {})["app"]
+            startswith(app_label, input.parameters.labelPrefix)
+            not input.parameters.serviceAccountBindings[app_label]
+            msg := sprintf("Security Violation: %v template label 'app: %v' is not registered in authorized serviceAccountBindings", [input.review.object.kind, app_label])
+        }
+
+        violation[{"msg": msg}] {
+            valid_kinds := {"Deployment", "StatefulSet", "DaemonSet", "Job"}
+            valid_kinds[input.review.object.kind]
+            template := input.review.object.spec.template
+            app_label := object.get(object.get(template, "metadata", {}), "labels", {})["app"]
+            expected_sa := input.parameters.serviceAccountBindings[app_label]
+            actual_sa := object.get(template.spec, "serviceAccountName", "default")
+            actual_sa != expected_sa
+            msg := sprintf("Security Violation: %v template with label 'app: %v' must use ServiceAccount '%v', got '%v'", [input.review.object.kind, app_label, expected_sa, actual_sa])
+        }
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sLabelSecurityConstraint
+metadata:
+  name: tsoc-label-security-enforcement
+spec:
+  match:
+    kinds:
+      - apiGroups: ["", "apps", "batch"]
+        kinds: ["Pod", "Deployment", "StatefulSet", "DaemonSet", "Job"]
+  parameters:
+    authorizedNamespace: "tsoc"
+    labelPrefix: "tsoc-"
+    serviceAccountBindings:
+      tsoc-api: "tsoc-api-sa"
+      tsoc-stream-processor: "tsoc-stream-sa"
+      tsoc-kafka-sink: "tsoc-sink-sa"

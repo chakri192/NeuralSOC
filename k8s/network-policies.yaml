@@ -44,6 +44,15 @@ spec:
     ports:
     - protocol: TCP
       port: 8000
+  # Allow Kubernetes kubelet (Liveness/Readiness probes) from node network (explicitly excluding Pod overlay CIDR)
+  - from:
+    - ipBlock:
+        cidr: 10.0.0.0/8
+        except:
+        - 10.244.0.0/16
+    ports:
+    - protocol: TCP
+      port: 8000
   egress:
   - to:
     - namespaceSelector:
@@ -107,6 +116,15 @@ spec:
     ports:
     - protocol: TCP
       port: 6066
+  # Allow Kubernetes kubelet (Liveness/Readiness probes) to reach the health port from node network (excluding Pod overlay CIDR).
+  - from:
+    - ipBlock:
+        cidr: 10.0.0.0/8
+        except:
+        - 10.244.0.0/16
+    ports:
+    - protocol: TCP
+      port: 6066
   egress:
   - to:
     - namespaceSelector:
@@ -140,12 +158,18 @@ spec:
     ports:
     - protocol: TCP
       port: 9092
-  # Strictly restricted egress: allow outbound HTTPS to verified Cloudflare Anycast CIDRs for ipapi.co threat intel
+  # Allow egress to external Threat Intelligence APIs (e.g. ipapi.co) on HTTPS,
+  # while strictly denying access to internal private IPs, Cloud Metadata, and Carrier NAT.
   - to:
     - ipBlock:
-        cidr: 104.16.0.0/12  # Cloudflare Anycast IP range (includes 104.21.x.x, 104.26.x.x)
-    - ipBlock:
-        cidr: 172.64.0.0/13  # Cloudflare Anycast IP range (includes 172.67.x.x)
+        cidr: 0.0.0.0/0
+        except:
+        - 10.0.0.0/8
+        - 172.16.0.0/12
+        - 192.168.0.0/16
+        - 169.254.0.0/16
+        - 100.64.0.0/10
+        - 127.0.0.0/8
     ports:
     - protocol: TCP
       port: 443

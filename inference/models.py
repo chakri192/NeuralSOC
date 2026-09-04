@@ -9,7 +9,7 @@ import time
 import string
 import secrets
 import threading
-from typing import Tuple
+from typing import Tuple, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -18,8 +18,16 @@ class DeepLearningEngine:
         """Loads and validates model from disk. Returns (model, sha)."""
         artifact_path = os.getenv("MODEL_PATH", "models/cnn_dga.pt")
         sha_path = artifact_path + ".sha256"
+
+        # Prevent unbounded memory reads from malicious/corrupted files
+        MAX_MODEL_SIZE_BYTES = int(os.getenv("MAX_MODEL_SIZE_BYTES", str(50 * 1024 * 1024)))
+        if os.path.exists(artifact_path):
+            file_size = os.path.getsize(artifact_path)
+            if file_size > MAX_MODEL_SIZE_BYTES:
+                raise RuntimeError(f"Integrity Error: Model file exceeds maximum allowed size ({file_size} > {MAX_MODEL_SIZE_BYTES})")
+
         with open(sha_path, 'r', encoding='utf-8') as f_sha:
-            expected_sha = f_sha.read().split()[0].strip()
+            expected_sha = f_sha.read(1024).split()[0].strip()
 
         with open(artifact_path, 'rb') as f_bin:
             model_bytes = f_bin.read()
@@ -34,12 +42,12 @@ class DeepLearningEngine:
         model.eval()
         return model, computed_sha
 
-    def __init__(self):
+    def __init__(self, start_verifier: bool = True, verify_interval: int = 60):
         self.model = None
         self._inference_count = 0
         self._inference_lock = threading.Lock()
-        self._INTEGRITY_CHECK_INTERVAL = 300  # Re-verify model SHA-256 every 300 inferences
         self._last_mtime = 0.0
+        self._stop_verifier = threading.Event()
 
         # Lock PyTorch intra-op CPU threads once globally at initialization to prevent threadpool racing
         try:
@@ -60,17 +68,33 @@ class DeepLearningEngine:
         valid_chars = string.ascii_lowercase + string.digits + "-."
         self.char_map = {c: i + 1 for i, c in enumerate(valid_chars)}
 
-    def _recheck_integrity(self) -> bool:
+        if start_verifier:
+            self._start_background_verifier(verify_interval)
+
+    def _start_background_verifier(self, interval_sec: int):
+        def _verifier_loop():
+            while not self._stop_verifier.is_set():
+                if self._stop_verifier.wait(timeout=interval_sec):
+                    break
+                self._recheck_integrity()
+        verifier_thread = threading.Thread(target=_verifier_loop, daemon=True, name="model-integrity-verifier")
+        verifier_thread.start()
+
+    def stop_verifier(self):
+        self._stop_verifier.set()
+
+    def _recheck_integrity(self, force: bool = False) -> bool:
         """
         Runtime re-verification: validates model file integrity against cryptographic SHA-256.
         If file changed on disk but hash is valid, hot-reloads the model.
-        Fails closed on cryptographic mismatch.
+        Gracefully retains existing in-memory model on any transient error or corrupted update.
         """
         try:
             artifact_path = os.getenv("MODEL_PATH", "models/cnn_dga.pt")
+
             new_model, new_sha = self._load_model_from_disk()
 
-            if new_sha != self._expected_sha:
+            if new_sha != self._expected_sha or self.model is None:
                 logger.info("New model version detected and validated; performing hot-reload.")
                 with self._inference_lock:
                     self.model = new_model
@@ -81,31 +105,33 @@ class DeepLearningEngine:
             self._last_check = time.time()
             return True
         except (IOError, OSError) as io_err:
-            logger.error("Transient disk I/O error during model re-check: %s. Retaining validated in-memory model.", io_err)
+            logger.warning("Transient disk I/O error during model re-check: %s. Retaining validated in-memory model.", io_err)
+            self._last_check = time.time()
             return True
         except Exception as e:
-            logger.critical("Unexpected integrity re-check exception: %s. Failing closed.", e)
-            with self._inference_lock:
-                self.model = None
+            logger.warning("Integrity re-check or candidate model load failed (%s). Retaining active in-memory model.", e)
+            self._last_check = time.time()
+            # If we already have a validated model loaded, NEVER destroy it due to transient file update errors
+            if self.model is not None:
+                return True
             return False
 
-    def predict(self, features: dict, domain: str = ""):
-        if not domain or not self.model or len(domain) > 512:
+    def predict(self, features: dict, domain: str = "", deadline: Optional[float] = None):
+        if not domain or not self.model or not isinstance(domain, str) or len(domain) > 512:
+            return False, 0.0, 0.0
+
+        if deadline is not None and time.time() > deadline:
+            logger.warning("DL inference prediction aborted: deadline already expired")
             return False, 0.0, 0.0
 
         try:
-            # Thread-safe integrity refresh — protect entire check window
+            # Non-blocking snapshot of model and count under brief lock; NO disk IO here.
             with self._inference_lock:
                 self._inference_count += 1
-                count_check = (self._inference_count % self._INTEGRITY_CHECK_INTERVAL == 0)
-                if count_check:
-                    # Hold lock during re-check to prevent concurrent load of different states
-                    if not self._recheck_integrity():
-                        return False, 0.0, 0.0
-
-            # Read-Copy-Update: snapshot model reference under lock, then release for concurrent inference
-            with self._inference_lock:
                 current_model = self.model
+
+            if current_model is None:
+                return False, 0.0, 0.0
 
             # 1. Unicode normalization and cleaning
             normalized = unicodedata.normalize('NFKC', str(domain))
@@ -118,6 +144,11 @@ class DeepLearningEngine:
             # 2. Resilient character sanitization (map '_' to '-' and unmapped chars to standard tokens)
             sanitized_ascii = "".join(c if c in self.char_map else ("-" if c == "_" else "") for c in ascii_domain)
             if not sanitized_ascii:
+                return False, 0.0, 0.0
+
+            # Check deadline before multi-segment inspection & tensor creation
+            if deadline is not None and time.time() > deadline:
+                logger.warning("DL inference aborted: deadline expired before tensor creation")
                 return False, 0.0, 0.0
 
             # 3. Multi-segment inspection to defeat prefix padding and sub-domain evasion
@@ -141,29 +172,30 @@ class DeepLearningEngine:
             highest_prob = 0.0
             all_slices = []
 
-            for d in domains_to_check:
+            for d in domains_to_check[:8]:
                 encoded = [self.char_map.get(c, 0) for c in d]
                 if not encoded:
                     continue
 
-                # Sliding window across entire domain to ensure zero blind spots for long domains
+                # Sliding window across domain to ensure zero blind spots for long domains
                 if len(encoded) > 35:
                     step = 15
-                    MAX_SLICES = 10
                     for start in range(0, len(encoded) - 35 + 1, step):
-                        if len(all_slices) >= MAX_SLICES:
-                            break
                         all_slices.append(encoded[start:start + 35])
-                    if len(all_slices) < MAX_SLICES and (len(encoded) - 35) % step != 0:
+                        if len(all_slices) >= 32:
+                            break
+                    if len(all_slices) < 32 and (len(encoded) - 35) % step != 0:
                         all_slices.append(encoded[-35:])
                 else:
                     all_slices.append(encoded + [0] * (35 - len(encoded)))
 
-            current_model = self.model
-            if current_model is None:
-                return False, 0.0, 0.0
+                if len(all_slices) >= 32:
+                    break
 
-            if all_slices:
+            # Bound slices to 32 to guarantee deterministic O(1) memory and latency
+            all_slices = all_slices[:32]
+
+            if all_slices and current_model is not None:
                 # Batch all slices into a single forward context to eliminate GIL/Python loop overhead
                 batch_tensor = torch.tensor(all_slices, dtype=torch.long)
                 with torch.no_grad():

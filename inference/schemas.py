@@ -10,6 +10,8 @@ ALERT_SCHEMA = {
         "timestamp": {"type": "string", "format": "date-time"},
         "alert_id": {"type": "string"},
         "flow_id": {"type": ["string", "null"]},
+        "trace_id": {"type": ["string", "null"]},
+        "span_id": {"type": ["string", "null"]},
         "event_type": {"type": "string"},
         "threat_class": {"type": "string"},
         "confidence_score": {"type": "number"},

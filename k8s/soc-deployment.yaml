@@ -28,15 +28,34 @@ metadata:
   name: tsoc-sink-sa
   namespace: tsoc
 ---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tsoc-stream-processor
+  namespace: tsoc
+  labels:
+    app: tsoc-stream-processor
+spec:
+  clusterIP: None
+  selector:
+    app: tsoc-stream-processor
+  ports:
+  - port: 6066
+    name: metrics
+---
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   labels:
     app: tsoc-stream-processor
   name: tsoc-stream-processor
   namespace: tsoc
 spec:
+  serviceName: "tsoc-stream-processor"
   replicas: 3
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
   selector:
     matchLabels:
       app: tsoc-stream-processor
@@ -50,9 +69,6 @@ spec:
       - name: tmp
         emptyDir:
           sizeLimit: 500Mi
-      - name: dlq
-        emptyDir:
-          sizeLimit: 1Gi
       - name: cache
         emptyDir:
           sizeLimit: 500Mi
@@ -85,7 +101,7 @@ spec:
         volumeMounts:
         - name: tmp
           mountPath: /tmp
-        - name: dlq
+        - name: dlq-data
           mountPath: /tmp/dlq
         - name: cache
           mountPath: /var/lib/app
@@ -126,6 +142,14 @@ spec:
           seccompProfile:
             type: RuntimeDefault
       serviceAccountName: tsoc-stream-sa
+  volumeClaimTemplates:
+  - metadata:
+      name: dlq-data
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 5Gi
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -176,7 +200,7 @@ spec:
               name: tsoc-secrets
               key: DATABASE_URL
         - name: TRUSTED_PROXY_CIDRS
-          value: "127.0.0.1/32,::1/128,10.244.0.0/16"
+          value: "127.0.0.1/32,::1/128"
         - name: REDIS_HOST
           value: redis.redis.svc.cluster.local
         - name: REDIS_PORT
@@ -187,8 +211,6 @@ spec:
               name: tsoc-secrets
               key: redis_password
               optional: true
-        - name: LIMITER_STORAGE_URI
-          value: "redis://redis.redis.svc.cluster.local:6379/1"
         image: your-registry.com/tsoc/api:v1.0
         name: fastapi
         command: ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
