@@ -46,7 +46,7 @@ jobs:
 
       - name: Run Bandit Python Static Analysis
         run: |
-          bandit -r . --format json -o bandit-report.json || exit 1
+          bandit -r . -lll --format json -o bandit-report.json || exit 1
 
       - name: Upload Bandit results
         uses: actions/upload-artifact@v4
