@@ -41,7 +41,7 @@ jobs:
           DATABASE_URL: "sqlite:////tmp/test.db"
           TSOC_API_KEY: "test-ci-key"
         run: |
-          pip install pytest
+          pip install pytest python-dateutil
           PYTHONPATH=. pytest tests/
 
       - name: Run Bandit Python Static Analysis

@@ -90,13 +90,6 @@ class DeepLearningEngine:
         """
         logger.debug("Model hot-reload disabled; using startup-loaded artifact.")
         return True
-        except Exception as e:
-            logger.critical("Integrity re-check or candidate model load failed (%s). FREEZING model predictions until manual resolution.", e)
-            self._last_check = time.time()
-            # If we already have a validated model loaded, NEVER destroy it due to transient file update errors
-            if self.model is not None:
-                return True
-            return False
 
     def predict(self, features: dict, domain: str = "", deadline: Optional[float] = None):
         if not domain or not self.model or not isinstance(domain, str) or len(domain) > 512:
