@@ -158,8 +158,7 @@ spec:
     ports:
     - protocol: TCP
       port: 9092
-  # Allow egress to external Threat Intelligence APIs (e.g. ipapi.co) on HTTPS,
-  # while strictly denying access to internal private IPs, Cloud Metadata, and Carrier NAT.
+  # Allow HTTPS egress to specific TI APIs; deny internal metadata, Carrier NAT, loopback
   - to:
     - ipBlock:
         cidr: 0.0.0.0/0

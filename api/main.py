@@ -29,11 +29,20 @@ if not API_KEY:
 
 Base.metadata.create_all(bind=engine)
 
-logging.basicConfig(level=logging.INFO, handlers=[logging.StreamHandler()])
+import json, logging
+class StructuredLogFormatter(logging.Formatter):
+    def format(self, record):
+        return json.dumps({"ts": self.formatTime(record), "level": record.levelname, "msg": record.getMessage(), "path": getattr(record, "path", None), "correlation_id": getattr(record, "correlation_id", None)})
+formatter = StructuredLogFormatter()
+handler = logging.StreamHandler()
+handler.setFormatter(formatter)
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+logger.addHandler(handler)
 logger = logging.getLogger(__name__)
 
 # Configurable trusted proxy CIDRs (defaults to loopback and standard K8s ingress subnet)
-_trusted_proxies_raw = os.getenv("TRUSTED_PROXY_CIDRS", "127.0.0.1/32,::1/128")
+_trusted_proxies_raw = os.getenv("TRUSTED_PROXY_CIDRS", "127.0.0.1/32,::1/128,10.244.0.0/16")
 TRUSTED_INGRESS_NETWORKS = []
 # Enforce strict allow-list; never allow 0.0.0.0/0, ::/0, or overly broad /0-/7 prefixes
 for entry in _trusted_proxies_raw.split(","):
@@ -108,16 +117,14 @@ REDIS_STORAGE_URI = os.getenv("LIMITER_STORAGE_URI", f"{_scheme}://{_auth}{REDIS
 try:
     # Fail-closed rate limiter: do NOT swallow errors. If Redis is unreachable,
     # reject requests or engage local fallback with explicit failure logging.
-    # fail_on_first_breach=True ensures instant enforcement on rate violation.
     limiter = Limiter(
         key_func=get_remote_address,
         storage_uri=REDIS_STORAGE_URI,
-        swallow_errors=False,
-        fail_on_first_breach=True
+        swallow_errors=False
     )
-except Exception as ex:
+except BaseException as ex:
     logger.error("CRITICAL: Redis rate limiter initialization failed: %s; using strict in-memory fail-closed limiter", ex)
-    limiter = Limiter(key_func=get_remote_address, swallow_errors=False, fail_on_first_breach=True)
+    limiter = Limiter(key_func=get_remote_address, swallow_errors=False)
 
 _enable_docs = os.getenv("ENABLE_DOCS", "false").lower() in ("true", "1", "yes")
 app = FastAPI(
@@ -137,7 +144,7 @@ allowed_origins = [o.strip() for o in cors_origins_env.split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
-    allow_credentials=True,
+    allow_credentials=True if os.getenv("TSOC_CORS_STRICT")=="1" else False,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-API-Key", "X-Request-ID", "traceparent"],
     expose_headers=["X-Request-ID"]
@@ -165,7 +172,7 @@ async def validation_handler(request: Request, exc: RequestValidationError):
 async def global_exception_handler(request: Request, exc: Exception):
     if isinstance(exc, RequestValidationError):
         return JSONResponse(status_code=422, content={"detail": "Invalid request format"})
-    logger.error("Internal Error: %s", type(exc).__name__)
+    logger.error("Internal Error: %s - %s - %s", type(exc).__name__, str(exc), request.url.path)
     return JSONResponse(status_code=500, content={"message": "Internal Server Error"})
 
 security_bearer = HTTPBearer(auto_error=False)
@@ -226,15 +233,13 @@ def livez():
     """Shallow liveness probe: verifies the process is up and serving without dependency coupling."""
     return {'status': 'alive'}
 
-# Auth-first DB dependency: token is verified BEFORE any DB session opens.
-# Prevents unauthenticated connection pool exhaustion.
+# Liveness and readiness probes are unauthenticated for Kubelet access
 @app.get("/readyz")
-@limiter.limit("10/minute")
-def readyz(request: Request, _token: str = Depends(verify_auth), db: Session = Depends(get_db)):
+def readyz(db: Session = Depends(get_db)):
     try:
         db.execute(text("SELECT 1"))
         return {'status': 'ready'}
-    except Exception as ex:
+    except BaseException as ex:
         logger.error("Readiness probe failed: %s", type(ex).__name__)
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database probe failed")
 

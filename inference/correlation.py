@@ -101,14 +101,22 @@ if alert_json ~= "" then
         end
     end
 end
+
+-- Clear dedup max severity tracker on rollback so DLQ replays are properly re-evaluated
+redis.call('del', dedup_name)
 return 1
 """
+
+from prometheus_client import Counter
+race_counter = Counter('correlation_engine_race_conditions_detected', 'Two-phase commit conflicts')
 
 class IncidentCorrelator:
     def __init__(self):
         redis_host = os.getenv("REDIS_HOST", "localhost")
         redis_port = int(os.getenv("REDIS_PORT", "6379"))
-        redis_password = os.getenv("REDIS_PASSWORD", None)
+        redis_password = os.getenv("REDIS_PASSWORD")
+        if not redis_password:
+            raise RuntimeError("REDIS_PASSWORD must be configured — unauthenticated Redis is not permitted.")
         redis_ssl = os.getenv("REDIS_SSL", "false").lower() in ("true", "1", "yes")
 
         pool_kwargs = dict(
@@ -145,8 +153,28 @@ class IncidentCorrelator:
         self.time_window_sec = 300
         self._lua = self.redis.register_script(CORRELATE_LUA)
         self._rollback_lua = self.redis.register_script(ROLLBACK_LUA)
+        self._last_master_check = 0
+        self._master_check_interval = 5  # seconds
+
+    
+    def check_redis_master(self):
+        now = time.time()
+        if now - self._last_master_check < self._master_check_interval:
+            return True
+        try:
+            info = self.redis.info("replication")
+            if info.get("role") != "master":
+                logger.warning("Redis is not master; stopping correlation.")
+                return False
+            self._last_master_check = now
+            return True
+        except Exception as e:
+            logger.error("Redis connection error: %s", e)
+            return False
+
 
     def add_alert(self, alert, threshold=80.0):
+        if not self.check_redis_master(): return None
         import re
         raw_src = str(alert.get("source_ip", "127.0.0.1")).strip()
         # Strict IP validation to prevent Redis key injection and newline attacks
@@ -191,6 +219,8 @@ class IncidentCorrelator:
             )
             len_list = int(result[0])
             incident_flag = int(result[1])
+            if incident_flag == 2:  # conflict marker
+                race_counter.inc()
             if incident_flag == 1:
                 # Consistency fix: evidence comes from the atomic Lua return, not a separate lrange
                 raw_alerts = result[2] if len(result) > 2 else []
@@ -260,7 +290,7 @@ class IncidentCorrelator:
     def rollback_alert_seen(self, alert: dict):
         """
         Compensating transaction: atomically removes alert_id from the seen set,
-        removes the alert from the sliding window list, and decrements the counter
+        removes the alert from the sliding window list, and max(0, decr)  # guard negativeements the counter
         in Redis if downstream incident emission fails. Allows DLQ replay to re-evaluate the incident.
         """
         try:

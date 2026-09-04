@@ -7,6 +7,7 @@ import os
 import fcntl
 import uuid
 import threading
+import atexit
 import redis
 from datetime import datetime, timezone
 from faust import App
@@ -35,6 +36,8 @@ dead_letter_topic = app.topic("dead_letter_events", value_type=dict)
 # Right-sized thread allocations matching container resource constraints
 cpu_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="cpu")  # ML Inference, Feature Extraction
 io_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="io")  # Redis Correlation
+atexit.register(lambda: cpu_executor.shutdown(wait=True, cancel_futures=True))
+atexit.register(lambda: io_executor.shutdown(wait=True, cancel_futures=True))
 # Track submitted futures for cancellation on SIGTERM (thread-safe lock for sync and async callers)
 _submitted_cpu_futures = set()
 _submitted_io_futures = set()
@@ -62,6 +65,15 @@ _infer_sem = _LazySemaphore(4)
 # The executor's internal queue caps at ~max_workers*128, but the semaphore
 # provides an explicit, observable ceiling that also gates semaphore release.
 _infer_pending_sem = _LazySemaphore(8)
+
+
+async def _run_with_timeout(loop, executor, func, *args, timeout=5.0):
+    future = loop.run_in_executor(executor, func, *args)
+    try:
+        return await asyncio.wait_for(future, timeout=timeout)
+    except asyncio.TimeoutError:
+        future.cancel()
+        raise
 
 
 @app.page('/healthz')

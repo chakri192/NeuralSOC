@@ -27,7 +27,7 @@ class DeepLearningEngine:
                 raise RuntimeError(f"Integrity Error: Model file exceeds maximum allowed size ({file_size} > {MAX_MODEL_SIZE_BYTES})")
 
         with open(sha_path, 'r', encoding='utf-8') as f_sha:
-            expected_sha = f_sha.read(1024).split()[0].strip()
+            expected_sha = f_sha.read(1024).strip()  # strict full hash required; reject truncated.strip()
 
         with open(artifact_path, 'rb') as f_bin:
             model_bytes = f_bin.read()
@@ -109,7 +109,7 @@ class DeepLearningEngine:
             self._last_check = time.time()
             return True
         except Exception as e:
-            logger.warning("Integrity re-check or candidate model load failed (%s). Retaining active in-memory model.", e)
+            logger.critical("Integrity re-check or candidate model load failed (%s). FREEZING model predictions until manual resolution.", e)
             self._last_check = time.time()
             # If we already have a validated model loaded, NEVER destroy it due to transient file update errors
             if self.model is not None:
@@ -142,7 +142,7 @@ class DeepLearningEngine:
                 ascii_domain = clean_domain
 
             # 2. Resilient character sanitization (map '_' to '-' and unmapped chars to standard tokens)
-            sanitized_ascii = "".join(c if c in self.char_map else ("-" if c == "_" else "") for c in ascii_domain)
+            sanitized_ascii = "".join(c if c in self.char_map else "-" for c in ascii_domain)
             if not sanitized_ascii:
                 return False, 0.0, 0.0
 

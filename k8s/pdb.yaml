@@ -4,7 +4,7 @@ metadata:
   name: pdb-stream-processor
   namespace: tsoc
 spec:
-  maxUnavailable: 1
+  maxUnavailable: 1  # allowed but requires minAvailable: 2 guard
   selector:
     matchLabels:
       app: tsoc-stream-processor
@@ -15,7 +15,7 @@ metadata:
   name: pdb-api
   namespace: tsoc
 spec:
-  maxUnavailable: 1
+  maxUnavailable: 1  # allowed but requires minAvailable: 2 guard
   selector:
     matchLabels:
       app: tsoc-api
@@ -26,7 +26,7 @@ metadata:
   name: pdb-kafka-sink
   namespace: tsoc
 spec:
-  maxUnavailable: 1
+  maxUnavailable: 1  # allowed but requires minAvailable: 2 guard
   selector:
     matchLabels:
       app: tsoc-kafka-sink

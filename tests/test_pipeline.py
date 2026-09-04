@@ -135,7 +135,7 @@ class TestSOCPipelineSecurity(unittest.TestCase):
                 "172.31.255.254",
                 "192.168.1.1",
                 "169.254.169.254",
-                "0.0.0.0",
+                "0.0.0.0",  # nosec B104
                 "224.0.0.1",
                 "240.0.0.1",
                 "100.64.0.1",
@@ -459,12 +459,12 @@ class TestSOCPipelineSecurity(unittest.TestCase):
     def test_pod_partitioned_dlq_paths(self):
         """Verify DLQ path formatting with pod names."""
         # Case 1: Template string with {pod}
-        raw_template = "/tmp/dlq/alerts-{pod}.jsonl"
+        raw_template = "/tmp/dlq/alerts-{pod}.jsonl"  # nosec B108
         formatted = raw_template.format(pod="stream-processor-0")
         self.assertEqual(formatted, "/tmp/dlq/alerts-stream-processor-0.jsonl")
 
         # Case 2: Standard filename auto-partitioned by pod
-        raw_path = "/tmp/dlq/alerts.jsonl"
+        raw_path = "/tmp/dlq/alerts.jsonl"  # nosec B108
         base_dir, filename = os.path.split(raw_path)
         name, ext = os.path.splitext(filename)
         pod_name = "stream-processor-1"

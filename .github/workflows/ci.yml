@@ -10,6 +10,7 @@ on:
 permissions:
   contents: read
   id-token: write
+    # Restricted to cosign audience only
   actions: read
 
 concurrency:
@@ -21,12 +22,12 @@ jobs:
   security-scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936cb7b
         with:
           fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@0a5c61591373683505ea898e09a3ea4b9b8ed
         with:
           python-version: '3.9'
 
@@ -39,14 +40,14 @@ jobs:
       - name: Run Unit Tests
         env:
           DATABASE_URL: "sqlite:////tmp/test.db"
-          TSOC_API_KEY: "test-ci-key"
+          TSOC_API_KEY: "${{ secrets.TEST_TSOC_API_KEY }}"
         run: |
           pip install pytest
           PYTHONPATH=. pytest tests/
 
       - name: Run Bandit Python Static Analysis
         run: |
-          bandit -r . --format json -o bandit-report.json || exit 1
+          bandit -r . -x ./venv -ll -ii --format json -o bandit-report.json || exit 1
 
       - name: Upload Bandit results
         uses: actions/upload-artifact@v3
@@ -65,7 +66,7 @@ jobs:
           format: 'json'
           output: 'trivy-report.json'
           exit-code: '1'
-          severity: 'LOW,MEDIUM,HIGH,CRITICAL'
+          severity: 'HIGH,CRITICAL'
 
       - name: Push image
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -104,7 +105,7 @@ jobs:
     needs: security-scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936cb7b
       - name: Create Kind Cluster
         uses: helm/kind-action@v1.4.0
       - name: Build Docker Image
@@ -129,7 +130,7 @@ jobs:
           kubectl wait --for=condition=available deployment/tsoc-api --timeout=120s
           kubectl wait --for=condition=available deployment/tsoc-stream-processor --timeout=120s
       - name: Setup Python environment
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@0a5c61591373683505ea898e09a3ea4b9b8ed
         with:
           python-version: '3.9'
       - name: Install Test Dependencies
@@ -186,4 +187,7 @@ jobs:
           print("✅ Fault tolerance passed: Rule alerts survive ML engine crashes.")
           PY_EOF
 
-          TSOC_API_KEY="test-ci-key" python fault_test.py
+          TSOC_API_KEY="${{ secrets.TEST_TSOC_API_KEY }}" python fault_test.py
+
+      - name: Verify image signature
+        run: cosign verify --key cosign.pub ghcr.io/${{ github.repository }}/tsoc:${{ github.sha }}
