@@ -650,6 +650,33 @@ class TestSOCPipelineSecurity(unittest.TestCase):
 
         asyncio.run(run_close_test())
 
+    def test_stream_dlq_path_guard_rejects_out_of_bounds_path(self):
+        """_resolve_dlq_file_path() must reject any STREAM_DLQ_FILE_PATH or
+        POD_NAME/HOSTNAME value that would resolve outside /tmp/dlq (the
+        dedicated dlq-data volume mount, k8s/soc-deployment.yaml), falling
+        back to the safe default -- mirroring the allow-listing
+        api/kafka_sink.py already applies to its own DLQ_FILE_PATH env var."""
+        from inference.stream_processor_faust import _resolve_dlq_file_path
+
+        # A legitimate templated path stays inside /tmp/dlq, per-pod partitioned.
+        self.assertEqual(
+            _resolve_dlq_file_path("/tmp/dlq/alerts-{pod}.jsonl", "stream-processor-0"),
+            "/tmp/dlq/alerts-stream-processor-0.jsonl",
+        )
+        # A legitimate non-templated path gets auto-partitioned by pod name.
+        self.assertEqual(
+            _resolve_dlq_file_path("/tmp/dlq/alerts.jsonl", "stream-processor-1"),
+            "/tmp/dlq/alerts-stream-processor-1.jsonl",
+        )
+        # An out-of-bounds STREAM_DLQ_FILE_PATH must be rejected and fall
+        # back to the safe default, never resolve outside /tmp/dlq.
+        self.assertEqual(_resolve_dlq_file_path("/etc/passwd-{pod}", "default"), "/tmp/dlq/alerts.jsonl")
+        self.assertEqual(_resolve_dlq_file_path("/tmp/dlq/../../etc/passwd", "default"), "/tmp/dlq/alerts.jsonl")
+        # A malicious pod name (e.g. an attacker-influenced HOSTNAME) must
+        # not be able to escape /tmp/dlq via embedded ".." segments either.
+        resolved = _resolve_dlq_file_path("/tmp/dlq/alerts.jsonl", "../../etc/evil")
+        self.assertTrue(resolved.startswith("/tmp/dlq"))
+
     def test_pod_partitioned_dlq_paths(self):
         """Verify DLQ path formatting with pod names."""
         # Case 1: Template string with {pod}

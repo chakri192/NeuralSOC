@@ -295,16 +295,39 @@ async def process_traffic(stream):
                     logger.error("Detection processing loop error for %s: %s", det, det_outer_err)
                     await _send_dlq_safely(event, {"detection": str(det)}, f"DetectionLoopError: {det_outer_err}")
 
-_raw_dlq_path = os.getenv("STREAM_DLQ_FILE_PATH", "/tmp/dlq/alerts.jsonl")  # nosec B108
-_pod_name = os.getenv("POD_NAME") or os.getenv("HOSTNAME") or "default"
-# Partition filename per pod to prevent inter-pod locking collisions and corruption on RWX PVCs
-if "{pod}" in _raw_dlq_path:
-    DLQ_FILE_PATH = _raw_dlq_path.format(pod=_pod_name)
-else:
-    _base_dir, _filename = os.path.split(_raw_dlq_path)
-    _name, _ext = os.path.splitext(_filename)
-    DLQ_FILE_PATH = os.path.join(_base_dir, f"{_name}-{_pod_name}{_ext}") if _pod_name != "default" else _raw_dlq_path
+_DLQ_ALLOWED_BASE_DIR = os.path.abspath("/tmp/dlq")  # nosec B108
+_DLQ_DEFAULT_PATH = "/tmp/dlq/alerts.jsonl"  # nosec B108
 
+
+def _resolve_dlq_file_path(raw_dlq_path, pod_name):
+    """Partition raw_dlq_path per-pod (to prevent inter-pod locking
+    collisions/corruption on RWX PVCs), then apply the same
+    path-sanitization/allow-listing api/kafka_sink.py applies to its own
+    DLQ_FILE_PATH env var -- checked after pod-name templating so an
+    out-of-bounds STREAM_DLQ_FILE_PATH or POD_NAME/HOSTNAME value can't
+    steer writes outside the dedicated dlq-data volume mount
+    (k8s/soc-deployment.yaml). Pulled out to a plain function (rather than
+    inline module-level statements) so it's unit-testable without importing
+    the whole module, which constructs a real Redis client at import time.
+    """
+    if "{pod}" in raw_dlq_path:
+        candidate = raw_dlq_path.format(pod=pod_name)
+    else:
+        base_dir, filename = os.path.split(raw_dlq_path)
+        name, ext = os.path.splitext(filename)
+        candidate = os.path.join(base_dir, f"{name}-{pod_name}{ext}") if pod_name != "default" else raw_dlq_path
+
+    resolved = os.path.abspath(candidate)
+    if not resolved.startswith(_DLQ_ALLOWED_BASE_DIR):
+        logger.warning("Dangerous or out-of-bounds DLQ path rejected (%s); defaulting to %s", candidate, _DLQ_DEFAULT_PATH)  # nosec B108
+        return _DLQ_DEFAULT_PATH
+    return resolved
+
+
+DLQ_FILE_PATH = _resolve_dlq_file_path(
+    os.getenv("STREAM_DLQ_FILE_PATH", _DLQ_DEFAULT_PATH),  # nosec B108
+    os.getenv("POD_NAME") or os.getenv("HOSTNAME") or "default",
+)
 DLQ_LOCK_PATH = f"{DLQ_FILE_PATH}.lock"  # nosec B108
 DLQ_MAX_SIZE_MB = int(os.getenv("STREAM_DLQ_MAX_SIZE_MB", "100"))
 DLQ_ROTATE_COUNT = int(os.getenv("STREAM_DLQ_ROTATE_COUNT", "5"))
