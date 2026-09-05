@@ -15,12 +15,27 @@ spec:
 # egress list is [169.254.0.0/16, 127.0.0.0/8] therefore GRANTED every pod
 # unrestricted egress to the cloud instance-metadata range, overriding
 # default-deny-all above and opening a path to steal node IAM credentials
-# via any SSRF. Link-local denial is only expressible via an ipBlock.except
-# on an allow-rule -- see stream-processor-policy's egress rule below,
-# which already excludes 169.254.0.0/16 (and 127.0.0.0/8, 100.64.0.0/10,
-# and the RFC1918 ranges) correctly from its one broad internet-egress
-# allow. No other policy in this file grants broad internet egress, so
-# nothing else needs the same treatment.
+# via any SSRF.
+#
+# The same union behavior applies ACROSS policy kinds, not just within
+# this file: k8s/cilium-identity-policy.yaml defines a CiliumNetworkPolicy
+# for each of these same three pod selectors, and Cilium enforces the
+# union of every applicable policy (plain NetworkPolicy or Cilium CRD) for
+# a given endpoint -- traffic allowed by EITHER is allowed. Verified
+# directly against a real kind+Cilium cluster: with the broad ipBlock
+# rules this file used to carry, a tsoc-stream-processor pod could reach
+# an arbitrary public IP on :443, not just the FQDN-pinned threat-intel
+# API Cilium's policy allows -- the plain NetworkPolicy's wider CIDR rule
+# was silently overriding the tighter Cilium one. Kubelet-probe ingress
+# and the internet-egress rule are therefore defined ONLY in
+# cilium-identity-policy.yaml now (fromEntities: [host, remote-node] and
+# toFQDNs respectively) -- both strictly tighter than a CIDR block, and
+# the only place they can safely live given this union behavior. What
+# remains in this file (default-deny-all, and the narrow
+# namespace+pod-selector rules for redis/postgres/kube-dns/ingress-nginx/
+# prometheus below) doesn't have this problem: those are exact-identity
+# matches, not broad CIDRs, so their union with the equivalent Cilium
+# rules doesn't widen anything beyond what's already intended.
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -57,15 +72,10 @@ spec:
     ports:
     - protocol: TCP
       port: 8000
-  # Allow Kubernetes kubelet (Liveness/Readiness probes) from node network (explicitly excluding Pod overlay CIDR)
-  - from:
-    - ipBlock:
-        cidr: 10.0.0.0/8
-        except:
-        - 10.244.0.0/16
-    ports:
-    - protocol: TCP
-      port: 8000
+  # Kubelet liveness/readiness probe ingress is defined only in
+  # cilium-identity-policy.yaml's tsoc-api-policy (fromEntities:
+  # [host, remote-node]) -- see the note on default-deny-all above for why
+  # a CIDR-based version of this same rule doesn't belong here too.
   egress:
   - to:
     - namespaceSelector:
@@ -129,15 +139,11 @@ spec:
     ports:
     - protocol: TCP
       port: 6066
-  # Allow Kubernetes kubelet (Liveness/Readiness probes) to reach the health port from node network (excluding Pod overlay CIDR).
-  - from:
-    - ipBlock:
-        cidr: 10.0.0.0/8
-        except:
-        - 10.244.0.0/16
-    ports:
-    - protocol: TCP
-      port: 6066
+  # Kubelet liveness/readiness probe ingress is defined only in
+  # cilium-identity-policy.yaml's tsoc-stream-processor-policy
+  # (fromEntities: [host, remote-node]) -- see the note on
+  # default-deny-all above for why a CIDR-based version of this same rule
+  # doesn't belong here too.
   egress:
   - to:
     - namespaceSelector:
@@ -171,20 +177,14 @@ spec:
     ports:
     - protocol: TCP
       port: 9092
-  # Allow HTTPS egress to specific TI APIs; deny internal metadata, Carrier NAT, loopback
-  - to:
-    - ipBlock:
-        cidr: 0.0.0.0/0
-        except:
-        - 10.0.0.0/8
-        - 172.16.0.0/12
-        - 192.168.0.0/16
-        - 169.254.0.0/16
-        - 100.64.0.0/10
-        - 127.0.0.0/8
-    ports:
-    - protocol: TCP
-      port: 443
+  # Threat-intel API egress is defined only in
+  # cilium-identity-policy.yaml's tsoc-stream-processor-policy
+  # (toFQDNs: ipwho.is) -- see the note on default-deny-all above. This
+  # used to be a "0.0.0.0/0 except private ranges" ipBlock here, which is
+  # not just redundant with the FQDN rule but strictly wider than it:
+  # confirmed against a real cluster that it let this pod reach arbitrary
+  # public IPs on :443, not just the one threat-intel API it's meant to
+  # call.
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

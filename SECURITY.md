@@ -118,13 +118,29 @@ installed via its official Helm chart) — not just schema-checked:
   connection to `169.254.169.254:443` (the cloud-metadata range this
   policy's `except` clause excludes — the exact class of bug the
   original audit found, where a "deny" policy was actually an unrestricted
-  allow rule to this range) timed out — silently dropped at the CNI layer
-  — while the same pod reached `1.1.1.1:443` (a real public IP, *not* in
-  any excluded range) successfully, from the same node, same code path,
-  moments apart. Default-deny was confirmed separately: an unlabeled pod
-  could not reach a plain target pod at all, and only a pod labeled to
-  match `ingress-nginx` (in a namespace labeled accordingly) could reach
-  the `tsoc-api`-labeled pod's port 8000 — an unlabeled pod could not.
+  allow rule to this range) timed out — silently dropped at the CNI layer.
+  Default-deny was confirmed separately: an unlabeled pod could not reach
+  a plain target pod at all, and only a pod labeled to match
+  `ingress-nginx` (in a namespace labeled accordingly) could reach the
+  `tsoc-api`-labeled pod's port 8000 — an unlabeled pod could not.
+
+  The same test round also found a second, real gap: the same
+  stream-processor pod could reach `1.1.1.1:443` — an arbitrary public
+  IP, not just the FQDN-pinned threat-intel API
+  (`k8s/cilium-identity-policy.yaml`'s `toFQDNs` rule) it's meant to call.
+  Cause: `network-policies.yaml` and `cilium-identity-policy.yaml` both
+  select the same pods, and Cilium enforces the *union* of every
+  applicable policy regardless of kind — `network-policies.yaml` used to
+  carry its own broad `ipBlock: 0.0.0.0/0 except <private ranges>` egress
+  rule (and equally broad `ipBlock: 10.0.0.0/8` kubelet-probe ingress
+  rules), each wider than the equivalent Cilium rule and each silently
+  overriding it. Fixed by removing the CIDR-based versions of these three
+  rules from `network-policies.yaml` entirely — kubelet-probe ingress and
+  threat-intel egress now live *only* in the tighter Cilium policy
+  (`fromEntities: [host, remote-node]` and `toFQDNs` respectively).
+  Re-verified against a fresh cluster after the fix: `1.1.1.1:443` now
+  times out identically to the metadata range, while `ipwho.is:443` (the
+  actual intended destination) still connects successfully.
 - **`k8s/kyverno-verify.yaml`**: applying a pod with a mutable image tag
   and no `imagePullPolicy: Always` into the `tsoc` namespace was rejected
   by the admission webhook with both rules' exact validation messages

@@ -10,6 +10,14 @@ metadata:
     pod-security.kubernetes.io/warn: restricted
     pod-security.kubernetes.io/warn-version: latest
 ---
+# automountServiceAccountToken: false on all three -- none of these
+# workloads ever call the Kubernetes API (api/, inference/, and
+# api/kafka_sink.py only ever talk to Redis, Postgres, and Redpanda), so
+# the default auto-mounted K8s API JWT at
+# /var/run/secrets/kubernetes.io/serviceaccount/token is pure unused
+# blast-radius: an SSRF or RCE in any one pod would otherwise hand an
+# attacker a live, namespace-scoped credential for the cluster's own API
+# server that this code never needed in the first place.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -18,18 +26,21 @@ metadata:
     spiffe.io/spiffe-id: "spiffe://tsoc.local/ns/tsoc/sa/tsoc-api-sa"
     cilium.io/identity-based-policy: "enabled"
   namespace: tsoc
+automountServiceAccountToken: false
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: tsoc-stream-sa
   namespace: tsoc
+automountServiceAccountToken: false
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: tsoc-sink-sa
   namespace: tsoc
+automountServiceAccountToken: false
 ---
 apiVersion: v1
 kind: Service
