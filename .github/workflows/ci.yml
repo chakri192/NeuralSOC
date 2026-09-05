@@ -43,6 +43,15 @@ jobs:
       - name: Bandit security scan (high severity = fail)
         run: bandit -r api inference ingest shared scripts -lll -ii -f json -o bandit-report.json
 
+      - name: Bandit -- full severity report (advisory, non-blocking)
+        # The step above only reports HIGH severity + medium/high
+        # confidence (-lll -ii) as a hard gate, matching its own name --
+        # but that also meant medium/low severity findings (weak hashes,
+        # missing TLS verification, etc.) were invisible everywhere, not
+        # just non-blocking. Mirrors the flake8 lint above: one strict
+        # gate, one advisory report with everything else.
+        run: bandit -r api inference ingest shared scripts -ll -f json -o bandit-report-full.json --exit-zero
+
       - name: Unit tests + coverage (fail if any error, or coverage regresses)
         # Real coverage is now 72% locally (132 tests) after also driving
         # api/kafka_sink.py's run_sink() consumer loop and
@@ -139,6 +148,7 @@ jobs:
           name: security-reports
           path: |
             bandit-report.json
+            bandit-report-full.json
             coverage.xml
             sbom.cyclonedx.json
             models/*.cosign.bundle

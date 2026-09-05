@@ -36,9 +36,18 @@ class DeepLearningEngine:
         if not secrets.compare_digest(computed_sha, expected_sha):
             raise RuntimeError(f"Integrity Error: SHA-256 mismatch (got {computed_sha}, expected {expected_sha})")
 
-        # Load TorchScript model directly from validated in-memory buffer (B614 suppressed only for immutable startup load)
+        # Load TorchScript model directly from validated in-memory buffer.
+        # B614 (unsafe torch load) previously "suppressed" only in this
+        # comment's prose, never with a real `# nosec` directive -- bandit
+        # was never actually told to ignore this, it just never appeared
+        # in any report because the CI gate only surfaces HIGH severity
+        # and this is MEDIUM. Real justification, now actually applied:
+        # the SHA-256 comparison two lines above already ran and raised on
+        # any mismatch before these bytes ever reach torch.jit.load, and
+        # this is the one-time, immutable startup load path, not a
+        # runtime endpoint accepting arbitrary model files.
         model_buffer = io.BytesIO(model_bytes)
-        model = torch.jit.load(model_buffer, map_location=torch.device('cpu'))
+        model = torch.jit.load(model_buffer, map_location=torch.device('cpu'))  # nosec B614
         model.eval()
         return model, computed_sha
 

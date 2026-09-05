@@ -17,3 +17,14 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+
+  # The Dockerfile's base image is digest-pinned (python:3.12-slim-bookworm@
+  # sha256:...), which is correct for build reproducibility, but it also
+  # means nothing bumps that digest on its own -- OS package CVEs (glibc,
+  # OpenSSL, the kernel userland) accumulate silently in the base layer
+  # until someone manually re-resolves it. This scans the Dockerfile and
+  # opens a PR with the new digest when the base image is rebuilt upstream.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"

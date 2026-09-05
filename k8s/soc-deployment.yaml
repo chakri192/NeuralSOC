@@ -118,11 +118,17 @@ spec:
         - name: REDIS_PORT
           value: "6379"
         - name: REDIS_PASSWORD
+          # Not optional, unlike slack_webhook_url/pagerduty_routing_key
+          # above -- api/deps.py and inference/correlation.py both raise
+          # at import if this is unset whenever REDIS_SSL=true (the
+          # default), so "optional: true" here only delayed a guaranteed
+          # crash-loop from pod-creation time (a clear
+          # CreateContainerConfigError) to first-import time (a less
+          # obvious traceback in the pod's own logs).
           valueFrom:
             secretKeyRef:
               name: tsoc-secrets
               key: redis_password
-              optional: true
         # Always, matching the api/kafka-sink containers below and this
         # cluster's own require-signed-images Kyverno policy, which
         # enforces imagePullPolicy: Always on every pod in this namespace.
@@ -250,11 +256,17 @@ spec:
         - name: REDIS_PORT
           value: "6379"
         - name: REDIS_PASSWORD
+          # Not optional, unlike slack_webhook_url/pagerduty_routing_key
+          # above -- api/deps.py and inference/correlation.py both raise
+          # at import if this is unset whenever REDIS_SSL=true (the
+          # default), so "optional: true" here only delayed a guaranteed
+          # crash-loop from pod-creation time (a clear
+          # CreateContainerConfigError) to first-import time (a less
+          # obvious traceback in the pod's own logs).
           valueFrom:
             secretKeyRef:
               name: tsoc-secrets
               key: redis_password
-              optional: true
         image: your-registry.com/tsoc/api@sha256:9f32e2f4ec908b6531b278fa2ae3fe694ad4a2d4f874a3f56248c4ff85f5aa24
         imagePullPolicy: Always
         name: fastapi
