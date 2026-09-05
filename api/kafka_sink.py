@@ -10,6 +10,7 @@ import time
 from kafka import KafkaConsumer, KafkaProducer
 from kafka.structs import OffsetAndMetadata
 from pydantic import BaseModel, ValidationError
+from sqlalchemy import bindparam, insert, update
 
 MAX_MSG_SIZE = 5 * 1024 * 1024  # 5MB
 from api.database import SessionLocal, engine, Base
@@ -110,8 +111,44 @@ def _safe_dlq_send(dlq_producer, alert_id, raw_item, error_msg):
     write_to_file_dlq(raw_item, error_msg)
 
 
+def _bulk_upsert(db, alert_dicts):
+    """Insert-or-update many alerts in a fixed small number of round trips
+    (one existence-check SELECT, one bulk INSERT, one bulk UPDATE) instead
+    of one read-then-write pair per row. The previous implementation ran a
+    SELECT + INSERT/UPDATE inside its own SAVEPOINT for every single item
+    in a batch of up to 100 -- correct, but up to 200 individual statements
+    per cycle regardless of how cheap each one is.
+
+    A bulk statement fails all-or-nothing: if it raises, the caller falls
+    back to the original per-item path so one bad row (one that passed
+    AlertPayload's validation but somehow violates a DB-level constraint)
+    can't silently take the rest of an otherwise-healthy batch down with
+    it -- that fallback is the load-bearing part of this function's
+    contract, not an afterthought.
+    """
+    aids = [d["alert_id"] for d in alert_dicts]
+    existing_aids = {row[0] for row in db.query(Alert.alert_id).filter(Alert.alert_id.in_(aids)).all()}
+
+    to_insert = [d for d in alert_dicts if d["alert_id"] not in existing_aids]
+    to_update = [d for d in alert_dicts if d["alert_id"] in existing_aids]
+
+    if to_insert:
+        db.execute(insert(Alert), to_insert)
+    if to_update:
+        # bindparam("_alert_id") -- not "alert_id" -- because the same key
+        # can't drive both the WHERE match and a SET assignment in one bulk
+        # UPDATE; alert_id itself is excluded from the SET side since it's
+        # the (unchanging) lookup key, not a field being updated.
+        update_dicts = [
+            {**{k: v for k, v in d.items() if k != "alert_id"}, "_alert_id": d["alert_id"]}
+            for d in to_update
+        ]
+        db.execute(update(Alert).where(Alert.alert_id == bindparam("_alert_id")), update_dicts)
+    db.flush()
+
+
 def process_batch(current_batch, dlq_producer=None, session_factory=SessionLocal):
-    """Processes an entire batch within a single DB session using savepoints for item isolation.
+    """Processes an entire batch within a single DB session.
 
     Module-level (not a run_sink() closure) so the validate-before-ORM path --
     the fix that stops an attacker-influenced Kafka payload from ever setting
@@ -122,6 +159,7 @@ def process_batch(current_batch, dlq_producer=None, session_factory=SessionLocal
     offsets_map = {}
     db = session_factory(expire_on_commit=False)
     try:
+        valid_items = []
         for raw_item, tp, offset in current_batch:
             try:
                 if isinstance(raw_item.get("evidence"), (dict, list)):
@@ -130,24 +168,51 @@ def process_batch(current_batch, dlq_producer=None, session_factory=SessionLocal
                 # This is what stops an attacker-influenced Kafka payload from ever
                 # setting the primary key or a SQLAlchemy internal attribute name —
                 # AlertPayload has no "id" field and no "metadata"/"registry" field,
-                # so neither can reach Alert(**alert_dict) no matter what raw_item contains.
+                # so neither can reach the ORM no matter what raw_item contains.
                 alert_dict = AlertPayload(**raw_item).model_dump()
-                aid = alert_dict["alert_id"]
-                with db.begin_nested():
-                    existing = db.query(Alert).filter(Alert.alert_id == aid).first()
-                    if existing:
-                        for k, v in alert_dict.items():
-                            setattr(existing, k, v)
-                    else:
-                        alert_obj = Alert(**alert_dict)
-                        db.add(alert_obj)
-                    db.flush()
-                offsets_map[tp] = max(offsets_map.get(tp, -1), offset + 1)
+                valid_items.append((alert_dict, tp, offset))
             except Exception as item_err:
                 # Item-level data formatting/integrity issue: isolate to DLQ and advance offset
                 logger.error("Item processing failed for alert %s: %s", raw_item.get('alert_id'), item_err)
                 _safe_dlq_send(dlq_producer, raw_item.get('alert_id', ''), raw_item, str(item_err))
                 offsets_map[tp] = max(offsets_map.get(tp, -1), offset + 1)
+
+        if valid_items:
+            # De-dup by alert_id within this one batch, keeping the last
+            # occurrence -- a fast double-send or replay could put the same
+            # alert_id twice in one batch; the old per-item loop's second
+            # setattr/insert pass naturally overwrote the first, so this
+            # bulk path preserves that same last-write-wins behavior.
+            by_aid = {}
+            for alert_dict, tp, offset in valid_items:
+                by_aid[alert_dict["alert_id"]] = (alert_dict, tp, offset)
+            deduped = list(by_aid.values())
+
+            try:
+                _bulk_upsert(db, [d for d, _, _ in deduped])
+                for _, tp, offset in valid_items:
+                    offsets_map[tp] = max(offsets_map.get(tp, -1), offset + 1)
+            except Exception as bulk_err:
+                logger.warning(
+                    "Bulk upsert failed (%s); falling back to per-item processing for this batch", bulk_err
+                )
+                db.rollback()
+                for alert_dict, tp, offset in deduped:
+                    try:
+                        with db.begin_nested():
+                            existing = db.query(Alert).filter(Alert.alert_id == alert_dict["alert_id"]).first()
+                            if existing:
+                                for k, v in alert_dict.items():
+                                    setattr(existing, k, v)
+                            else:
+                                db.add(Alert(**alert_dict))
+                            db.flush()
+                        offsets_map[tp] = max(offsets_map.get(tp, -1), offset + 1)
+                    except Exception as item_db_err:
+                        logger.error("Item DB write failed for alert %s: %s", alert_dict.get('alert_id'), item_db_err)
+                        _safe_dlq_send(dlq_producer, alert_dict.get('alert_id', ''), alert_dict, str(item_db_err))
+                        offsets_map[tp] = max(offsets_map.get(tp, -1), offset + 1)
+
         db.commit()
         return offsets_map
     except Exception as batch_err:

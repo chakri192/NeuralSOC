@@ -123,7 +123,7 @@ class TestProcessBatchValidation:
 
     def test_db_failure_rolls_back_and_returns_no_offsets(self):
         db_mock = MagicMock()
-        db_mock.query.return_value.filter.return_value.first.return_value = None
+        db_mock.query.return_value.filter.return_value.all.return_value = []
         db_mock.commit.side_effect = RuntimeError("connection lost")
 
         offsets = process_batch(
@@ -132,6 +132,46 @@ class TestProcessBatchValidation:
         )
         assert offsets == {}
         db_mock.rollback.assert_called_once()
+
+
+class TestBulkUpsertFallback:
+    def test_bulk_upsert_failure_falls_back_to_per_item_isolation(self, monkeypatch):
+        """If the bulk INSERT/UPDATE statement itself raises (e.g. a DB-level
+        constraint violation on one row that passed AlertPayload validation),
+        the batch must not be lost wholesale -- it falls back to the original
+        per-item savepoint loop so the other, healthy rows in the batch still
+        get written."""
+        import api.kafka_sink as sink
+
+        monkeypatch.setattr(sink, "_bulk_upsert", MagicMock(side_effect=RuntimeError("constraint violation")))
+
+        offsets = process_batch([
+            (_valid_raw_item(alert_id="ALT-fallback-1"), "tp0", 0),
+            (_valid_raw_item(alert_id="ALT-fallback-2"), "tp0", 1),
+        ])
+        assert offsets == {"tp0": 2}
+
+        db = SessionLocal()
+        try:
+            assert db.query(Alert).filter(Alert.alert_id == "ALT-fallback-1").first() is not None
+            assert db.query(Alert).filter(Alert.alert_id == "ALT-fallback-2").first() is not None
+        finally:
+            db.close()
+
+    def test_duplicate_alert_id_within_one_batch_keeps_last_value(self):
+        offsets = process_batch([
+            (_valid_raw_item(alert_id="ALT-dup-1", severity="low"), "tp0", 0),
+            (_valid_raw_item(alert_id="ALT-dup-1", severity="high"), "tp0", 1),
+        ])
+        assert offsets == {"tp0": 2}
+
+        db = SessionLocal()
+        try:
+            rows = db.query(Alert).filter(Alert.alert_id == "ALT-dup-1").all()
+            assert len(rows) == 1
+            assert rows[0].severity == "high"
+        finally:
+            db.close()
 
 
 class TestDlqHelpers:
