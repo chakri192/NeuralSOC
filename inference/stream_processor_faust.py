@@ -1,10 +1,12 @@
 import asyncio
+import functools
 import logging
 import signal
 import sys
 import json
 import os
 import fcntl
+import time
 import uuid
 import threading
 import atexit
@@ -143,8 +145,26 @@ async def process_traffic(stream):
                     if query and len(query) <= 253:
                         async with _infer_pending_sem:
                             async with _infer_sem:
+                                # DeepLearningEngine.predict() already checks
+                                # a `deadline` at multiple points internally
+                                # (before starting, before tensor creation)
+                                # to bail out cooperatively -- but nothing
+                                # here ever passed one. Without it, the
+                                # asyncio.wait_for(timeout=5.0) below can
+                                # cancel the *awaiting coroutine*, but the
+                                # underlying OS thread in cpu_executor keeps
+                                # running the real PyTorch call regardless
+                                # (Python threads can't be forcibly killed);
+                                # a genuinely hung predict() would then
+                                # permanently consume one of only 4 worker
+                                # threads. Matching the same 5.0s budget lets
+                                # predict() itself notice and return early at
+                                # its own checkpoints instead of always
+                                # running to completion.
+                                deadline = time.time() + 5.0
                                 infer_future = asyncio.get_running_loop().run_in_executor(
-                                    cpu_executor, dl_engine.predict, dict(features), query
+                                    cpu_executor,
+                                    functools.partial(dl_engine.predict, dict(features), query, deadline=deadline),
                                 )
                                 with _futures_lock:
                                     _submitted_cpu_futures.add(infer_future)
