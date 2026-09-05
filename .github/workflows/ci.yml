@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 jobs:
-  enterprise-security-code-scan:
+  security-code-scan:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -25,42 +25,76 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install pytest python-dateutil jsonschema bandit flake8 pylint
+          pip install -r requirements-dev.txt
 
-      - name: Lint (fail on error)
-        run: flake8 . --exclude=.git,__pycache__,venv,tests/fixtures,inference/__pycache__,.pytest_cache --max-line-length=120 --count --show-source --statistics
+      - name: Lint -- genuine bugs (fail on error)
+        # E9 syntax errors, F63 invalid comparisons, F7 break/continue/
+        # return misuse, F82 undefined names -- the classes of bug this
+        # remediation found repeatedly shipping through CI unnoticed
+        # (three separate SyntaxErrors, a missing `import time`, a missing
+        # logger assignment). Style-only findings are reported separately
+        # below without blocking the build.
+        run: flake8 . --exclude=.git,__pycache__,venv,tests/fixtures,inference/__pycache__,.pytest_cache --select=E9,F63,F7,F82 --show-source
+
+      - name: Lint -- full style report (advisory, non-blocking)
+        run: flake8 . --exclude=.git,__pycache__,venv,tests/fixtures,inference/__pycache__,.pytest_cache --max-line-length=120 --count --statistics --exit-zero
 
       - name: Bandit security scan (high severity = fail)
-        run: bandit -r . -lll -ii -f json -o bandit-report.json
-        continue-on-error: false
+        run: bandit -r api inference ingest shared scripts -lll -ii -f json -o bandit-report.json
 
-      - name: Unit tests (fail if any error)
-        run: PYTHONPATH=. pytest tests/ -v --tb=short --durations=10
+      - name: Unit tests + coverage (fail if any error, or coverage regresses)
+        run: |
+          PYTHONPATH=. pytest tests/ -v --tb=short --durations=10 \
+            --cov=api --cov=inference --cov=shared --cov=ingest \
+            --cov-report=term-missing --cov-report=xml --cov-fail-under=40
 
       - name: Model integrity verification (real digest check)
         run: |
           echo "Verifying model hashes against tracked .sha256..."
           for f in models/*.pt; do
             base=$(basename "$f" .pt)
-            if [ -f "models/${base}.pt.sha256" ]; then
-              expected=$(cat "models/${base}.pt.sha256" | awk '{print $1}')
-              actual=$(sha256sum "$f" | awk '{print $1}')
-              if [ "$expected" != "$actual" ]; then
-                echo "FAIL: $f hash mismatch (expected $expected got $actual)"; exit 1
-              fi
-              echo "PASS: $f verified"
+            if [ ! -f "models/${base}.pt.sha256" ]; then
+              echo "FAIL: $f has no tracked .sha256 -- cannot verify, refusing to silently skip"; exit 1
             fi
+            expected=$(cat "models/${base}.pt.sha256" | awk '{print $1}')
+            actual=$(sha256sum "$f" | awk '{print $1}')
+            if [ "$expected" != "$actual" ]; then
+              echo "FAIL: $f hash mismatch (expected $expected got $actual)"; exit 1
+            fi
+            echo "PASS: $f verified"
           done
-          echo "Digest verification passed against tracked hashes"
 
-      - name: Build container (fail if build fails)
-        run: docker build -t tsoc:prod .
-
-      - name: Model signature verification (cosign / verify)
+      - name: Model provenance (cosign verify-blob, when configured)
         run: |
-          # Verify cnn_dga.pt.sig against model; fail if invalid
-          echo "Cosign verify step: cnn_dga.pt.sig present; rotate checks enforced"
-          if [ ! -f "models/cnn_dga.pt.sig" ]; then echo "FAIL: missing model sig"; exit 1; fi
+          # HONEST STATE: models/cnn_dga.pt.sig is a 64-character hex string
+          # (another SHA-256 digest, not a signature -- it doesn't even
+          # match the model's own hash) left over from before this repo had
+          # real signing infrastructure. Rather than a fake existence check
+          # that reported PASS regardless, this step does real cosign
+          # verification IFF a public key is configured via the
+          # COSIGN_PUBLIC_KEY secret, and otherwise reports the gap
+          # honestly instead of hiding it behind a green checkmark.
+          if [ -z "${COSIGN_PUBLIC_KEY:-}" ]; then
+            echo "::warning::COSIGN_PUBLIC_KEY not configured -- model provenance is NOT cryptographically verified. Wire up real Sigstore/KMS signing before relying on models/cnn_dga.pt.sig for anything."
+            exit 0
+          fi
+          curl -sSfL https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-amd64 -o /usr/local/bin/cosign
+          chmod +x /usr/local/bin/cosign
+          echo "$COSIGN_PUBLIC_KEY" > /tmp/cosign.pub
+          cosign verify-blob --key /tmp/cosign.pub --signature models/cnn_dga.pt.sig models/cnn_dga.pt
+        env:
+          COSIGN_PUBLIC_KEY: ${{ secrets.COSIGN_PUBLIC_KEY }}
+
+      - name: Build container
+        run: docker build -t tsoc:ci .
+
+      - name: Trivy vulnerability scan (container image, fail on HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: tsoc:ci
+          severity: 'HIGH,CRITICAL'
+          exit-code: '1'
+          ignore-unfixed: true
 
       - name: Load test / burst proof (must pass and not suppress)
         run: PYTHONPATH=. pytest tests/test_load.py -v --tb=short
@@ -72,25 +106,4 @@ jobs:
           name: security-reports
           path: |
             bandit-report.json
-            tests/
-
-  code-quality-scorecard:
-    runs-on: ubuntu-latest
-    needs: enterprise-security-code-scan
-    if: always()
-    steps:
-      - uses: actions/checkout@v4
-      - name: Rate Project (Enterprise Scorecard)
-        run: |
-          echo "================================================"
-          echo "ENTERPRISE PROJECT SCORECARD (Auto-generated)"
-          echo "================================================"
-          echo "CI Enforcement:          PASS (no || true suppression)"
-          echo "Digest Verification:     PASS (model hashes checked live)"
-          echo "Security Scan (Bandit):  PASS (high-severity fails build)"
-          echo "Unit Tests:              PASS (pytest exits non-zero on failure)"
-          echo "Build Enforcement:       PASS (docker build must succeed)"
-          echo "Overall Project Grade:   C+ -> B- (after CI fixes only)"
-          echo "NOTE: Ingestion logic bugs, missing TLS certs, and dashboard"
-          echo "      unsafe HTML remain source-level issues not fixed by CI."
-          echo "================================================"
+            coverage.xml
