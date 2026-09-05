@@ -306,7 +306,31 @@ else:
     DLQ_FILE_PATH = os.path.join(_base_dir, f"{_name}-{_pod_name}{_ext}") if _pod_name != "default" else _raw_dlq_path
 
 DLQ_LOCK_PATH = f"{DLQ_FILE_PATH}.lock"  # nosec B108
+DLQ_MAX_SIZE_MB = int(os.getenv("STREAM_DLQ_MAX_SIZE_MB", "100"))
+DLQ_ROTATE_COUNT = int(os.getenv("STREAM_DLQ_ROTATE_COUNT", "5"))
 _dlq_file_lock = threading.Lock()
+
+def _rotate_dlq_if_needed():
+    """Rotate DLQ_FILE_PATH when it exceeds DLQ_MAX_SIZE_MB, same
+    size-capped rotation api/kafka_sink.py already applies to its own local
+    DLQ file. Without this, a sustained Kafka outage lets every failed
+    publish append here forever with nothing to bound disk growth -- unlike
+    kafka_sink.py, which never had that gap. Must be called while already
+    holding the exclusive lock on DLQ_LOCK_PATH (see _write_local_dlq_fallback).
+    """
+    try:
+        if os.path.exists(DLQ_FILE_PATH) and (os.path.getsize(DLQ_FILE_PATH) / (1024 * 1024)) > DLQ_MAX_SIZE_MB:
+            for i in range(DLQ_ROTATE_COUNT - 1, 0, -1):
+                src, dst = f"{DLQ_FILE_PATH}.{i}", f"{DLQ_FILE_PATH}.{i + 1}"
+                if os.path.exists(src):
+                    os.replace(src, dst)
+            os.replace(DLQ_FILE_PATH, f"{DLQ_FILE_PATH}.1")
+            # Recreate empty, 0600-permissioned so a rotated-in file never
+            # briefly exists at the umask-default mode.
+            os.close(os.open(DLQ_FILE_PATH, os.O_CREAT | os.O_WRONLY, 0o600))
+            logger.info("Atomic rotated local disk DLQ file.")
+    except Exception as e:
+        logger.error("Local disk DLQ rotation failed: %s", e)
 
 def _write_local_dlq_fallback(payload: dict):
     """POSIX flock append-only DLQ fallback with strict 0600 file permissions."""
@@ -322,6 +346,7 @@ def _write_local_dlq_fallback(payload: dict):
             lock_fd = os.open(DLQ_LOCK_PATH, flags, 0o600)
             try:
                 fcntl.flock(lock_fd, fcntl.LOCK_EX)
+                _rotate_dlq_if_needed()
 
                 # Secure append file
                 fd = os.open(DLQ_FILE_PATH, flags, 0o600)

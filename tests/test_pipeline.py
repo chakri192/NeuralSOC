@@ -879,6 +879,62 @@ class TestSOCPipelineSecurity(unittest.TestCase):
         finally:
             sp.DLQ_FILE_PATH = orig_dlq_path
 
+    def test_dlq_rotates_when_oversized(self):
+        """A sustained Kafka outage must not let the local-disk DLQ fallback
+        grow without bound -- _rotate_dlq_if_needed() (mirroring
+        api/kafka_sink.py's identical rotation logic) rotates the file out
+        of the way before the next append once it exceeds DLQ_MAX_SIZE_MB."""
+        import tempfile
+        from inference.stream_processor_faust import _write_local_dlq_fallback
+        import inference.stream_processor_faust as sp
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            test_dlq_path = os.path.join(temp_dir, "dlq.jsonl")
+            orig_dlq_path = sp.DLQ_FILE_PATH
+            orig_lock_path = sp.DLQ_LOCK_PATH
+            orig_max_size = sp.DLQ_MAX_SIZE_MB
+            try:
+                sp.DLQ_FILE_PATH = test_dlq_path
+                sp.DLQ_LOCK_PATH = f"{test_dlq_path}.lock"
+                sp.DLQ_MAX_SIZE_MB = 0  # force rotation regardless of real size
+
+                _write_local_dlq_fallback({"alert_id": "first"})
+                _write_local_dlq_fallback({"alert_id": "second"})
+
+                self.assertTrue(os.path.exists(f"{test_dlq_path}.1"))
+                self.assertTrue(os.path.exists(test_dlq_path))
+                with open(f"{test_dlq_path}.1") as f:
+                    self.assertIn("first", f.read())
+                with open(test_dlq_path) as f:
+                    self.assertIn("second", f.read())
+            finally:
+                sp.DLQ_FILE_PATH = orig_dlq_path
+                sp.DLQ_LOCK_PATH = orig_lock_path
+                sp.DLQ_MAX_SIZE_MB = orig_max_size
+
+    def test_dlq_rotation_never_raises_on_filesystem_error(self):
+        import tempfile
+        from inference.stream_processor_faust import _rotate_dlq_if_needed
+        import inference.stream_processor_faust as sp
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            test_dlq_path = os.path.join(temp_dir, "dlq.jsonl")
+            with open(test_dlq_path, "w") as f:
+                f.write("x")
+
+            orig_dlq_path = sp.DLQ_FILE_PATH
+            orig_getsize = sp.os.path.getsize
+            orig_max_size = sp.DLQ_MAX_SIZE_MB
+            try:
+                sp.DLQ_FILE_PATH = test_dlq_path
+                sp.DLQ_MAX_SIZE_MB = 0
+                sp.os.path.getsize = MagicMock(side_effect=OSError("disk error"))
+                _rotate_dlq_if_needed()  # must not raise
+            finally:
+                sp.DLQ_FILE_PATH = orig_dlq_path
+                sp.os.path.getsize = orig_getsize
+                sp.DLQ_MAX_SIZE_MB = orig_max_size
+
     def test_graceful_shutdown_cancels_futures_and_exits(self):
         import inference.stream_processor_faust as sp
         from concurrent.futures import ThreadPoolExecutor
