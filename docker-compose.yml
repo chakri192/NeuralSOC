@@ -1,10 +1,14 @@
 version: "3.7"
 
+# No `platform:` pins: redpanda, postgres:15-alpine, and redis:7-alpine are
+# all published as real multi-arch manifests (amd64 + arm64). Pinning
+# linux/arm64 unconditionally forced QEMU emulation on the amd64 CI runner
+# this file is now also used from -- Docker already selects the correct
+# native image for whatever host runs `docker compose up` without a pin.
 services:
   redpanda:
     image: docker.redpanda.com/redpandadata/redpanda:v23.3.11
     container_name: soc-redpanda
-    platform: linux/arm64
     command:
       - redpanda
       - start
@@ -38,7 +42,6 @@ services:
   postgres:
     image: postgres:15-alpine
     container_name: soc-postgres
-    platform: linux/arm64
     environment:
       POSTGRES_USER: ${COMPOSE_POSTGRES_USER}
       POSTGRES_PASSWORD: ${COMPOSE_POSTGRES_PASSWORD}
@@ -58,7 +61,6 @@ services:
   redis:
     image: redis:7-alpine
     container_name: soc-redis
-    platform: linux/arm64
     # ${REDIS_PASSWORD:?...} (not :-) so Compose hard-fails on an unset
     # var instead of silently starting redis-server with auth disabled --
     # the previous ${REDIS_PASSWORD:-} default was the difference between

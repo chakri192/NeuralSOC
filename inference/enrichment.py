@@ -77,10 +77,18 @@ class ThreatEnricher:
             return {}
 
         try:
-            # Pinned allow-list: only ipapi.co; reject any redirect to other hosts (SSRF defense)
+            # Pinned allow-list: only ipwho.is; reject any redirect to other hosts (SSRF defense).
+            # ipapi.co's free tier caps out around 1,000 lookups/day (~1/min
+            # sustained) -- observed exhausting itself within seconds under
+            # real simulated traffic, after which every enrichment silently
+            # fell back to the offline heuristic for the rest of the run.
+            # ipwho.is is free, needs no API key or signup either, and its
+            # documented limits are materially higher for the same
+            # no-signup tier. Also allow-listed in
+            # k8s/cilium-identity-policy.yaml -- update both together.
             # Limit response read size to 64KB to prevent OOM
             response = await self.client.get(
-                f"https://ipapi.co/{clean_ip}/json/",
+                f"https://ipwho.is/{clean_ip}",
                 headers={'User-Agent': 'NeuralSOC-Enrichment/1.0'},
                 follow_redirects=False,  # Reject redirect-based SSRF
             )
@@ -89,7 +97,7 @@ class ThreatEnricher:
                 logger.warning("Enrichment response exceeded 64KB limit for %s; rejecting.", clean_ip)
                 return {}
             data = response.json()
-            if data and not data.get("error") and isinstance(data.get("ip"), str) and data.get("ip") == clean_ip:
+            if data and data.get("success") and isinstance(data.get("ip"), str) and data.get("ip") == clean_ip:
                 self._set_cached(clean_ip, data)
                 return data
         except httpx.HTTPError as e:
@@ -137,12 +145,21 @@ class ThreatEnricher:
             except Exception:
                 evidence = {}
 
-        if intel_data and not intel_data.get("error"):
+        # intel_data is either ipwho.is's raw response (top-level "country",
+        # nested "connection": {isp, org}, no "hosting" key) or the offline
+        # enrich_ip_intel() fallback's adapted shape ("country_name", "org",
+        # a real "hosting" bool) -- checked in that order so either shape
+        # populates the same evidence fields.
+        if intel_data:
+            connection = intel_data.get("connection") or {}
             city = intel_data.get('city') or 'Unknown'
-            country = intel_data.get('country_name') or intel_data.get('countryCode') or 'Unknown'
-            isp = intel_data.get('org') or intel_data.get('isp') or 'Unknown'
+            country = intel_data.get('country') or intel_data.get('country_name') or intel_data.get('country_code') or 'Unknown'
+            isp = connection.get('isp') or connection.get('org') or intel_data.get('org') or intel_data.get('isp') or 'Unknown'
             evidence["Live GeoIP"] = f"{city}, {country}"
             evidence["Live ISP"] = isp
+            # Only the offline fallback ever sets "hosting" -- ipwho.is's
+            # free tier has no bulletproof-hosting signal, same as ipapi.co's
+            # free tier before it.
             if intel_data.get("hosting"):
                 evidence["Threat Intel"] = "WARNING: Data Center / Bulletproof Hosting Detected"
 

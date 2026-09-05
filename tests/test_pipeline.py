@@ -142,10 +142,15 @@ class TestSOCPipelineSecurity(unittest.TestCase):
             self.assertIn("evidence", enriched)
             self.assertIn("Live GeoIP", enriched["evidence"])
 
-            # Second call should hit in-memory cache instantly
+            # Second call should hit in-memory cache instantly. Accepts
+            # either the live provider's raw shape ("country", ipwho.is)
+            # or the offline enrich_ip_intel() fallback's adapted shape
+            # ("country_name") -- this test hits the real network and
+            # falls back gracefully if it's unreachable in a given
+            # environment, so either is a valid "enrichment worked" signal.
             cached_val = enricher._get_cached("8.8.8.8")
             self.assertIsNotNone(cached_val)
-            self.assertIn("country_name", cached_val)
+            self.assertTrue("country" in cached_val or "country_name" in cached_val)
 
         asyncio.run(run_async_test())
 

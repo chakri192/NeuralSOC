@@ -59,14 +59,17 @@ spec:
         - ports:
             - port: "9092"
               protocol: TCP
-    # FQDN-based Threat Intelligence API (ipapi.co) via TLS with endpoint identity.
-    # A "toCIDR: [169.254.169.254/32, 169.254.0.0/16]" fragment previously sat
-    # here with no toPorts restriction -- invalid YAML as written (this file
-    # failed to parse), and had it parsed, an unrestricted allow-list straight
-    # to the cloud instance-metadata service. The only egress this rule needs
-    # is the FQDN allow below.
+    # FQDN-based Threat Intelligence API (ipwho.is) via TLS with endpoint
+    # identity. A "toCIDR: [169.254.169.254/32, 169.254.0.0/16]" fragment
+    # previously sat here with no toPorts restriction -- invalid YAML as
+    # written (this file failed to parse), and had it parsed, an
+    # unrestricted allow-list straight to the cloud instance-metadata
+    # service. The only egress this rule needs is the FQDN allow below.
+    # ipapi.co (the original provider) exhausted its free-tier rate limit
+    # within seconds under real traffic; ipwho.is is also free/no-API-key
+    # but with materially higher limits -- see inference/enrichment.py.
     - toFQDNs:
-        - matchName: "ipapi.co"
+        - matchName: "ipwho.is"
       toPorts:
         - ports:
             - port: "443"

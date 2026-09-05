@@ -142,3 +142,120 @@ jobs:
             coverage.xml
             sbom.cyclonedx.json
             models/*.cosign.bundle
+
+  # Every test above -- unit, integration, load -- calls process_traffic.fun()
+  # directly with a fake async generator, or mocks Redis/Kafka entirely. None
+  # of them go through Faust's real topic deserialization or a real TLS
+  # handshake against the actual docker-compose services. Running the real
+  # stack once, manually, immediately found three bugs no amount of mocked
+  # testing could: value_type=dict crashing every message (faust-streaming
+  # has no dict branch in its deserializer), Redis silently requiring mutual
+  # TLS neither client was built to present, and the rate limiter's Redis
+  # connection having no way to trust a custom CA. This job is that manual
+  # check, automated, so the same class of bug can't silently reappear.
+  integration-smoke-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Generate dev TLS certs for Redis
+        run: scripts/generate_dev_certs.sh
+
+      - name: Start Redpanda + Redis (real docker-compose services)
+        # Written to $GITHUB_ENV, not this step's own env: -- values set
+        # this way are automatically available as plain environment
+        # variables in every later step in this job, which is what the
+        # pipeline-startup and alert-assertion steps below rely on.
+        run: |
+          echo "TSOC_API_KEY=$(openssl rand -hex 24)" >> "$GITHUB_ENV"
+          echo "TSOC_JWT_SECRET=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
+          echo "REDIS_PASSWORD=$(openssl rand -hex 16)" >> "$GITHUB_ENV"
+          echo "COMPOSE_POSTGRES_USER=soc_admin" >> "$GITHUB_ENV"
+          echo "COMPOSE_POSTGRES_PASSWORD=$(openssl rand -hex 16)" >> "$GITHUB_ENV"
+          set -a && source "$GITHUB_ENV" && set +a
+          docker compose up -d redpanda redis
+
+      - name: Wait for Redpanda to report healthy
+        run: |
+          for i in $(seq 1 30); do
+            status=$(docker inspect --format='{{.State.Health.Status}}' soc-redpanda 2>/dev/null || echo "starting")
+            [ "$status" = "healthy" ] && echo "Redpanda healthy" && exit 0
+            sleep 3
+          done
+          echo "Redpanda never became healthy"; docker logs soc-redpanda; exit 1
+
+      - name: Create Kafka topics
+        run: scripts/create_topics.sh
+
+      - name: Start the real pipeline (API, Faust worker, kafka_sink)
+        run: |
+          export DATABASE_URL="sqlite:///$(pwd)/tsoc_ci_smoke.db"
+          export REDIS_SSL=true
+          export REDIS_CA_CERT_PATH="$(pwd)/certs/ca.crt"
+          export DB_SSLMODE=verify-full
+          export FAUST_DATADIR=/tmp/faust-ci-data
+          export REDPANDA_BROKERS=localhost:9092
+          export ENABLE_DOCS=false
+          mkdir -p /tmp/faust-ci-data logs
+
+          nohup python -m uvicorn api.main:app --host 127.0.0.1 --port 8000 > logs/ci_api.log 2>&1 &
+          nohup python inference/stream_processor_faust.py worker -l info > logs/ci_faust.log 2>&1 &
+          nohup python api/kafka_sink.py > logs/ci_kafka_sink.log 2>&1 &
+
+          for i in $(seq 1 20); do
+            api_ok=$(curl -sf http://localhost:8000/healthz > /dev/null && echo yes || echo no)
+            faust_ok=$(curl -sf http://localhost:6066/healthz > /dev/null && echo yes || echo no)
+            [ "$api_ok" = "yes" ] && [ "$faust_ok" = "yes" ] && echo "API and Faust worker both healthy" && exit 0
+            sleep 2
+          done
+          echo "Pipeline did not become healthy in time"
+          echo "--- API log ---"; cat logs/ci_api.log
+          echo "--- Faust log ---"; cat logs/ci_faust.log
+          exit 1
+        # TSOC_API_KEY / TSOC_JWT_SECRET / REDIS_PASSWORD need no explicit
+        # env: mapping here -- values appended to $GITHUB_ENV in the
+        # "Start Redpanda + Redis" step above are automatically exposed as
+        # plain environment variables in every later step of this job.
+
+      - name: Feed real synthetic attack traffic
+        run: |
+          export REDPANDA_BROKERS=localhost:9092
+          timeout 20 python ingest/simulator.py --scenario mixed --burst > logs/ci_simulator.log 2>&1 || true
+          sleep 5
+
+      - name: Assert real alerts actually landed (the point of this job)
+        run: |
+          resp=$(curl -sf "http://localhost:8000/api/v1/alerts?limit=10" -H "Authorization: Bearer ${TSOC_API_KEY}")
+          count=$(echo "$resp" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))")
+          echo "Alerts returned by the real API: $count"
+          if [ "$count" -lt 1 ]; then
+            echo "FAIL: real synthetic traffic through the real pipeline produced zero alerts"
+            echo "--- simulator log ---"; cat logs/ci_simulator.log
+            echo "--- Faust log (tail) ---"; tail -100 logs/ci_faust.log
+            echo "--- kafka_sink log (tail) ---"; tail -100 logs/ci_kafka_sink.log
+            exit 1
+          fi
+          echo "PASS: the real pipeline (Redpanda -> Faust -> Redis correlation -> kafka_sink -> Postgres/API) produced $count real alert(s)"
+
+      - name: Dump logs (always, for debugging)
+        if: always()
+        run: |
+          echo "--- API ---"; tail -50 logs/ci_api.log 2>&1 || true
+          echo "--- Faust ---"; tail -50 logs/ci_faust.log 2>&1 || true
+          echo "--- kafka_sink ---"; tail -50 logs/ci_kafka_sink.log 2>&1 || true
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
