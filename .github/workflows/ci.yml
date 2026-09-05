@@ -197,14 +197,23 @@ jobs:
           set -a && source "$GITHUB_ENV" && set +a
           docker compose up -d redpanda redis
 
-      - name: Wait for Redpanda to report healthy
+      - name: Wait for Redpanda and Redis to report healthy
+        # This job's first real run got past Redpanda's own wait check
+        # fine, then hit "Connection refused" on Redis from the Faust
+        # worker moments later -- docker-compose.yml's redis service had
+        # no healthcheck at all to wait on, so nothing here was actually
+        # confirming it was ready before the pipeline started.
         run: |
-          for i in $(seq 1 30); do
-            status=$(docker inspect --format='{{.State.Health.Status}}' soc-redpanda 2>/dev/null || echo "starting")
-            [ "$status" = "healthy" ] && echo "Redpanda healthy" && exit 0
-            sleep 3
+          for svc in soc-redpanda soc-redis; do
+            for i in $(seq 1 30); do
+              status=$(docker inspect --format='{{.State.Health.Status}}' "$svc" 2>/dev/null || echo "starting")
+              [ "$status" = "healthy" ] && echo "$svc healthy" && break
+              sleep 3
+              if [ "$i" = "30" ]; then
+                echo "$svc never became healthy"; docker logs "$svc"; exit 1
+              fi
+            done
           done
-          echo "Redpanda never became healthy"; docker logs soc-redpanda; exit 1
 
       - name: Create Kafka topics
         run: scripts/create_topics.sh

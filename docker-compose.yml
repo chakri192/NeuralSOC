@@ -89,6 +89,22 @@ services:
       - ./certs:/certs:ro
     networks:
       - soc-net
+    # redpanda and postgres above both have a real healthcheck; this
+    # service never did. A caller (CI, or a human) that only waits on
+    # redpanda's health before starting the app can race redis's own
+    # startup -- confirmed directly: CI's integration-smoke-test job hit
+    # exactly this, "Connection refused" on 6379, because nothing here
+    # ever signaled "ready" for anything to wait on. REDIS_PASSWORD needs
+    # to be a real env var in the container (not just substituted into
+    # `command` above at compose-parse time) for the healthcheck's own
+    # shell to read it back.
+    environment:
+      REDIS_PASSWORD: "${REDIS_PASSWORD:?REDIS_PASSWORD must be set}"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -h 127.0.0.1 -p 6379 --tls --cacert /certs/ca.crt -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
 volumes:
   redpanda-data:
