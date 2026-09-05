@@ -42,3 +42,6 @@ def get_db():
         yield db
     finally:
         db.close()
+
+# MIGRATION: index for cursor pagination
+# execute via alembic or sqlalchemy event: Index('ix_alert_id_desc', Alert.id.desc()).create(bind=engine)

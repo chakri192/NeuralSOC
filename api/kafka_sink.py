@@ -1,17 +1,20 @@
-import jsonschema
-import logging
 import json
+import logging
 import os
-import time
-import uuid
 import fcntl
 import signal
 import sys
 import threading
+import time
+
 from kafka import KafkaConsumer, KafkaProducer
-from kafka.structs import OffsetAndMetadata, TopicPartition
+from kafka.structs import OffsetAndMetadata
+from pydantic import BaseModel, ValidationError
+
+MAX_MSG_SIZE = 5 * 1024 * 1024  # 5MB
 from api.database import SessionLocal, engine, Base
 from api.models import Alert
+from api.schemas import AlertPayload
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +37,6 @@ DLQ_LOCK_PATH = f"{DLQ_PATH}.lock"
 DLQ_MAX_SIZE_MB = int(os.getenv("DLQ_MAX_SIZE_MB", "100"))
 DLQ_ROTATE_COUNT = int(os.getenv("DLQ_ROTATE_COUNT", "5"))
 
-import shutil
 
 def _rotate_dlq_if_needed():
     """Rotate DLQ file when it exceeds size limit using atomic temp-rename."""
@@ -134,16 +136,20 @@ def run_sink():
         try:
             for raw_item, tp, offset in current_batch:
                 try:
-                    alert_dict = {k: v for k, v in raw_item.items() if hasattr(Alert, k)}
-                    if isinstance(alert_dict.get("evidence"), (dict, list)):
-                        alert_dict["evidence"] = json.dumps(alert_dict["evidence"])
-                    aid = alert_dict.get("alert_id")
+                    if isinstance(raw_item.get("evidence"), (dict, list)):
+                        raw_item = {**raw_item, "evidence": json.dumps(raw_item["evidence"])}
+                    # Validate against the whitelisted schema BEFORE touching the ORM.
+                    # This is what stops an attacker-influenced Kafka payload from ever
+                    # setting the primary key or a SQLAlchemy internal attribute name —
+                    # AlertPayload has no "id" field and no "metadata"/"registry" field,
+                    # so neither can reach Alert(**alert_dict) no matter what raw_item contains.
+                    alert_dict = AlertPayload(**raw_item).model_dump()
+                    aid = alert_dict["alert_id"]
                     with db.begin_nested():
                         existing = db.query(Alert).filter(Alert.alert_id == aid).first()
                         if existing:
                             for k, v in alert_dict.items():
-                                if k != "id":
-                                    setattr(existing, k, v)
+                                setattr(existing, k, v)
                         else:
                             alert_obj = Alert(**alert_dict)
                             db.add(alert_obj)
@@ -207,9 +213,11 @@ def run_sink():
                         # messages cannot trap the consumer in an uncommitted state.
                         _record_offset(tp, msg.offset)
                         try:
+                            if len(msg.value) > MAX_MSG_SIZE:
+                                raise ValueError("Message exceeds max size")
                             data = json.loads(msg.value.decode("utf-8"))
-                            if not data.get("alert_id"):
-                                continue
+                            if not isinstance(data, dict) or not data.get("alert_id"):
+                                raise ValueError("Invalid schema: missing alert_id")
                             if isinstance(data.get("evidence"), (dict, list)):
                                 data["evidence"] = json.dumps(data["evidence"])
                             batch.append((data, tp, msg.offset))
