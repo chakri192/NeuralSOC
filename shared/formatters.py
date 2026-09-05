@@ -1,7 +1,23 @@
 """
 Standardized formatters to enforce strict visual consistency for timestamps, null values, and evidence categorization.
 """
+import re
 import dateutil.parser
+
+_MARKDOWN_SPECIAL_CHARS = re.compile(r'([\\`*_{}\[\]()#+\-.!|>~])')
+
+
+def escape_markdown(value) -> str:
+    """Escapes CommonMark/Streamlit markdown metacharacters in a value
+    before it's interpolated into st.markdown(). Network evidence (a DNS
+    query string, a JA4 fingerprint) is attacker-influenced -- anyone who
+    can cause a query on the monitored network controls it -- and without
+    this, a crafted value can break out of the surrounding backticks and
+    render as a clickable link or trigger an outbound image fetch the
+    instant an analyst opens the incident. Escaping doesn't change how
+    ordinary values render: CommonMark consumes the backslash and shows
+    the literal character, so "10.0.0.1" still displays as "10.0.0.1"."""
+    return _MARKDOWN_SPECIAL_CHARS.sub(r'\\\1', str(value))
 
 def format_timestamp(iso_str: str) -> str:
     """Consistently formats ISO-8601 strings into readable UTC."""

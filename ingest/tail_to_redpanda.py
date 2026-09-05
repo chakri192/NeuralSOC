@@ -17,7 +17,13 @@ SENSOR_ID = os.getenv("SENSOR_ID", "sensor-01")
 try:
     producer = KafkaProducer(
         bootstrap_servers=[BROKERS],
-        value_serializer=lambda v: json.dumps(v).encode('utf-8') if isinstance(v, dict) else str(v).encode('utf-8'),
+        # default=str (not a str(v)/repr fallback for non-dict values) --
+        # the previous fallback emitted a Python repr with single quotes
+        # for anything that wasn't already a dict, which json.loads in any
+        # consumer rejects outright. Every current call site here passes a
+        # dict, so this was latent, not yet triggered -- but one non-dict
+        # value away from silently producing unparseable messages.
+        value_serializer=lambda v: json.dumps(v, default=str).encode('utf-8'),
         retries=5,
         acks='all',
         max_request_size=5242880 # 5MB limit
@@ -39,41 +45,43 @@ def handle_sigint(sig, frame):
 signal.signal(signal.SIGINT, handle_sigint)
 
 def process_log(file_path, log_type):
-    global metrics
+    # `metrics` is only ever mutated in place (metrics["read"] += 1, etc.),
+    # never rebound -- `global` is not needed for that and pyflakes
+    # correctly flags it as dead (F824).
     print(f"[Tailer] Tailing {file_path} as type '{log_type}'...")
-    
+
     # Touch file if it doesn't exist so tail doesn't fail
     if not os.path.exists(file_path):
         open(file_path, 'a').close()
 
+    proc = subprocess.Popen(['tail', '-F', file_path], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
     try:
-        proc = subprocess.Popen(['tail', '-F', file_path], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
         while running:
             line = proc.stdout.readline()
             if not line:
                 time.sleep(0.1)
                 continue
-            
+
             metrics["read"] += 1
             line = line.strip()
             if not line:
                 continue
-            
+
             try:
                 event = json.loads(line)
-                
+
                 # Strict Schema Validation Constraint
                 if not validate_zeek_event(event):
                     raise ValueError("Missing required Zeek fields (ts)")
-                    
+
                 # Enrichment
                 event["ingestion_timestamp"] = time.time()
                 event["sensor_id"] = SENSOR_ID
                 event["event_type"] = log_type
-                
+
                 producer.send("raw_traffic", value=event)
                 metrics["published"] += 1
-                
+
             except (json.JSONDecodeError, ValueError) as e:
                 metrics["rejected"] += 1
                 # Dead letter queue routing Constraint
@@ -85,9 +93,26 @@ def process_log(file_path, log_type):
                 }
                 producer.send("dead_letter_events", value=dl_event)
                 metrics["dead_lettered"] += 1
-                
+            except Exception as send_err:
+                # A Kafka-side failure (e.g. MessageSizeTooLargeError) on
+                # ONE line must not escape the loop -- previously this was
+                # only caught by the outer handler below, which ends the
+                # `while running` loop entirely: one oversized line
+                # permanently stopped ingestion for this log type while the
+                # process kept running and looked healthy.
+                metrics["rejected"] += 1
+                print(f"[Tailer] Failed to publish line from {file_path}: {send_err}")
+
     except Exception as e:
         print(f"[Tailer] Error tailing {file_path}: {e}")
+    finally:
+        # Previously never reaped: the tail subprocess and its pipe leaked
+        # on every thread exit (SIGINT, or an unhandled error above).
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
 
 def main():
     parser = argparse.ArgumentParser()

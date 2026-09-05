@@ -11,13 +11,34 @@ import time
 import logging
 from datetime import datetime, timezone
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("data_access")
 
-API_URL = os.getenv("API_URL", "http://127.0.0.1:8000/api/v1")
-API_KEY = os.environ.get("TSOC_API_KEY", "")
-if not API_KEY:
-    raise RuntimeError("TSOC_API_KEY not set")
+
+class ConfigError(RuntimeError):
+    """Raised by _load_config() when required dashboard config (API_URL,
+    TSOC_API_KEY) is missing or invalid. Deliberately NOT raised at import
+    time or from DataStreamManager.__new__ -- this module used to raise a
+    bare RuntimeError at import, which meant simply importing it (as any
+    test, or the dashboard itself under Makefile's `dashboard` target,
+    which sets neither env var) crashed before a single Streamlit
+    component rendered. _init_state() now catches this and stores it on
+    the instance; the dashboard shows the existing "pipeline unavailable"
+    empty state instead of crashing outright."""
+
+
+def _load_config():
+    api_url = os.getenv("API_URL")
+    if api_url is None:
+        api_url = "http://127.0.0.1:8000/api/v1"  # local dev default (loopback only)
+    elif not api_url.startswith("https://"):
+        raise ConfigError("API_URL must use HTTPS when explicitly set")
+
+    api_key = os.environ.get("TSOC_API_KEY", "")
+    if not api_key:
+        raise ConfigError("TSOC_API_KEY not set")
+
+    return api_url, api_key
+
 
 class DataStreamManager:
     _instance = None
@@ -37,14 +58,29 @@ class DataStreamManager:
         self.is_running = False
         self.broker_healthy = False
         self.last_event_time = 0.0
+        self.config_error = None
+        self.api_url = None
+
+        api_key = None
+        try:
+            self.api_url, api_key = _load_config()
+        except ConfigError as e:
+            self.config_error = str(e)
+            logger.error("[DataAccess] Configuration error: %s", e)
 
         self.session = requests.Session()
-        self.session.headers.update({
-            "Authorization": f"Bearer {API_KEY}",
-            "X-API-Key": API_KEY
-        })
+        if api_key:
+            self.session.headers.update({
+                "Authorization": f"Bearer {api_key}",
+            })
 
     def start_listeners(self):
+        logging.basicConfig(level=logging.INFO)
+        if self.config_error:
+            # Nothing to poll; broker_healthy stays False and the dashboard
+            # renders its existing "pipeline unavailable" state rather than
+            # this thread starting against a URL/key that don't exist.
+            return
         with self._lock:
             if self.is_running:
                 return
@@ -55,15 +91,26 @@ class DataStreamManager:
     def _poll_api(self):
         while self.is_running:
             try:
-                # Short timeouts; do not block indefinitely
-                resp_alerts = self.session.get(f"{API_URL}/alerts?limit=200", timeout=3)
+                # Short timeouts; do not block indefinitely.
+                # limit=100 matches the API's server-side cap (Query(..., le=100));
+                # requesting 200 here used to get a 422 on every single poll.
+                resp_alerts = self.session.get(f"{self.api_url}/alerts?limit=100", timeout=3)
                 if resp_alerts.status_code == 200:
                     data = resp_alerts.json()
                     if isinstance(data, list):
                         self.alerts = data
                         self.broker_healthy = True
                         self.last_event_time = time.time()
-                resp_stats = self.session.get(f"{API_URL}/stats", timeout=3)
+                else:
+                    # A non-2xx response (401, 422, 500, ...) doesn't raise
+                    # in `requests`, so without this branch broker_healthy
+                    # could silently stay at whatever it last was -- a
+                    # stale "healthy" reading against a backend that is
+                    # actually rejecting every request.
+                    self.broker_healthy = False
+                    logger.warning("[DataAccess] /alerts returned %s", resp_alerts.status_code)
+
+                resp_stats = self.session.get(f"{self.api_url}/stats", timeout=3)
                 if resp_stats.status_code == 200:
                     stats_data = resp_stats.json()
                     if isinstance(stats_data, dict):

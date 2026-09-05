@@ -23,7 +23,11 @@ expected = sha_path.read_text().split()[0].strip()
 # Read model once into memory to prevent TOCTOU race
 model_bytes = path.read_bytes()
 actual = hashlib.sha256(model_bytes).hexdigest()
-assert secrets.compare_digest(actual, expected), f"Model SHA mismatch: {actual} != {expected}"
+# A bare `assert` is stripped entirely under `python -O` -- an integrity
+# gate that silently no-ops in optimized mode is worse than no gate.
+if not secrets.compare_digest(actual, expected):
+    print(f"FAIL: Model SHA mismatch: {actual} != {expected}", file=sys.stderr)
+    sys.exit(1)
 
 # Load from in-memory stream after hash verification
 try:
