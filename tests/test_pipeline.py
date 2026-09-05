@@ -1,16 +1,40 @@
 import unittest
 import asyncio
 import os
-import json
-import time
 from unittest.mock import MagicMock, patch
+
+import fakeredis
 
 from inference.models import DeepLearningEngine
 from inference.correlation import IncidentCorrelator
 from inference.enrichment import ThreatEnricher
-from api.main import _validate_ip, _is_trusted_proxy, get_remote_address
+from api.deps import _validate_ip, _is_trusted_proxy, get_remote_address
 
 class TestSOCPipelineSecurity(unittest.TestCase):
+    def _make_correlator(self):
+        """Construct a real IncidentCorrelator backed by an isolated,
+        in-memory fakeredis instance (with Lua/EVAL support via
+        fakeredis[lua]) instead of requiring a live Redis server.
+        Previously these tests silently no-op'd via
+        `except Exception: print("Redis test skipped")` whenever no local
+        Redis was reachable -- meaning this coverage never actually
+        executed in CI, where no Redis is running."""
+        os.environ.setdefault("REDIS_PASSWORD", "test-only-redis-password-do-not-use-in-prod")
+        os.environ.setdefault("REDIS_SSL", "false")
+        fake = fakeredis.FakeStrictRedis(decode_responses=True)
+        patcher = patch("inference.correlation.redis.Redis", return_value=fake)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        correlator = IncidentCorrelator()
+        # fakeredis does not implement INFO (used only to confirm this
+        # instance is talking to a primary, not a read replica) -- that is
+        # a topology concern orthogonal to what these tests exercise, so
+        # bypass it rather than mocking INFO's full reply format.
+        master_patcher = patch.object(correlator, "check_redis_master", return_value=True)
+        master_patcher.start()
+        self.addCleanup(master_patcher.stop)
+        return correlator
+
     def test_ip_validation_and_proxy_trust(self):
         # Valid IPv4 and IPv6
         self.assertEqual(_validate_ip("192.168.1.1"), "192.168.1.1")
@@ -21,7 +45,15 @@ class TestSOCPipelineSecurity(unittest.TestCase):
         # Proxy trust check
         self.assertTrue(_is_trusted_proxy("127.0.0.1"))
         self.assertTrue(_is_trusted_proxy("::1"))
-        self.assertFalse(_is_trusted_proxy("10.244.1.5"))  # removed from allowlist
+        # 10.244.0.0/16 is the documented default trusted range (README.md's
+        # "Trusted Proxy / CIDR Allow-list" section, api/deps.py's own
+        # default, and k8s/soc-deployment.yaml's explicit TRUSTED_PROXY_CIDRS
+        # all agree it's the standard K8s pod/ingress subnet, intentionally
+        # trusted) -- and test_w3c_trace_context_propagation below asserts
+        # the same range IS trusted. This line's old "removed from
+        # allowlist" comment contradicted every other source of truth in
+        # the repo; it was never actually implemented.
+        self.assertTrue(_is_trusted_proxy("10.244.1.5"))
         self.assertFalse(_is_trusted_proxy("172.16.0.10"))
         # External untrusted IP
         self.assertFalse(_is_trusted_proxy("203.0.113.50"))
@@ -59,7 +91,7 @@ class TestSOCPipelineSecurity(unittest.TestCase):
         self.assertIsInstance(prob, float)
 
     def test_correlator_multi_alert_aggregation(self):
-        correlator = IncidentCorrelator()
+        correlator = self._make_correlator()
         test_ip = "192.168.100.42"
 
         alert1 = {
@@ -79,29 +111,23 @@ class TestSOCPipelineSecurity(unittest.TestCase):
             "mitre_tactic": "Command and Control"
         }
 
-        # Clear existing keys for test isolation
-        try:
-            correlator.redis.delete(f"{{{test_ip}}}:alerts", f"{{{test_ip}}}:alerts:cnt", f"{{{test_ip}}}:dedup:C2_Beaconing", f"{{{test_ip}}}:dedup:Reconnaissance")
-        except Exception:
-            pass
+        inc1 = correlator.add_alert(alert1)
+        # First alert alone should not trigger incident (threshold len >= 2)
+        self.assertIsNone(inc1)
 
-        try:
-            inc1 = correlator.add_alert(alert1)
-            # First alert alone should not trigger incident (threshold len >= 2)
-            self.assertIsNone(inc1)
-
-            inc2 = correlator.add_alert(alert2)
-            # Second alert triggers incident
-            if inc2:
-                self.assertEqual(inc2["source_ip"], test_ip)
-                # Verify that both threat classes and alert IDs were aggregated
-                self.assertIn("C2 Beaconing", inc2["threat_classes"])
-                self.assertIn("ALT-002", inc2["related_alert_ids"])
-                self.assertEqual(inc2["severity"], "high")
-                self.assertGreaterEqual(inc2["risk_score"], 75.0)
-        except Exception as e:
-            # Skip if Redis server is not running locally during unit test
-            print(f"Redis test skipped: {e}")
+        inc2 = correlator.add_alert(alert2)
+        # Second alert must trigger an incident -- this is the exact
+        # behavior that silently stopped working repo-wide when the Redis
+        # connection pool's invalid ssl= kwarg made every real command
+        # raise, which a broad `except Exception` swallowed as "Redis is
+        # down." With that fixed, this must now actually fire.
+        self.assertIsNotNone(inc2)
+        self.assertEqual(inc2["source_ip"], test_ip)
+        # Verify that both threat classes and alert IDs were aggregated
+        self.assertIn("C2 Beaconing", inc2["threat_classes"])
+        self.assertIn("ALT-002", inc2["related_alert_ids"])
+        self.assertEqual(inc2["severity"], "high")
+        self.assertGreaterEqual(inc2["risk_score"], 75.0)
 
     def test_enrichment_cache_and_fallback(self):
         async def run_async_test():
@@ -211,53 +237,216 @@ class TestSOCPipelineSecurity(unittest.TestCase):
         self.assertNotEqual(enricher._get_cached("1.1.1.1"), {})
         self.assertNotEqual(enricher._get_cached("4.4.4.4"), {})
 
-    def test_dynamic_model_hot_reload(self):
+    def test_pcap_ingester_parses_tcp_and_udp_flows(self):
+        """Regression test: pkt[proto] indexed Scapy layers by a lowercase
+        string ("tcp"/"udp") instead of the layer class (TCP/UDP), raising
+        IndexError on the very first IP packet -- this ingester parsed
+        ZERO packets, ever, regardless of pcap content."""
+        import tempfile
+        from scapy.all import IP, TCP, UDP, Ether, wrpcap
+        from ingest.pcap_ingester import ingest_pcap
+
+        pkts = [Ether() / IP(src="10.0.0.1", dst="10.0.0.2") / TCP(sport=12345, dport=443) / ("X" * 100)
+                for _ in range(20)]
+        pkts += [Ether() / IP(src="10.0.0.3", dst="8.8.8.8") / UDP(sport=53000, dport=53) / ("Y" * 50)
+                 for _ in range(10)]
+
+        with tempfile.NamedTemporaryFile(suffix=".pcap") as f:
+            wrpcap(f.name, pkts)
+
+            sent = []
+
+            class FakeProducer:
+                def __init__(self, *a, **kw):
+                    pass
+
+                def send(self, topic, payload):
+                    sent.append(payload)
+
+                def flush(self):
+                    pass
+
+            with patch("ingest.pcap_ingester.KafkaProducer", FakeProducer):
+                ingest_pcap(f.name, broker="fake:9092", topic="raw_traffic")
+
+        self.assertEqual(len(sent), 2, "expected exactly one TCP flow and one UDP flow")
+        by_proto = {p["proto"]: p for p in sent}
+        self.assertEqual(by_proto["tcp"]["orig_pkts"], 20)
+        self.assertEqual(by_proto["udp"]["orig_pkts"], 10)
+
+    def test_slice_budget_is_shared_fairly_across_domain_variants(self):
+        """Regression test for a multi-segment-inspection bug: with a
+        SHARED, unbounded-per-variant 32-slice pool, the first
+        domains_to_check entry (the full domain) could claim as many
+        slices as it naturally produced, starving later entries --
+        including the punycode/homoglyph variant and individual
+        subdomain-chunk labels this defense exists to inspect. A
+        DNS-tunneling-style domain (many encoded chunks, mirroring real
+        exfiltration patterns) produces exactly 8 domains_to_check entries
+        here (the full domain, the SLD, and 6 of its many qualifying
+        chunks -- domains_to_check is itself capped at 8). Every one of
+        those 8 must contribute at least one slice; the fair-share budget
+        (32 // 8 = 4 per variant) must also cap any single variant's
+        contribution well under the full 32-slice pool."""
+        import torch as real_torch
+        engine = DeepLearningEngine()
+
+        chunks = ["aaaabbbbcc" for _ in range(20)]  # 20 ten-char labels: realistic tunneling chunking
+        domain = ".".join(chunks) + ".tunnel-exfil.example"
+
+        call_sizes = []
+        original_tensor = real_torch.tensor
+
+        def _spy_tensor(data, *args, **kwargs):
+            call_sizes.append(len(data))
+            return original_tensor(data, *args, **kwargs)
+
+        with patch("inference.models.torch.tensor", side_effect=_spy_tensor):
+            engine.predict({}, domain)
+
+        self.assertTrue(call_sizes, "model was never invoked")
+        total_slices = call_sizes[0]
+        # >= 8: every domains_to_check entry (capped at 8) got at least
+        # one slice -- none were starved out by an earlier, longer variant.
+        self.assertGreaterEqual(total_slices, 8)
+        # <= 32: still bounded, per-variant fairness didn't remove the cap.
+        self.assertLessEqual(total_slices, 32)
+
+    def test_rules_thresholds_do_not_flag_ordinary_cdn_traffic(self):
+        """Regression test for the empirically-inverted thresholds: entropy
+        over the whole FQDN and a bare JA4 version-prefix both fired on
+        ordinary traffic. These are the exact hostnames/fingerprint
+        measured during the audit."""
+        from inference.features import extract_features
+        from inference.rules import evaluate_rules
+
+        benign_cdn_queries = [
+            "dpm2x4qnl8k9v.cloudfront.net",
+            "1drv-b8f3ac9e2.sharepoint.com",
+            "k8s-prod-7f9a2c.elb.amazonaws.com",
+            "5f4dcc3b5aa765d61d8327deb882cf99.gravatar.com",
+        ]
+        for query in benign_cdn_queries:
+            event = {"event_type": "dns", "query": query, "qtype_name": "A"}
+            alerts = evaluate_rules(event, extract_features(event))
+            self.assertEqual(alerts, [], f"false positive on benign CDN query: {query}")
+
+        # A long, genuinely random-looking domain must still fire.
+        event = {"event_type": "dns", "query": "kxqzjwvbnplfmtrshdycg.xyz", "qtype_name": "A"}
+        alerts = evaluate_rules(event, extract_features(event))
+        self.assertEqual([a["rule_id"] for a in alerts], ["RULE_DNS_DGA_FALLBACK"])
+
+        # Ordinary Chrome/Firefox/curl TLS 1.3 no longer reads as malware.
+        alerts = evaluate_rules({"event_type": "conn", "ja4": "t13d1516h2_8daaf6152771_02713d6af862"}, {})
+        self.assertEqual(alerts, [])
+        # The demo injector's synthetic fingerprint still fires (demo stays functional).
+        alerts = evaluate_rules({"event_type": "conn", "ja4": "t13d000000_rare_fingerprint"}, {})
+        self.assertEqual([a["rule_id"] for a in alerts], ["RULE_TLS_JA4_MALWARE"])
+
+        # A single rejected connection (one closed port) is no longer a
+        # critical DDoS alert; real volume still is.
+        alerts = evaluate_rules({"event_type": "conn", "conn_state": "REJ", "orig_pkts": 3}, {})
+        self.assertEqual(alerts, [])
+        alerts = evaluate_rules({"event_type": "conn", "conn_state": "S0", "orig_pkts": 15000}, {})
+        self.assertEqual([(a["rule_id"], a["severity"]) for a in alerts], [("RULE_DDOS_VOLUMETRIC", "critical")])
+
+    def test_hot_reload_from_mutable_disk_is_disabled_by_design(self):
+        """_recheck_integrity() is intentionally a no-op ("DISABLED:
+        hot-reload from mutable disk files is disabled. Load once at
+        startup from immutable container-image artifact.") -- swapping a
+        loaded ML model at runtime from a mutable path is itself a
+        plausible attack vector, so this asserts the model and its
+        expected hash are pinned for the process lifetime, not that a new
+        artifact on disk gets picked up."""
         engine = DeepLearningEngine()
         initial_sha = engine._expected_sha
-        self.assertIsNotNone(engine.model)
+        initial_model = engine.model
+        self.assertIsNotNone(initial_model)
 
-        # Mock loading a newly retrained model with valid hash
         mock_new_model = MagicMock()
         mock_new_sha = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
 
         with patch.object(engine, "_load_model_from_disk", return_value=(mock_new_model, mock_new_sha)):
             success = engine._recheck_integrity()
             self.assertTrue(success)
-            self.assertEqual(engine._expected_sha, mock_new_sha)
-            self.assertEqual(engine.model, mock_new_model)
+            self.assertEqual(engine._expected_sha, initial_sha)
+            self.assertEqual(engine.model, initial_model)
 
     def test_homogeneous_attack_correlation(self):
-        correlator = IncidentCorrelator()
+        correlator = self._make_correlator()
         test_ip = "198.51.100.77"
 
-        # Clear existing keys for test isolation
-        try:
-            correlator.redis.delete(f"{{{test_ip}}}:alerts", f"{{{test_ip}}}:alerts:cnt", f"{{{test_ip}}}:dedup:DDoS_Attack")
-        except Exception:
-            pass
+        incidents_generated = []
+        for i in range(10):
+            alert = {
+                "alert_id": f"ALT-DDOS-{i}",
+                "source_ip": test_ip,
+                "destination_ip": "10.0.0.5",
+                "threat_class": "DDoS Attack",
+                "severity": "critical",
+                "mitre_tactic": "Impact"
+            }
+            inc = correlator.add_alert(alert)
+            if inc:
+                incidents_generated.append(inc)
 
-        try:
-            incidents_generated = []
-            for i in range(10):
-                alert = {
-                    "alert_id": f"ALT-DDOS-{i}",
-                    "source_ip": test_ip,
-                    "destination_ip": "10.0.0.5",
-                    "threat_class": "DDoS Attack",
-                    "severity": "critical",
-                    "mitre_tactic": "Impact"
-                }
-                inc = correlator.add_alert(alert)
-                if inc:
-                    incidents_generated.append(inc)
+        # Alert #2 (len_list == 2) and Alert #5, #10 (len_list % 5 == 0) must trigger incidents
+        # preventing the black-hole suppression flaw for homogeneous attacks
+        self.assertGreaterEqual(len(incidents_generated), 1)
+        self.assertEqual(incidents_generated[0]["source_ip"], test_ip)
+        self.assertEqual(incidents_generated[0]["severity"], "critical")
 
-            # Alert #2 (len_list == 2) and Alert #5, #10 (len_list % 5 == 0) must trigger incidents
-            # preventing the black-hole suppression flaw for homogeneous attacks
-            self.assertGreaterEqual(len(incidents_generated), 1)
-            self.assertEqual(incidents_generated[0]["source_ip"], test_ip)
-            self.assertEqual(incidents_generated[0]["severity"], "critical")
-        except Exception as e:
-            print(f"Redis test skipped: {e}")
+    def test_correlator_connection_pool_never_raises_typeerror(self):
+        """Direct regression test for the bug that made the correlation
+        engine silently produce zero incidents fleet-wide: the pool used to
+        pass ssl=<bool> into redis.ConnectionPool's default Connection
+        class, which does not accept that kwarg, raising TypeError as soon
+        as a connection is actually built (ConnectionPool builds them
+        lazily, so this only surfaced on the FIRST REAL COMMAND). Exercises
+        the real redis.ConnectionPool/Connection classes directly -- not
+        IncidentCorrelator, whose redis.Redis is faked for the rest of this
+        suite -- against an unreachable address, and confirms the failure
+        mode is a connection error, never a TypeError."""
+        import redis as redis_module
+
+        pool = redis_module.ConnectionPool(
+            host="127.0.0.1", port=1, password="x", db=0,
+            decode_responses=True, socket_timeout=0.2, socket_connect_timeout=0.2,
+        )
+        try:
+            pool.get_connection("_")
+            self.fail("expected a connection error against an unreachable port")
+        except TypeError:
+            self.fail(
+                "ConnectionPool kwargs are incompatible with the default "
+                "Connection class -- the ssl= kwarg regression is back, and "
+                "check_redis_master()'s broad except would silently "
+                "swallow this as 'Redis is down'"
+            )
+        except redis_module.exceptions.RedisError:
+            pass  # expected: nothing listens on port 1 in this environment
+
+    def test_seen_set_is_bounded_under_burst(self):
+        """The :seen dedup set must not grow without bound under a
+        volumetric burst from one source IP -- exactly the pattern the
+        platform's own DDoS rule exists to flag. Capped via a sorted set at
+        MAX_SEEN=5000 in CORRELATE_LUA (previously an unbounded SADD)."""
+        correlator = self._make_correlator()
+        test_ip = "203.0.113.9"
+
+        for i in range(5050):
+            correlator.add_alert({
+                "alert_id": f"ALT-BURST-{i}",
+                "source_ip": test_ip,
+                "threat_class": "Volumetric Protocol DDoS",
+                "severity": "critical",
+            })
+
+        # correlation.py builds this from key_name .. ":seen", where
+        # key_name is f"{{{src_ip}}}:alerts" -- so the real key is
+        # "{ip}:alerts:seen".
+        seen_key = f"{{{test_ip}}}:alerts:seen"
+        self.assertLessEqual(correlator.redis.zcard(seen_key), 5000)
 
     def test_schema_validation_with_null_mitre(self):
         from inference.schemas import validate_alert
@@ -505,7 +694,7 @@ class TestSOCPipelineSecurity(unittest.TestCase):
 
     def test_correlation_rollback_lua_execution(self):
         """Verify atomic ROLLBACK_LUA script removes seen status, list entry, and decrements counter."""
-        correlator = IncidentCorrelator()
+        correlator = self._make_correlator()
         test_ip = "192.0.2.100"
         alert = {
             "alert_id": "ALT-ROLLBACK-001",
@@ -516,43 +705,31 @@ class TestSOCPipelineSecurity(unittest.TestCase):
             "mitre_tactic": "Reconnaissance"
         }
 
-        # Clear existing keys for test isolation
-        try:
-            correlator.redis.delete(
-                f"{{{test_ip}}}:alerts",
-                f"{{{test_ip}}}:alerts:seen",
-                f"{{{test_ip}}}:alerts:cnt",
-                f"{{{test_ip}}}:dedup:Port_Scanning"
-            )
-        except Exception:
-            pass
+        # 1. Add alert to Redis
+        correlator.add_alert(alert)
 
-        try:
-            # 1. Add alert to Redis
-            correlator.add_alert(alert)
+        # Check that seen, count, and list exist in Redis. The :seen key is
+        # a sorted set (bounded via MAX_SEEN), not a plain set -- existence
+        # is `zscore(...) is not None`, not `sismember`.
+        seen_exists = correlator.redis.zscore(f"{{{test_ip}}}:alerts:seen", "ALT-ROLLBACK-001")
+        cnt_val = correlator.redis.get(f"{{{test_ip}}}:alerts:cnt")
+        list_len = correlator.redis.llen(f"{{{test_ip}}}:alerts")
 
-            # Check that seen, count, and list exist in Redis
-            seen_exists = correlator.redis.sismember(f"{{{test_ip}}}:alerts:seen", "ALT-ROLLBACK-001")
-            cnt_val = correlator.redis.get(f"{{{test_ip}}}:alerts:cnt")
-            list_len = correlator.redis.llen(f"{{{test_ip}}}:alerts")
+        self.assertIsNotNone(seen_exists)
+        self.assertEqual(int(cnt_val or 0), 1)
+        self.assertEqual(list_len, 1)
 
-            self.assertEqual(seen_exists, 1)
-            self.assertEqual(int(cnt_val or 0), 1)
-            self.assertEqual(list_len, 1)
+        # 2. Execute rollback compensating transaction
+        correlator.rollback_alert_seen(alert)
 
-            # 2. Execute rollback compensating transaction
-            correlator.rollback_alert_seen(alert)
+        # Verify that seen, count, and list entries are rolled back
+        seen_after = correlator.redis.zscore(f"{{{test_ip}}}:alerts:seen", "ALT-ROLLBACK-001")
+        cnt_after = correlator.redis.get(f"{{{test_ip}}}:alerts:cnt")
+        list_after = correlator.redis.llen(f"{{{test_ip}}}:alerts")
 
-            # Verify that seen, count, and list entries are rolled back
-            seen_after = correlator.redis.sismember(f"{{{test_ip}}}:alerts:seen", "ALT-ROLLBACK-001")
-            cnt_after = correlator.redis.get(f"{{{test_ip}}}:alerts:cnt")
-            list_after = correlator.redis.llen(f"{{{test_ip}}}:alerts")
-
-            self.assertEqual(seen_after, 0)
-            self.assertIsNone(cnt_after)
-            self.assertEqual(list_after, 0)
-        except Exception as e:
-            print(f"Redis rollback test skipped: {e}")
+        self.assertIsNone(seen_after)
+        self.assertIsNone(cnt_after)
+        self.assertEqual(list_after, 0)
 
     def test_dlq_fallback_strict_file_permissions(self):
         """Verify _write_local_dlq_fallback creates file with 0o600 and dir with 0o700 permissions."""
