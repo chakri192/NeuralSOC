@@ -123,3 +123,21 @@ venv/bin/python3 scripts/continuous_training.py
 
 Let it run for 1 or 2 cycles. Once it hits a Validation Accuracy you are satisfied with (e.g., 99%+), press `Ctrl+C`. The script will automatically perform an atomic swap, updating `models/cnn_dga.pt` and `models/cnn_dga.pt.sha256` without crashing the live stream processors.
 # trigger
+
+## Trusted Proxy / CIDR Allow-list
+
+TRUSTED_PROXY_CIDRS default: 127.0.0.1/32,::1/128,10.244.0.0/16
+Block overly broad (IPv4 <8, IPv6 <64) and global 0.0.0.0/0, ::/0
+Strict allow-list only; never allow /0-/7 prefixes.
+
+
+## Security Hardening (Post-Audit Remediation)
+- JWT scopes implemented; rotate `TSOC_JWT_SECRET` every 90 days.
+- All default passwords removed; inject via Vault / Sealed Secrets.
+- Kafka messages validated against `AlertPayload`; max 5MB.
+- Readiness probe is shallow (`/readyz`) to prevent DB pool exhaustion.
+
+## Operational Security (Post-Audit)
+- Secret rotation: rotate TSOC_JWT_SECRET and REDIS_PASSWORD every 90 days via Vault.
+- DLQ overflow: if DLQ exceeds MAX_SIZE_MB, alert on-call; rotate manually.
+- Deployment checklist: verify NetworkPolicy, securityContext, HTTPS URLs before deploy.

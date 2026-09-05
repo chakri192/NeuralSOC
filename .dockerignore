@@ -1,8 +1,19 @@
-.git
-.github
-k8s/
-tests/
-docs/
-*.md
-*.log
-venv/
+# Deny-by-default: only what the running services actually import ships in
+# the image. Previously an allow-list of 8 exclusions, which meant .env,
+# config/config.yaml, and every untracked *.bak file were being baked into
+# every build (Dockerfile's COPY --chown=soc_user:soc_user . . copies
+# anything not excluded here).
+*
+
+!requirements.txt
+!api/
+!inference/
+!ingest/
+!shared/
+!scripts/
+!terminal/
+
+**/__pycache__
+**/*.pyc
+**/*.bak
+**/.DS_Store
