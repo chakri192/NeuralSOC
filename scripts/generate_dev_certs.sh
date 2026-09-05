@@ -29,5 +29,20 @@ openssl x509 -req -in "$CERT_DIR/redis.csr" -CA "$CERT_DIR/ca.crt" -CAkey "$CERT
     -extfile <(printf "subjectAltName=DNS:soc-redis,DNS:localhost,IP:127.0.0.1")
 
 rm -f "$CERT_DIR/redis.csr" "$CERT_DIR/ca.srl"
-chmod 600 "$CERT_DIR"/*.key
+# ca.key is never read by anything except this script (it only signs
+# redis.key at generation time, here, on the host) -- kept as owner-only.
+chmod 600 "$CERT_DIR/ca.key"
+# redis.key IS read at runtime, by redis-server inside the container via
+# the ./certs:/certs:ro bind mount. chmod 600 (owner-only, i.e. whichever
+# host user ran this script) worked under Docker Desktop's VM-mediated
+# filesystem on macOS, where UID enforcement across the host/container
+# boundary is not the same as a native Linux Docker host -- confirmed
+# directly: CI's integration-smoke-test job failed with "Failed to load
+# private key: /certs/redis.key: ... Permission denied" the moment this
+# ran on a real ubuntu-latest runner. redis.key is a throwaway,
+# self-signed, local-dev-only credential with no production value (see
+# header above) -- not the kind of secret worth chasing exact
+# container-UID alignment for. World-readable is an acceptable trade for
+# working identically on every Docker host.
+chmod 644 "$CERT_DIR/redis.key"
 echo "==> Done. docker compose up can now start the redis service."

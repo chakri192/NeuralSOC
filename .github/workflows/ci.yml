@@ -260,8 +260,12 @@ jobs:
       - name: Feed real synthetic attack traffic
         run: |
           export REDPANDA_BROKERS=localhost:9092
-          timeout 20 python ingest/simulator.py --scenario mixed --burst > logs/ci_simulator.log 2>&1 || true
-          sleep 5
+          timeout 25 python ingest/simulator.py --scenario mixed --burst > logs/ci_simulator.log 2>&1 || true
+          # Each alert's enrichment makes a real outbound HTTPS call to
+          # ipwho.is -- a CI runner's network path to it may have
+          # different latency than a local dev machine's, so this leaves
+          # more settle time than local manual testing needed.
+          sleep 15
 
       - name: Assert real alerts actually landed (the point of this job)
         run: |
