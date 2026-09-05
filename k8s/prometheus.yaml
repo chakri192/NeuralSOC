@@ -13,3 +13,11 @@ spec:
   - port: http
     path: /metrics
     interval: 15s
+    # /metrics requires authentication (api/main.py wraps it in
+    # Depends(verify_auth) -- it was previously unauthenticated and
+    # unrated-limited, leaking route inventory and traffic volume to
+    # anyone who could reach it). Prometheus needs the same service key
+    # every other authenticated caller uses to actually scrape it.
+    bearerTokenSecret:
+      name: tsoc-secrets
+      key: api_key

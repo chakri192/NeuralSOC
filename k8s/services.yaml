@@ -3,11 +3,20 @@ kind: Service
 metadata:
   name: tsoc-api-service
   namespace: tsoc
+  # k8s/prometheus.yaml's ServiceMonitor selects Services by THIS label
+  # (spec.selector.matchLabels), not by what the Service itself routes
+  # to -- with no label here it matched nothing, so nothing was ever
+  # scraped despite the NetworkPolicy carve-out for Prometheus existing.
+  labels:
+    app: tsoc-api
 spec:
   selector:
     app: tsoc-api
   ports:
-    - protocol: TCP
+    # Named "http": ServiceMonitor's `endpoints: - port: http` refers to
+    # this port NAME, which didn't exist before.
+    - name: http
+      protocol: TCP
       port: 80
       targetPort: 8000
 ---
