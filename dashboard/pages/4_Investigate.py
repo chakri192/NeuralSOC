@@ -8,6 +8,7 @@ from shared.formatters import categorize_evidence, format_timestamp
 st.set_page_config(page_title="Investigate", layout="wide")
 st.title("Deep Investigation")
 
+stream_manager.start_listeners()  # idempotent; see 1_Overview.py's comment
 status = stream_manager.status()
 if not status["broker_healthy"]:
     render_broker_unavailable()

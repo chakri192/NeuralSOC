@@ -38,6 +38,19 @@ from rich.text import Text
 from rich.console import Console
 from rich.align import Align
 from rich.progress_bar import ProgressBar
+from rich.markup import escape as escape_rich_markup
+
+
+def sanitize_for_render(value) -> str:
+    """sanitize_ansi() alone only strips raw ANSI escape codes -- it does
+    nothing about Rich's OWN markup syntax ([style]...[/]), which this
+    Console has enabled by default. Every value below is interpolated
+    INSIDE an f-string that Rich re-parses as markup, so a value
+    containing e.g. "[/][link=file:///etc/shadow]click[/link]" would
+    previously render as a live OSC-8 hyperlink in the analyst's
+    terminal. escape_rich_markup neutralizes Rich's own syntax; combined
+    with the existing ANSI stripping, both injection channels are closed."""
+    return escape_rich_markup(sanitize_ansi(str(value)))
 
 console = Console()
 
@@ -192,6 +205,16 @@ class CLIDashboard:
             t_ip = a.get('destination_ip', a.get('dst_ip', 'unknown'))
             t_p = a.get('evidence', {}).get('id.resp_p', '')
             
+            # Sanitize every field sourced from the Kafka message (threat,
+            # both IPs, AND both ports -- s_p/t_p were previously the one
+            # field left unsanitized, glued directly onto the sanitized IP)
+            # before any of it is embedded in a Rich markup f-string.
+            threat = sanitize_for_render(threat)
+            s_ip = sanitize_for_render(s_ip)
+            t_ip = sanitize_for_render(t_ip)
+            s_p = sanitize_for_render(s_p)
+            t_p = sanitize_for_render(t_p)
+
             if sev == "NORMAL":
                 s_style = "dim green"
                 t_style = "dim cyan"
@@ -199,11 +222,7 @@ class CLIDashboard:
             else:
                 s_style = "green"
                 t_style = "red"
-                
-            # SECURITY FIX: Strip all ANSI terminal injection payloads before rendering
-            threat = sanitize_ansi(str(threat))
-            s_ip = sanitize_ansi(str(s_ip))
-            t_ip = sanitize_ansi(str(t_ip))
+
             table.add_row(
                 ts,
                 f"[{'dim' if sev == 'NORMAL' else 'bold'}]{icon}[/]",
@@ -221,20 +240,16 @@ class CLIDashboard:
         dist_table.add_column(justify="right")
         
         max_count = max(self.threat_counts.values()) if self.threat_counts else 1
-        
-        for threat, count in self.threat_counts.most_common(8):
-            clean_name = threat.replace("_", " ").title()
+
+        for threat_name, count in self.threat_counts.most_common(8):
+            # Sanitize BEFORE computing clean_name -- previously clean_name
+            # was built from the raw, unsanitized value, then a *different*
+            # sanitized variable was computed and never used (dead code):
+            # the analyst-visible value was always the unsanitized one.
+            clean_name = sanitize_for_render(threat_name).replace("_", " ").title()
             bar_len = int((count / max_count) * 15)
             bar = "█" * bar_len
-            # SECURITY FIX: Strip all ANSI terminal injection payloads before rendering
-            threat = sanitize_ansi(str(threat))
-            s_ip = sanitize_ansi(str(s_ip))
-            t_ip = sanitize_ansi(str(t_ip))
             dist_table.add_row(f"[white]{clean_name}[/]", f"[cyan]{count}[/]")
-            # SECURITY FIX: Strip all ANSI terminal injection payloads before rendering
-            threat = sanitize_ansi(str(threat))
-            s_ip = sanitize_ansi(str(s_ip))
-            t_ip = sanitize_ansi(str(t_ip))
             dist_table.add_row(f"[dim cyan]{bar}[/]", "")
             
         layout["distribution"].update(Panel(dist_table, title="[bold white]Threat Signatures[/]", border_style="#334155"))
@@ -258,6 +273,12 @@ class CLIDashboard:
                 while True:
                     self.poll_alerts()
                     live.update(self.generate_layout())
+                    # refresh_per_second above throttles *painting*, not
+                    # this loop -- when self.consumer is None (broker
+                    # down), poll_alerts() returns immediately, and without
+                    # this sleep the loop rebuilds the full layout as fast
+                    # as the CPU allows.
+                    time.sleep(0.25)
             except KeyboardInterrupt:
                 console.print("\n[bold yellow]Terminating Terminal Dashboard...[/]")
 

@@ -18,6 +18,11 @@ def load_css():
             st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
 
 load_css()
+# Idempotent (guarded by is_running) -- needed here too, not just app.py,
+# since Streamlit only executes the page matching the current URL. An
+# analyst who bookmarks/deep-links this page directly would otherwise
+# never start the poller, and broker_healthy would stay False forever.
+stream_manager.start_listeners()
 status = stream_manager.status()
 
 col1, col2 = st.columns([9, 1])

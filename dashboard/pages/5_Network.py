@@ -7,6 +7,7 @@ from dashboard.components.empty_states import render_no_alerts, render_broker_un
 st.set_page_config(page_title="Network Graph", layout="wide")
 st.title("Network Relationships")
 
+stream_manager.start_listeners()  # idempotent; see 1_Overview.py's comment
 status = stream_manager.status()
 if not status["broker_healthy"]:
     render_broker_unavailable()

@@ -3,7 +3,7 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import streamlit as st
-import time
+# import time (unused)
 from datetime import datetime, timezone
 
 from shared.data_access import stream_manager
@@ -19,7 +19,13 @@ def load_css():
     css_path = os.path.join(os.path.dirname(__file__), "styles", "app.css")
     if os.path.exists(css_path):
         with open(css_path, "r") as f:
-            st.markdown(f"<style>{f.read()}</style>")
+            # unsafe_allow_html is safe here: content is a local static
+            # file this repo ships, not user/network data. Without it the
+            # whole stylesheet rendered as escaped text instead of
+            # applying -- confirmed via `git log -S` this kwarg was
+            # present before the commit that purged external GitHub
+            # telemetry from this file, and was dropped only here.
+            st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
 
 load_css()
 
@@ -39,7 +45,7 @@ with col3:
     st.caption("DIODE: ONE-WAY")
 with col4:
     current_utc = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
-    st.markdown(f"<br>**TIME:** `{current_utc}`")
+    st.markdown(f"<br>**TIME:** `{current_utc}`", unsafe_allow_html=True)
 
 st.markdown("---")
 
