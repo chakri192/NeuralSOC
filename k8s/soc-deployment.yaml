@@ -84,16 +84,22 @@ spec:
           sizeLimit: 500Mi
       containers:
       - env:
+        # optional: true -- nothing in this codebase reads either variable
+        # yet (confirmed by repo-wide grep); without `optional`, every pod
+        # hard-fails at creation if an operator doesn't populate these two
+        # keys for an integration that isn't wired up.
         - name: SLACK_WEBHOOK_URL
           valueFrom:
             secretKeyRef:
               name: tsoc-secrets
               key: slack_webhook_url
+              optional: true
         - name: PAGERDUTY_ROUTING_KEY
           valueFrom:
             secretKeyRef:
               name: tsoc-secrets
               key: pagerduty_routing_key
+              optional: true
         - name: REDPANDA_BROKERS
           value: soc-redpanda-cluster.prod.svc.cluster.local:9092
         - name: REDIS_HOST
@@ -106,7 +112,10 @@ spec:
               name: tsoc-secrets
               key: redis_password
               optional: true
-        imagePullPolicy: IfNotPresent
+        # Always, matching the api/kafka-sink containers below and this
+        # cluster's own require-signed-images Kyverno policy, which
+        # enforces imagePullPolicy: Always on every pod in this namespace.
+        imagePullPolicy: Always
         image: your-registry.com/tsoc/stream-processor@sha256:9f32e2f4ec908b6531b278fa2ae3fe694ad4a2d4f874a3f56248c4ff85f5aa24
         name: faust-worker
         volumeMounts:
@@ -193,20 +202,30 @@ spec:
           sizeLimit: 500Mi
       containers:
       - env:
+        # optional: true -- nothing in this codebase reads either variable
+        # yet (confirmed by repo-wide grep); without `optional`, every pod
+        # hard-fails at creation if an operator doesn't populate these two
+        # keys for an integration that isn't wired up.
         - name: SLACK_WEBHOOK_URL
           valueFrom:
             secretKeyRef:
               name: tsoc-secrets
               key: slack_webhook_url
+              optional: true
         - name: PAGERDUTY_ROUTING_KEY
           valueFrom:
             secretKeyRef:
               name: tsoc-secrets
               key: pagerduty_routing_key
+              optional: true
         - name: TSOC_API_KEY
           valueFrom:
             secretKeyRef:
-              key: api-key
+              # underscore, matching k8s/secrets.yaml.example's api_key key
+              # (and every other key in that Secret) -- the hyphenated
+              # "api-key" here referenced a key that doesn't exist,
+              # which is a CreateContainerConfigError at pod creation.
+              key: api_key
               name: tsoc-secrets
         - name: DATABASE_URL
           valueFrom:

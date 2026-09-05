@@ -1,17 +1,28 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
+  name: tsoc-api-ingress
+  namespace: tsoc
+  # Previously two separate `annotations:` keys in this mapping -- valid
+  # per non-strict YAML decoding (last-key-wins), so `kubectl apply`
+  # accepted it with no warning while silently dropping the ModSecurity
+  # and OWASP Core Rule Set annotations that were in the first (discarded)
+  # map. Merged into one block below; every prior annotation is retained.
   annotations:
     nginx.ingress.kubernetes.io/enable-modsecurity: "true"
     nginx.ingress.kubernetes.io/enable-owasp-core-rules: "true"
-  name: tsoc-api-ingress
-  namespace: tsoc
-  annotations:
     nginx.ingress.kubernetes.io/auth-url: "https://auth.tsoc.local/verify"
     nginx.ingress.kubernetes.io/auth-response-headers: "X-User,X-Role"
     nginx.ingress.kubernetes.io/auth-snippet: |
       proxy_intercept_errors on;
       error_page 401 403 500 502 503 504 =401 /error-auth;
+    # NOTE: letsencrypt-prod cannot issue a certificate for api.tsoc.local
+    # unless that hostname is a real, publicly-resolvable domain pointed at
+    # this ingress -- .local / example hostnames will fail ACME HTTP-01/
+    # DNS-01 validation. Replace api.tsoc.local (here and in `spec.tls` /
+    # `spec.rules` below) with a real domain before relying on this
+    # cluster-issuer, or swap in an internal ClusterIssuer for non-public
+    # deployments.
     cert-manager.io/cluster-issuer: "letsencrypt-prod"
     nginx.ingress.kubernetes.io/auth-tls-verify-client: "on"
     nginx.ingress.kubernetes.io/auth-tls-secret: "tsoc/client-cert"
@@ -19,7 +30,6 @@ metadata:
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
     nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
     nginx.ingress.kubernetes.io/limit-rps: "100"
-    nginx.ingress.kubernetes.io/ssl-redirect: "true"
     nginx.ingress.kubernetes.io/hsts: "true"
     nginx.ingress.kubernetes.io/hsts-include-subdomains: "true"
     nginx.ingress.kubernetes.io/hsts-max-age: "31536000"

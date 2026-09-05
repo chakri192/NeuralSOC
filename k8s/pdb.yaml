@@ -26,7 +26,13 @@ metadata:
   name: pdb-kafka-sink
   namespace: tsoc
 spec:
-  maxUnavailable: 1  # allowed but requires minAvailable: 2 guard
+  # At the current replicas: 1 (see hpa.yaml's note on why this Deployment
+  # can't yet run >1 replica), maxUnavailable: 1 permits the sole pod to
+  # be evicted during a voluntary disruption (e.g. node drain) -- this PDB
+  # provides no actual protection until the replica-count constraint above
+  # is resolved. Left permissive rather than maxUnavailable: 0, which would
+  # block node drains entirely for a singleton pod.
+  maxUnavailable: 1
   selector:
     matchLabels:
       app: tsoc-kafka-sink

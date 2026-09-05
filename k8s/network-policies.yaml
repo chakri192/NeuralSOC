@@ -8,22 +8,19 @@ spec:
   ingress: []
   egress: []
   policyTypes: [Ingress, Egress]
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: deny-link-local
-  namespace: tsoc
-spec:
-  podSelector: {}
-  policyTypes: [Egress]
-  egress:
-  - to:
-    - ipBlock:
-        cidr: 169.254.0.0/16
-  - to:
-    - ipBlock:
-        cidr: 127.0.0.0/8
+# NOTE: a "deny-link-local" NetworkPolicy previously lived here. Kubernetes
+# NetworkPolicy has no deny primitive -- every `egress` entry is an ALLOW
+# rule, and policies for the same pods union together. A policy named
+# "deny" whose podSelector is {} (every pod in the namespace) and whose
+# egress list is [169.254.0.0/16, 127.0.0.0/8] therefore GRANTED every pod
+# unrestricted egress to the cloud instance-metadata range, overriding
+# default-deny-all above and opening a path to steal node IAM credentials
+# via any SSRF. Link-local denial is only expressible via an ipBlock.except
+# on an allow-rule -- see stream-processor-policy's egress rule below,
+# which already excludes 169.254.0.0/16 (and 127.0.0.0/8, 100.64.0.0/10,
+# and the RFC1918 ranges) correctly from its one broad internet-egress
+# allow. No other policy in this file grants broad internet egress, so
+# nothing else needs the same treatment.
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -233,3 +230,5 @@ spec:
     ports:
     - protocol: TCP
       port: 5432
+
+# Policy: allow ingress to api pods only from dashboard and ingress controllers

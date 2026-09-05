@@ -59,11 +59,13 @@ spec:
         - ports:
             - port: "9092"
               protocol: TCP
-    # FQDN-based Threat Intelligence API (ipapi.co) via TLS with endpoint identity
-    - toCIDR:
-    - 169.254.169.254/32
-    - 169.254.0.0/16
-  - toFQDNs:
+    # FQDN-based Threat Intelligence API (ipapi.co) via TLS with endpoint identity.
+    # A "toCIDR: [169.254.169.254/32, 169.254.0.0/16]" fragment previously sat
+    # here with no toPorts restriction -- invalid YAML as written (this file
+    # failed to parse), and had it parsed, an unrestricted allow-list straight
+    # to the cloud instance-metadata service. The only egress this rule needs
+    # is the FQDN allow below.
+    - toFQDNs:
         - matchName: "ipapi.co"
       toPorts:
         - ports:

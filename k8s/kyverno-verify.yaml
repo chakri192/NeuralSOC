@@ -5,11 +5,20 @@ metadata:
 spec:
   validationFailureAction: Enforce
   rules:
+  # Both rules previously matched every Pod cluster-wide with no namespace
+  # filter. With validationFailureAction: Enforce, applying this as
+  # written rejects every tag-referenced, non-Always-pull pod in the
+  # cluster -- CoreDNS, ingress-nginx, cert-manager, the CNI -- a
+  # cluster-wide outage the moment it's applied. Scoped to the tsoc
+  # namespace, where every workload this repo ships is already
+  # digest-pinned and Always-pull (see k8s/soc-deployment.yaml).
   - name: require-signed-images
     match:
       resources:
         kinds:
         - Pod
+        namespaces:
+        - tsoc
     validate:
       message: "TSOC images must be signed and use Always pull"
       pattern:
@@ -20,6 +29,7 @@ spec:
     match:
       resources:
         kinds: [Pod]
+        namespaces: [tsoc]
     validate:
       message: "Image must use sha256 digest, not mutable tag"
       pattern:

@@ -19,12 +19,15 @@ services:
       - --set redpanda.enable_idempotence=true
       - --set redpanda.auto_create_topics_enabled=false
     ports:
-      - "9092:9092"
-      - "29092:29092"
+      # advertise-kafka-addr above already tells external clients to reach
+      # this at "localhost:9092" specifically -- binding the published
+      # port to loopback only matches that intent and closes the LAN
+      # exposure a bare "9092:9092" leaves open on all host interfaces.
+      - "127.0.0.1:9092:9092"
+      - "127.0.0.1:29092:29092"
     volumes:
       - redpanda-data:/var/lib/redpanda/data
-    # TLS certs: mount /certs/redis.{crt,key,ca.crt} from host or secret
-networks:
+    networks:
       - soc-net
     healthcheck:
       test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true' || exit 1"]
@@ -41,11 +44,10 @@ networks:
       POSTGRES_PASSWORD: ${COMPOSE_POSTGRES_PASSWORD}
       POSTGRES_DB: tsoc
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
-    # TLS certs: mount /certs/redis.{crt,key,ca.crt} from host or secret
-networks:
+    networks:
       - soc-net
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${COMPOSE_POSTGRES_USER} -d tsoc"]
@@ -57,11 +59,21 @@ networks:
     image: redis:7-alpine
     container_name: soc-redis
     platform: linux/arm64
-    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:-changeme}", "--tls-port", "6379", "--port", "0", "--tls-cert-file", "/certs/redis.crt", "--tls-key-file", "/certs/redis.key", "--tls-ca-cert-file", "/certs/ca.crt"]
+    # ${REDIS_PASSWORD:?...} (not :-) so Compose hard-fails on an unset
+    # var instead of silently starting redis-server with auth disabled --
+    # the previous ${REDIS_PASSWORD:-} default was the difference between
+    # a loud misconfiguration and a silent one.
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD must be set}", "--tls-port", "6379", "--port", "0", "--tls-cert-file", "/certs/redis.crt", "--tls-key-file", "/certs/redis.key", "--tls-ca-cert-file", "/certs/ca.crt"]
     ports:
-      - "6379:6379"
-    # TLS certs: mount /certs/redis.{crt,key,ca.crt} from host or secret
-networks:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      # The command above requires these three files to exist under
+      # ./certs on the host (self-signed is fine for local dev; see
+      # scripts/create_topics.sh's neighbors for how the broker side is
+      # provisioned). Without this mount the container fails to start,
+      # which is preferable to silently falling back to plaintext.
+      - ./certs:/certs:ro
+    networks:
       - soc-net
 
 volumes:
@@ -70,7 +82,7 @@ volumes:
   postgres-data:
     driver: local
 
-# TLS certs: mount /certs/redis.{crt,key,ca.crt} from host or secret
 networks:
   soc-net:
     driver: bridge
+# Verify postgres connection uses sslmode=require; document at-rest encryption

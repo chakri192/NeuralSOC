@@ -5,6 +5,12 @@ metadata:
   namespace: tsoc
 spec:
   scaleTargetRef:
+    # KEDA defaults an omitted kind to Deployment; tsoc-stream-processor is
+    # a StatefulSet (k8s/soc-deployment.yaml), so this ScaledObject was
+    # silently entering ScaleTargetNotFound and never actually scaling on
+    # Kafka lag -- a hard throughput ceiling in a threat-detection pipeline.
+    apiVersion: apps/v1
+    kind: StatefulSet
     name: tsoc-stream-processor
   minReplicaCount: 2
   maxReplicaCount: 4
@@ -35,6 +41,15 @@ spec:
       target:
         type: Utilization
         averageUtilization: 75
+  # CPU-only scaling means a memory leak or large-batch spike drives a pod
+  # to its 512Mi limit (soc-deployment.yaml) and OOMKill without ever
+  # triggering scale-out. 80% leaves headroom before the kill.
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
 
 ---
 apiVersion: autoscaling/v2
@@ -47,7 +62,15 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: tsoc-kafka-sink
-  minReplicas: 2
+  # NOTE: this Deployment mounts a single, fixed-name ReadWriteOnce PVC
+  # (kafka-sink-dlq-pvc, k8s/dlq-pvc.yaml) rather than per-replica
+  # volumeClaimTemplates -- a second replica cannot attach that volume on
+  # a different node and gets stuck Pending/FailedAttachVolume. minReplicas
+  # is 1 to match what this architecture can actually schedule; true
+  # horizontal scaling needs either an RWX storage class or converting
+  # this Deployment to a StatefulSet (mirroring tsoc-stream-processor's
+  # pattern) with its own volumeClaimTemplates.
+  minReplicas: 1
   maxReplicas: 6
   metrics:
   - type: Resource
@@ -56,3 +79,9 @@ spec:
       target:
         type: Utilization
         averageUtilization: 75
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
