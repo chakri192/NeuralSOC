@@ -108,7 +108,7 @@ def get_remote_address(request: Request) -> str:
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = os.getenv("REDIS_PORT", "6379")
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", None)
-REDIS_SSL = os.getenv("REDIS_SSL", "false").lower() in ("true", "1", "yes")
+REDIS_SSL = True
 
 _scheme = "rediss" if REDIS_SSL else "redis"
 _auth = f":{urllib.parse.quote_plus(REDIS_PASSWORD)}@" if REDIS_PASSWORD else ""
@@ -119,7 +119,7 @@ try:
     # reject requests or engage local fallback with explicit failure logging.
     # Enforce TLS for rate-limit storage (reject unencrypted redis://)
     if REDIS_STORAGE_URI and not REDIS_STORAGE_URI.startswith("rediss://"):
-        raise RuntimeError("Redis rate limiter requires TLS (rediss://)")
+        raise RuntimeError("Redis rate limiter requires TLS (rediss://) — enforce REDIS_SSL=true")
     limiter = Limiter(
         key_func=get_remote_address,
         storage_uri=REDIS_STORAGE_URI,
@@ -141,7 +141,7 @@ Instrumentator().instrument(app).expose(app)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-cors_origins_env = os.getenv("CORS_ALLOWED_ORIGINS", "https://dashboard.tsoc.local")
+cors_origins_env = "https://dashboard.tsoc.local"
 allowed_origins = [o.strip() for o in cors_origins_env.split(",") if o.strip()]
 
 app.add_middleware(
@@ -241,6 +241,7 @@ def livez():
 def readyz(db: Session = Depends(get_db)):
     try:
         db.execute(text("SELECT 1"))
+        return db
         return {'status': 'ready'}
     except BaseException as ex:
         logger.error("Readiness probe failed: %s", type(ex).__name__)

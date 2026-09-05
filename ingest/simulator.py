@@ -1,3 +1,4 @@
+# TRAINING_ONLY_GUARD: all labels below are synthetic for benchmark/load-test ONLY
 import os
 import sys
 import json

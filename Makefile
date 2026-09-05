@@ -1,7 +1,11 @@
-.PHONY: up down pipeline simulate dashboard clean
+.PHONY: up down api pipeline simulate dashboard clean
 
-DOCKER_CMD := export PATH="/Applications/Docker 2.app/Contents/Resources/bin:$$PATH" && docker compose
+# Resolves through the normal PATH -- a hardcoded macOS Docker Desktop
+# path here previously broke this Makefile on any other machine or CI
+# runner whose Docker.app wasn't named "Docker 2.app".
+DOCKER_CMD := docker compose
 PYTHON := venv/bin/python3
+UVICORN := venv/bin/uvicorn
 STREAMLIT := venv/bin/streamlit
 
 up:
@@ -14,6 +18,10 @@ up:
 down:
 	@echo "[+] Tearing down infrastructure and volumes..."
 	$(DOCKER_CMD) down -v
+
+api:
+	@echo "[+] Starting FastAPI Backend..."
+	PYTHONPATH="$(PWD)" $(UVICORN) api.main:app --host 0.0.0.0 --port 8000
 
 pipeline:
 	@echo "[+] Starting AI Stream Processor..."

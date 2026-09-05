@@ -1,0 +1,11 @@
+# Test/lint/security-scan tooling — NOT installed in the production image
+# (Dockerfile installs only requirements.txt). Installed by CI and by
+# developers running the test suite locally.
+-r requirements.txt
+
+pytest==8.4.2
+pytest-cov==5.0.0
+fakeredis[lua]==2.24.1
+bandit==1.7.10
+flake8==7.1.1
+pylint==3.3.1

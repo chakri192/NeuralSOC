@@ -19,7 +19,7 @@ def load_css():
     css_path = os.path.join(os.path.dirname(__file__), "styles", "app.css")
     if os.path.exists(css_path):
         with open(css_path, "r") as f:
-            st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
+            st.markdown(f"<style>{f.read()}</style>")
 
 load_css()
 
@@ -34,12 +34,12 @@ col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
 with col1:
     st.markdown("##  T-SOC Platform")
 with col2:
-    st.markdown("<br>**ENV:** <span style='color:#7aa2f7'>DEMO</span>", unsafe_allow_html=True)
+    st.caption("ENV: DEMO")
 with col3:
-    st.markdown("<br>**DIODE:** <span style='color:#9ece6a'>ONE-WAY</span>", unsafe_allow_html=True)
+    st.caption("DIODE: ONE-WAY")
 with col4:
     current_utc = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
-    st.markdown(f"<br>**TIME:** `{current_utc}`", unsafe_allow_html=True)
+    st.markdown(f"<br>**TIME:** `{current_utc}`")
 
 st.markdown("---")
 

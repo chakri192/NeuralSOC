@@ -80,30 +80,42 @@ def ingest_pcap(pcap_file: str, broker: str = "localhost:9092", topic: str = "ra
                             flows[reverse_key]["resp_bytes"] += pkt_len
                             flows[reverse_key]["duration"] = pkt_time - flows[reverse_key]["start_time"]
                         else:
+                            if flow_key not in flows:
+                                f = {
+                                    "start_time": pkt_time,
+                                    "orig_pkts": 0,
+                                    "orig_bytes": 0,
+                                    "resp_pkts": 0,
+                                    "resp_bytes": 0,
+                                    "duration": 0,
+                                    "id.orig_h": src_ip,
+                                    "id.orig_p": src_port,
+                                    "id.resp_h": dst_ip,
+                                    "id.resp_p": dst_port,
+                                    "proto": proto,
+                                    "service": "unknown",
+                                    "conn_state": "SF",
+                                }
+                                flows[flow_key] = f
                             f = flows[flow_key]
                             if f["start_time"] is None:
                                 f["start_time"] = pkt_time
-                                f["id.orig_h"] = src_ip
-                                f["id.orig_p"] = src_port
-                                f["id.resp_h"] = dst_ip
-                                f["id.resp_p"] = dst_port
-                                f["proto"] = proto
-                                f["service"] = "unknown"
-                                f["conn_state"] = "SF"
                             f["orig_pkts"] += 1
                             f["orig_bytes"] += pkt_len
                             f["duration"] = pkt_time - f["start_time"]
 
-                        # STREAMING: emit flow periodically to avoid unbounded memory
+                        # STREAMING: emit flow periodically without destroying state
                         if packet_count % 500 == 0:
+                            emitted = []
                             for key, flow_data in list(flows.items()):
-                                if "start_time" in flow_data:
-                                    del flow_data["start_time"]
+                                if flow_data.get("start_time") is not None:
+                                    emitted.append((key, dict(flow_data)))
+                                    flow_data["start_time"] = flow_data.get("start_time")
+                            for key, payload in emitted:
                                 try:
-                                    producer.send(topic, flow_data)
+                                    producer.send(topic, payload)
                                 except Exception as send_err:
                                     logger.error(f"Failed to stream flow {key}: {send_err}")
-                            flows.clear()
 
         # Final flush for remaining flows
         for key, flow_data in flows.items():

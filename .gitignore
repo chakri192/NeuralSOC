@@ -1,6 +1,10 @@
 venv/
 __pycache__/
 *.pyc
+.coverage
+coverage.xml
+bandit-report.json
+certs/
 .env
 config/config.yaml
 data/zeek_logs/*.log
@@ -22,4 +26,4 @@ test.db
 models/*.sha256
 .pt.sha256
 models/*.pt
-PYTHONUNBUFFERED=1
+*.bak
