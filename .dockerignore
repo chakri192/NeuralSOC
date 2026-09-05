@@ -12,6 +12,13 @@
 !shared/
 !scripts/
 !terminal/
+# inference/models.py loads models/cnn_dga.pt (and its .sha256) at a
+# path relative to WORKDIR /app -- without this the container's own
+# fail-safe integrity check has nothing to load and crashes at startup.
+!models/
+!models/*.pt
+!models/*.sha256
+!models/*.sig
 
 **/__pycache__
 **/*.pyc

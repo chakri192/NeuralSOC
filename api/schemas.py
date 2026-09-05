@@ -4,7 +4,11 @@ from pydantic import BaseModel, ConfigDict
 
 
 class AlertResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
+    # protected_namespaces=(): pydantic reserves the "model_" prefix for
+    # its own methods (model_dump, etc.) and warns on any field name that
+    # collides -- model_name/model_version below are genuine alert-schema
+    # fields, not an actual conflict.
+    model_config = ConfigDict(from_attributes=True, protected_namespaces=())
 
     id: int
     alert_id: str
@@ -40,6 +44,8 @@ class AlertPayload(BaseModel):
     ORM object from this model's fields only, so an attacker-influenced
     Kafka payload can never set the primary key or a SQLAlchemy internal
     attribute name (previously possible via unrestricted **kwargs)."""
+
+    model_config = ConfigDict(protected_namespaces=())
 
     alert_id: str
     event_type: str
