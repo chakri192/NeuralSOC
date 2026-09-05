@@ -36,10 +36,21 @@ app = App(
     broker=f'kafka://{BROKER_URL}',
     datadir=os.getenv("FAUST_DATADIR", "/var/lib/app/faust"),
 )
-raw_traffic_topic = app.topic('raw_traffic', value_type=dict)
-alerts_topic = app.topic('security_alerts', value_type=dict)
+# value_type=dict was never valid for faust-streaming's deserializer:
+# _prepare_payload has explicit branches for None/int/float/Decimal/str/
+# bytes, but anything else (dict included) falls through to the
+# Faust-Record branch and calls `dict.from_data(...)` -- which doesn't
+# exist, crashing every single message. Every unit test and the load
+# test exercise process_traffic.fun() directly with a plain Python async
+# generator, bypassing Faust's topic/channel deserialization entirely --
+# discovered only by actually running the real worker against a real
+# topic. Omitting value_type (matching incidents_topic below, which
+# already worked) uses Faust's default autodetect path, which returns
+# the decoded JSON dict as-is.
+raw_traffic_topic = app.topic('raw_traffic')
+alerts_topic = app.topic('security_alerts')
 incidents_topic = app.topic("incidents")
-dead_letter_topic = app.topic("dead_letter_events", value_type=dict)
+dead_letter_topic = app.topic("dead_letter_events")
 
 # Segregate CPU and I/O ThreadPools to prevent GIL/IO resource starvation
 # Right-sized thread allocations matching container resource constraints

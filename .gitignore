@@ -23,8 +23,10 @@ demos/
 
 k8s/secrets.yaml
 test.db
+*.db
 .env*
 *.bak
+.faust-data/
 # NOTE: models/*.pt and models/*.sha256 are intentionally tracked, not
 # ignored -- a previous pass here ignored them as "repo bloat," but
 # they're tiny (the two current models are ~7KB/~99KB combined) and the

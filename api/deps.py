@@ -119,6 +119,18 @@ _scheme = "rediss" if REDIS_SSL else "redis"
 _auth = f":{urllib.parse.quote_plus(REDIS_PASSWORD)}@" if REDIS_PASSWORD else ""
 REDIS_STORAGE_URI = os.getenv("LIMITER_STORAGE_URI", f"{_scheme}://{_auth}{REDIS_HOST}:{REDIS_PORT}/1")
 
+# redis-py's from_url() (what slowapi/limits use under storage_uri) has no
+# way to trust a custom CA short of a URL query parameter -- without this,
+# a self-signed or internal CA (inference/correlation.py already supports
+# the same REDIS_CA_CERT_PATH) fails verification here even though the
+# certificate itself is perfectly valid, discovered only by actually
+# running this against the docker-compose redis service's self-signed
+# dev cert rather than a mock.
+if REDIS_SSL:
+    _redis_ca_cert = os.getenv("REDIS_CA_CERT_PATH")
+    if _redis_ca_cert and os.path.exists(_redis_ca_cert):
+        REDIS_STORAGE_URI += f"?ssl_cert_reqs=required&ssl_ca_certs={urllib.parse.quote(_redis_ca_cert)}"
+
 try:
     # Fail-closed rate limiter: do NOT swallow errors. If Redis is unreachable,
     # reject requests or engage local fallback with explicit failure logging.
