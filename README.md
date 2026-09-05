@@ -108,16 +108,20 @@ scripts/generate_dev_certs.sh
 make up            # or: docker compose up -d
 
 # 2. Stream processor
-make pipeline       # or: venv/bin/python3 inference/stream_processor_faust.py worker -l info
+make pipeline       # or: PYTHONPATH=. venv/bin/python3 inference/stream_processor_faust.py worker -l info
 
-# 3. API
+# 3. Kafka-to-Postgres sink -- required for alerts to actually persist;
+#    without it the API/dashboards will show zero alerts indefinitely.
+make kafka-sink      # or: PYTHONPATH=. venv/bin/python3 api/kafka_sink.py
+
+# 4. API
 make api            # or: venv/bin/uvicorn api.main:app --host 0.0.0.0 --port 8000
 
-# 4. Dashboards (separate terminals)
+# 5. Dashboards (separate terminals)
 make dashboard       # or: venv/bin/streamlit run dashboard/app.py
 venv/bin/python3 terminal/tsoc_console.py
 
-# 5. Synthetic traffic
+# 6. Synthetic traffic
 make simulate        # or: venv/bin/python3 ingest/simulator.py --scenario mixed --burst
 ```
 

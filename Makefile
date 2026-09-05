@@ -1,4 +1,4 @@
-.PHONY: up down api pipeline simulate dashboard clean
+.PHONY: up down api pipeline kafka-sink simulate dashboard clean
 
 # Resolves through the normal PATH -- a hardcoded macOS Docker Desktop
 # path here previously broke this Makefile on any other machine or CI
@@ -25,7 +25,23 @@ api:
 
 pipeline:
 	@echo "[+] Starting AI Stream Processor..."
-	export REDPANDA_BROKERS=127.0.0.1:9092 && $(PYTHON) inference/stream_processor_faust.py worker -l info
+	# api/ and dashboard/ targets below both set PYTHONPATH; this one
+	# didn't, and ingest/stream_processor_faust.py is run as a direct
+	# script path (not `python -m ...`), so Python puts inference/'s own
+	# directory on sys.path instead of the repo root -- `from
+	# inference.features import extract_features` then fails with
+	# ModuleNotFoundError the moment this runs in a shell that doesn't
+	# already have PYTHONPATH set some other way. Found by an automated
+	# CI job actually running this exact command in a clean environment.
+	export REDPANDA_BROKERS=127.0.0.1:9092 && PYTHONPATH="$(PWD)" $(PYTHON) inference/stream_processor_faust.py worker -l info
+
+kafka-sink:
+	@echo "[+] Starting Kafka-to-Postgres Sink..."
+	# Without this running, alerts flow through Kafka but are never
+	# persisted -- the API and dashboards will show zero alerts
+	# indefinitely with no error, since nothing else in the Quickstart
+	# flow calls this script.
+	PYTHONPATH="$(PWD)" $(PYTHON) api/kafka_sink.py
 
 simulate:
 	@echo "[+] Injecting Synthetic Attack Traffic (Burst Mode)..."
