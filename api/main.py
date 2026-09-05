@@ -14,7 +14,7 @@ from slowapi.errors import RateLimitExceeded
 
 from api.database import Base, engine
 from api import models
-from api.deps import limiter, get_authenticated_db, verify_auth
+from api.deps import limiter, get_authenticated_db, verify_auth, require_scope
 
 # Root logger carries the structured formatter, so every module's own
 # `logging.getLogger(__name__)` (api.deps, inference.*, etc.) inherits it
@@ -151,6 +151,7 @@ def healthz():
 def get_stats(
     request: Request,
     db=Depends(get_authenticated_db),
+    _scope: dict = Depends(require_scope("stats:read")),
 ):
     counts = db.query(models.Alert.severity, func.count(models.Alert.id)).group_by(models.Alert.severity).all()
     severity_map = {str(sev).lower() if sev else "unknown": cnt for sev, cnt in counts}

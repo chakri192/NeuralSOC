@@ -97,6 +97,29 @@ def test_injection_cap():
         assert r_ok.status_code == 200
 
 
+def test_stats_requires_scope_not_just_authentication():
+    # /api/v1/stats previously only required *some* valid credential
+    # (get_authenticated_db -> verify_auth), with no scope check -- unlike
+    # /api/v1/alerts, which correctly stacks require_scope("alerts:read")
+    # on top. A validly-signed JWT scoped for something else entirely
+    # (here, alerts:read) must not be able to read aggregate alert counts
+    # meant to be gated behind its own stats:read scope.
+    alerts_only_token = create_token(scopes=["alerts:read"])
+    with TestClient(app) as client:
+        r = client.get("/api/v1/stats", headers={"Authorization": f"Bearer {alerts_only_token}"})
+        assert r.status_code == 403
+
+    stats_token = create_token(scopes=["stats:read"])
+    with TestClient(app) as client:
+        r = client.get("/api/v1/stats", headers={"Authorization": f"Bearer {stats_token}"})
+        assert r.status_code == 200
+
+    # The static service key still holds every scope, unaffected by this change.
+    with TestClient(app) as client:
+        r = client.get("/api/v1/stats", headers={"Authorization": f"Bearer {API_KEY}"})
+        assert r.status_code == 200
+
+
 def test_fuzz_auth_header():
     # Malformed headers must resolve to a clean 401 — never a 500. This is
     # the regression test for the secrets.compare_digest(token, API_KEY)
