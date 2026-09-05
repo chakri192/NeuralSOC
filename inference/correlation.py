@@ -21,14 +21,24 @@ local severity_score = tonumber(ARGV[4])
 local alert_id = ARGV[5] or ""
 local is_replay = ARGV[6] or "0"
 
--- Replay defense: deduplicate identical alert_ids within sliding window
+-- Replay defense: deduplicate identical alert_ids within sliding window.
+-- Bounded via a capped sorted set (score = insertion order) rather than an
+-- unbounded SADD, so a volumetric burst from one source IP -- precisely
+-- the pattern this platform's own DDoS rule exists to flag -- can't grow
+-- Redis memory in direct proportion to the attack. 5000 mirrors this
+-- platform's own documented max_tracked_ips bound (see SECURITY.md).
+local MAX_SEEN = 5000
 if alert_id ~= "" then
     local seen_key = key_name .. ":seen"
-    local is_dup = redis.call('sismember', seen_key, alert_id)
-    if is_dup == 1 and is_replay ~= "1" then
+    local is_dup = redis.call('zscore', seen_key, alert_id)
+    if is_dup and is_replay ~= "1" then
         return {0, 0, {}}
     end
-    redis.call('sadd', seen_key, alert_id)
+    local insertion_rank = redis.call('zcard', seen_key)
+    redis.call('zadd', seen_key, insertion_rank, alert_id)
+    if redis.call('zcard', seen_key) > MAX_SEEN then
+        redis.call('zremrangebyrank', seen_key, 0, 0)
+    end
     local ttl_seen = redis.call('ttl', seen_key)
     if ttl_seen < 0 then
         redis.call('expire', seen_key, window)
@@ -87,7 +97,7 @@ local alert_id = ARGV[2]
 local safe_threat = ARGV[3]
 
 if alert_id ~= "" then
-    redis.call('srem', seen_key, alert_id)
+    redis.call('zrem', seen_key, alert_id)
 end
 
 if alert_json ~= "" then
@@ -117,22 +127,38 @@ class IncidentCorrelator:
         redis_password = os.getenv("REDIS_PASSWORD")
         if not redis_password:
             raise RuntimeError("REDIS_PASSWORD must be configured — unauthenticated Redis is not permitted.")
-        redis_ssl = os.getenv("REDIS_SSL", "false").lower() in ("true", "1", "yes")
+        # Default "true", matching api/deps.py's rate limiter -- both
+        # modules read the same REDIS_SSL var for the same Redis instance;
+        # they previously defaulted oppositely (deps.py: true, here:
+        # false), so an operator who set neither got contradictory TLS
+        # assumptions against one broker depending on which module asked.
+        redis_ssl = os.getenv("REDIS_SSL", "true").lower() in ("true", "1", "yes")
 
         pool_kwargs = dict(
             host=redis_host,
             port=redis_port,
             password=redis_password,
-            ssl=redis_ssl,
             db=0,
             decode_responses=True,
             socket_timeout=2.0,
+            socket_connect_timeout=2.0,
             max_connections=50,
             retry_on_timeout=True,
             health_check_interval=30,
         )
-        # Enforce TLS certificate verification when SSL is enabled to prevent MITM
+        # redis-py's default Connection class does not accept an `ssl=`
+        # kwarg at all -- TLS is selected by using SSLConnection as the
+        # pool's connection_class, not by a boolean flag on Connection.
+        # Passing ssl=True/False into the default Connection class (as this
+        # previously did, unconditionally) raises TypeError on the FIRST
+        # REAL COMMAND, since ConnectionPool builds connections lazily --
+        # and check_redis_master()'s broad `except Exception` below used to
+        # swallow that TypeError as an ordinary "Redis is down" condition.
+        # Net effect: this correlator produced zero incidents from any
+        # alert, unconditionally, with no error ever surfacing, regardless
+        # of whether REDIS_SSL was even turned on.
         if redis_ssl:
+            pool_kwargs["connection_class"] = redis.SSLConnection
             pool_kwargs["ssl_cert_reqs"] = "required"
             redis_ca_cert = os.getenv("REDIS_CA_CERT_PATH")
             if redis_ca_cert and os.path.exists(redis_ca_cert):
@@ -156,7 +182,13 @@ class IncidentCorrelator:
         self._last_master_check = 0
         self._master_check_interval = 5  # seconds
 
-    
+        # Fail loudly at construction time rather than only discovering the
+        # pool is misconfigured on the first alert -- this is exactly the
+        # class of bug (see the comment above) that let this run silently
+        # dead. A TypeError here means the pool itself is misconfigured and
+        # must crash the process, not be treated as "Redis is down."
+        self.redis.ping()
+
     def check_redis_master(self):
         now = time.time()
         if now - self._last_master_check < self._master_check_interval:
@@ -168,7 +200,13 @@ class IncidentCorrelator:
                 return False
             self._last_master_check = now
             return True
-        except Exception as e:
+        except redis.RedisError as e:
+            # Narrowed from `except Exception`: a genuine connectivity/
+            # protocol error is treated as "Redis is transiently down" and
+            # correlation is skipped for this call. Anything else (e.g. a
+            # TypeError from a misconfigured connection pool) is a bug and
+            # must propagate and crash loudly instead of being read as a
+            # routine outage.
             logger.error("Redis connection error: %s", e)
             return False
 
@@ -289,9 +327,10 @@ class IncidentCorrelator:
 
     def rollback_alert_seen(self, alert: dict):
         """
-        Compensating transaction: atomically removes alert_id from the seen set,
-        removes the alert from the sliding window list, and max(0, decr)  # guard negativeements the counter
-        in Redis if downstream incident emission fails. Allows DLQ replay to re-evaluate the incident.
+        Compensating transaction: atomically removes alert_id from the seen
+        set, removes the alert from the sliding window list, and decrements
+        (never below zero) the count in Redis if downstream incident
+        emission fails. Allows DLQ replay to re-evaluate the incident.
         """
         try:
             import re

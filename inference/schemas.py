@@ -1,8 +1,27 @@
-import json
-from jsonschema import validate, ValidationError
+import ipaddress
 
-# SECURITY FIX: Strict regex allows IPv4, IPv6, or "unknown", but instantly blocks XSS/SQL payloads
-IP_REGEX = r"^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$|^(([0-9a-fA-F]{1,4}:){7,7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:)|fe80:(:[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]{1,}|::(ffff(:0{1,4}){0,1}:){0,1}((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])|([0-9a-fA-F]{1,4}:){1,4}:((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9]))$|^unknown$"
+from jsonschema import validate, ValidationError, FormatChecker
+
+# A regex-based IP check previously lived here. Verified against it
+# directly: it accepted leading-zero octets ("01.02.03.04") that Python's
+# ipaddress module (used downstream by inference/correlation.py to key
+# Redis state) rejects since Python 3.9.5 -- so such an alert passed this
+# schema, published, and then silently vanished from correlation with only
+# a debug-level warning. Backing both the schema and the correlator with
+# the SAME ipaddress-based check means they can never again disagree on
+# what a valid IP is.
+_format_checker = FormatChecker()
+
+
+@_format_checker.checks("ip-address", raises=ValueError)
+def _check_ip_address(value):
+    if not isinstance(value, str):
+        return True  # let the schema's own "type" keyword handle this
+    ipaddress.ip_address(value)
+    return True
+
+
+_IP_SCHEMA = {"type": "string", "format": "ip-address"}
 
 ALERT_SCHEMA = {
     "type": "object",
@@ -18,17 +37,23 @@ ALERT_SCHEMA = {
         "severity": {"type": "string", "enum": ["low", "medium", "high", "critical"]},
         "mitre_tactic": {"type": ["string", "null"]},
         "mitre_technique": {"type": ["string", "null"]},
-        "source_ip": {"type": "string", "pattern": IP_REGEX},
+        "source_ip": _IP_SCHEMA,
         "destination_ip": {
             "anyOf": [
                 {"type": "null"},
-                {"type": "string", "pattern": IP_REGEX}
+                _IP_SCHEMA
             ]
         },
         "evidence": {"type": ["object", "null"]},
         "model_name": {"type": "string"},
         "model_version": {"type": "string"},
-        "schema_version": {"type": "string", "enum": ["1.0"]}
+        "schema_version": {"type": "string", "enum": ["1.0"]},
+        # Previously omitted under additionalProperties: False, which made
+        # a documented field (stream_processor_faust.py stamps this onto
+        # DLQ replay payloads; correlation.py reads it to bypass dedup)
+        # structurally impossible to validate -- every replayed alert
+        # failed validation and was re-queued forever.
+        "is_replay": {"type": "boolean"}
     },
     "required": [
         "timestamp", "alert_id", "event_type", "threat_class",
@@ -42,7 +67,12 @@ def validate_alert(alert_dict: dict) -> tuple[bool, str]:
     Strictly validates the outgoing alert against the enterprise schema constraint.
     """
     try:
-        validate(instance=alert_dict, schema=ALERT_SCHEMA)
+        # format_checker=_format_checker is required for jsonschema to
+        # enforce ANY declared "format" keyword at all (date-time and
+        # ip-address above) -- without it, format is silently decorative,
+        # which is how a non-date "timestamp" and an invalid IP previously
+        # passed validation unnoticed.
+        validate(instance=alert_dict, schema=ALERT_SCHEMA, format_checker=_format_checker)
         return True, ""
     except ValidationError as e:
         return False, e.message

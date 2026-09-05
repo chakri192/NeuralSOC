@@ -1,3 +1,4 @@
+import hashlib
 import os
 import torch
 import torch.nn as nn
@@ -126,7 +127,17 @@ def train_to_max():
             epochs_no_improve = 0
 
             traced_model = torch.jit.trace(model, torch.zeros((1, 35), dtype=torch.long))
-            traced_model.save("models/cnn_dga.pt")
+            save_path = "models/cnn_dga.pt"
+            traced_model.save(save_path)
+
+            # Without this, the next DeepLearningEngine startup's (correctly
+            # fail-safe) integrity check finds a stale/missing .sha256,
+            # fails closed, and crash-loops the fleet. scripts/train_dl_models.py
+            # already does this correctly -- mirror it here.
+            with open(save_path, "rb") as f:
+                file_hash = hashlib.sha256(f.read()).hexdigest()
+            with open(save_path + ".sha256", "w") as f:
+                f.write(file_hash + "\n")
         else:
             print(f"    Epoch {epoch:02d} | Val Accuracy: {acc_val:.3f}% (No improvement)")
             epochs_no_improve += 1

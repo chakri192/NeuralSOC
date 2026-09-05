@@ -121,6 +121,14 @@ class DeepLearningEngine:
             if not sanitized_ascii:
                 return False, 0.0, 0.0
 
+            def _sanitize(text: str) -> str:
+                # Same strategy as sanitized_ascii above (map, don't delete,
+                # unmapped chars) -- the two previously disagreed, so e.g. a
+                # homoglyph domain with Cyrillic lookalikes could collapse
+                # to a DIFFERENT, shorter string here than in sanitized_ascii,
+                # defeating length-based checks between the two variants.
+                return "".join(c if c in self.char_map else "-" for c in text)
+
             # Check deadline before multi-segment inspection & tensor creation
             if deadline is not None and time.time() > deadline:
                 logger.warning("DL inference aborted: deadline expired before tensor creation")
@@ -130,7 +138,7 @@ class DeepLearningEngine:
             domains_to_check = [sanitized_ascii]
             # If the domain is an IDN/homoglyph (punycode xn--), inspect both punycode and ASCII-mapped variants
             if ascii_domain != clean_domain:
-                sanitized_clean = "".join(c if c in self.char_map else "" for c in clean_domain)
+                sanitized_clean = _sanitize(clean_domain)
                 if sanitized_clean and sanitized_clean not in domains_to_check:
                     domains_to_check.append(sanitized_clean)
 
@@ -147,25 +155,36 @@ class DeepLearningEngine:
             highest_prob = 0.0
             all_slices = []
 
-            for d in domains_to_check[:8]:
+            # Each domain variant gets its OWN fair share of the 32-slice
+            # budget, rather than a shared pool the first (usually longest)
+            # variant can exhaust alone. A DNS-tunneling-style domain near
+            # the 253-char DNS max can by itself produce enough sliding-
+            # window slices to fill all 32 slots -- previously leaving
+            # ZERO budget for the punycode/homoglyph variant, the SLD, or
+            # any subdomain label, i.e. exactly the variants this
+            # multi-segment defense exists to inspect.
+            domains_subset = domains_to_check[:8]
+            budget_per_domain = max(1, 32 // len(domains_subset)) if domains_subset else 32
+
+            for d in domains_subset:
                 encoded = [self.char_map.get(c, 0) for c in d]
                 if not encoded:
                     continue
 
+                domain_slices = []
                 # Sliding window across domain to ensure zero blind spots for long domains
                 if len(encoded) > 35:
                     step = 15
                     for start in range(0, len(encoded) - 35 + 1, step):
-                        all_slices.append(encoded[start:start + 35])
-                        if len(all_slices) >= 32:
+                        domain_slices.append(encoded[start:start + 35])
+                        if len(domain_slices) >= budget_per_domain:
                             break
-                    if len(all_slices) < 32 and (len(encoded) - 35) % step != 0:
-                        all_slices.append(encoded[-35:])
+                    if len(domain_slices) < budget_per_domain and (len(encoded) - 35) % step != 0:
+                        domain_slices.append(encoded[-35:])
                 else:
-                    all_slices.append(encoded + [0] * (35 - len(encoded)))
+                    domain_slices.append(encoded + [0] * (35 - len(encoded)))
 
-                if len(all_slices) >= 32:
-                    break
+                all_slices.extend(domain_slices[:budget_per_domain])
 
             # Bound slices to 32 to guarantee deterministic O(1) memory and latency
             all_slices = all_slices[:32]

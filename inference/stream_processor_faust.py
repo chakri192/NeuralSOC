@@ -26,7 +26,16 @@ enricher = ThreatEnricher()
 
 logger = logging.getLogger(__name__)
 BROKER_URL = os.getenv("REDPANDA_BROKERS", "soc-redpanda-cluster.prod.svc.cluster.local:9092")
-app = App('tsoc-stream-processor', broker=f'kafka://{BROKER_URL}')
+# datadir explicit: Faust defaults it to a directory under the current
+# working directory (CWD, /app in the container) when omitted, which
+# collides with k8s/soc-deployment.yaml's readOnlyRootFilesystem: true --
+# guaranteed CrashLoopBackOff on `mkdir /app/tsoc-stream-processor-data`.
+# /var/lib/app is already a writable emptyDir mount on that manifest.
+app = App(
+    'tsoc-stream-processor',
+    broker=f'kafka://{BROKER_URL}',
+    datadir=os.getenv("FAUST_DATADIR", "/var/lib/app/faust"),
+)
 raw_traffic_topic = app.topic('raw_traffic', value_type=dict)
 alerts_topic = app.topic('security_alerts', value_type=dict)
 incidents_topic = app.topic("incidents")
@@ -197,8 +206,19 @@ async def process_traffic(stream):
                     # persisted in the broker.  A Kafka timeout before this point
                     # routes to DLQ without touching Redis, preventing phantom
                     # incident state that can never be reconciled.
+                    #
+                    # force=True is load-bearing: Topic.send() called from inside
+                    # an agent (as this is) with force=False (its default) does
+                    # NOT publish -- it ATTACHES the message to the currently-
+                    # processing event, deferred until that event's own offset
+                    # commits. The await then returns almost immediately
+                    # regardless of real broker state, so the timeout/DLQ
+                    # handling below could never actually trigger on a slow or
+                    # unreachable broker. force=True sends now and returns the
+                    # real RecordMetadata acknowledgment this code already
+                    # assumes it has.
                     try:
-                        await asyncio.wait_for(alerts_topic.send(value=alert), timeout=3.0)
+                        await asyncio.wait_for(alerts_topic.send(value=alert, force=True), timeout=3.0)
                     except asyncio.TimeoutError:
                         logger.warning("Alert Kafka publish timed out for %s; routing to DLQ (Redis NOT mutated)", alert.get("alert_id"))
                         await _send_dlq_safely(event, alert, "Timeout during alert Kafka publish")
@@ -222,7 +242,7 @@ async def process_traffic(stream):
                                 _submitted_io_futures.discard(io_future)
                         if incident:
                             try:
-                                await asyncio.wait_for(incidents_topic.send(value=incident), timeout=3.0)
+                                await asyncio.wait_for(incidents_topic.send(value=incident, force=True), timeout=3.0)
                             except Exception as inc_send_err:
                                 logger.error("Incident Kafka send failed for %s: %s; rolling back alert seen in Redis", incident.get("incident_id"), inc_send_err)
                                 # Asynchronous rollback dispatched to io_executor to prevent event-loop blocking
@@ -308,7 +328,10 @@ async def _send_dlq_safely(event, alert, error_str):
     }
     sent = False
     try:
-        await asyncio.wait_for(dead_letter_topic.send(value=payload), timeout=2.0)
+        # force=True: see the comment on alerts_topic.send above -- without
+        # it this "attempt" rarely reaches the broker at all, so the local-
+        # disk fallback below would almost never actually trigger.
+        await asyncio.wait_for(dead_letter_topic.send(value=payload, force=True), timeout=2.0)
         sent = True
     except Exception as dlq_err:
         logger.error("Kafka DLQ send failed (%s); persisting to local durable disk DLQ", dlq_err)

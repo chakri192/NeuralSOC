@@ -31,18 +31,41 @@ def shannon_entropy(data: str) -> float:
             entropy -= p_x * math.log2(p_x)
     return entropy
 
+# Common CDN/cloud infrastructure suffixes whose subdomains are routinely
+# hashed/randomized for cache-busting or load balancing -- not DGA malware.
+# Measured empirically (see rules.py's DGA fallback): cloudfront.net,
+# sharepoint.com, elb.amazonaws.com, and gravatar.com subdomains all
+# exceeded a naive whole-query entropy threshold of 3.8. Not exhaustive;
+# meant to suppress the most common false-positive sources.
+KNOWN_INFRA_SUFFIXES = (
+    "cloudfront.net", "amazonaws.com", "akamaized.net", "akamaiedge.net",
+    "akamai.net", "fastly.net", "sharepoint.com", "gravatar.com",
+    "googleusercontent.com", "googleapis.com", "windows.net",
+    "azureedge.net", "cloudflare.com", "github.io", "githubusercontent.com",
+)
+
+
 def extract_dns_features(event: dict) -> dict:
     query = event.get("query", "")
     if not query:
         return {}
-    
+
     length = len(query)
     digit_count = sum(c.isdigit() for c in query)
-    
+
+    # DGA/entropy scoring is measured on the leftmost label, not the whole
+    # FQDN: diluting entropy with a known-benign suffix ("...cloudfront.net")
+    # is what let ordinary CDN/cloud subdomains read as high-entropy in the
+    # first place.
+    label = query.split(".")[0] if query else ""
+
     return {
         "domain_length": length,
         "shannon_entropy": shannon_entropy(query),
-        "digit_ratio": digit_count / length if length > 0 else 0.0
+        "label_entropy": shannon_entropy(label),
+        "label_length": len(label),
+        "digit_ratio": digit_count / length if length > 0 else 0.0,
+        "is_known_infra_suffix": query.lower().rstrip(".").endswith(KNOWN_INFRA_SUFFIXES),
     }
 
 def extract_flow_features(event: dict) -> dict:

@@ -3,7 +3,6 @@ import asyncio
 import ipaddress
 import json
 import logging
-import re
 import ssl
 import time
 from typing import Tuple

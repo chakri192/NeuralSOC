@@ -130,9 +130,9 @@ PLAYBOOK_TEMPLATES = {
 
 
 import hashlib
+import ipaddress
 import shlex
 import re
-from typing import Dict, Any
 
 THREAT_CLASS_MAP = {
     "DDOS": "VOLUMETRIC_PROTOCOL_DDOS",
@@ -155,7 +155,20 @@ THREAT_CLASS_MAP = {
 
 def enrich_ip_intel(ip_address: str) -> Dict[str, str]:
     """Mock GeoIP and Threat Intelligence Enrichment (Quality of Life Feature)."""
-    if not ip_address or ip_address.startswith(("192.168", "10.", "172.16", "127.", "0.")):
+    # A naive string-prefix check ("172.16") previously misclassified most
+    # of RFC1918's actual /12 (172.17.x.x-172.31.x.x -- the bulk of the
+    # block, and Docker's own default bridge range) as external, while
+    # also misclassifying genuinely public 172.160.0.0-172.169.255.255 as
+    # internal/trusted. inference/enrichment.py already does this
+    # correctly with the ipaddress module -- reuse that logic instead of
+    # reimplementing it, incorrectly, a second time.
+    if not ip_address:
+        return {"country": "Internal / RFC1918", "asn": "N/A", "reputation": "Trusted"}
+    try:
+        addr = ipaddress.ip_address(ip_address)
+        if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_unspecified:
+            return {"country": "Internal / RFC1918", "asn": "N/A", "reputation": "Trusted"}
+    except ValueError:
         return {"country": "Internal / RFC1918", "asn": "N/A", "reputation": "Trusted"}
 
     # Deterministic mock based on hash to keep it consistent
