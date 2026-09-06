@@ -178,6 +178,27 @@ class IncidentCorrelator:
                     elif paths.capath:
                         pool_kwargs["ssl_ca_path"] = paths.capath
 
+            # Client cert (mutual TLS): optional, same pattern as
+            # REDIS_CA_CERT_PATH above -- unset (or --tls-auth-clients no
+            # server-side, docker-compose.yml's prior default) means no
+            # client cert is presented, preserving every deployment that
+            # hasn't provisioned one yet. Both must be set together; a
+            # cert with no key (or vice versa) is a real misconfiguration,
+            # not a "just skip it" case, so it's deliberately not silently
+            # half-applied. Existence is checked (not just that the env
+            # vars are set) because k8s/soc-deployment.yaml sets both
+            # unconditionally to a cert-manager-issued Secret's mount path
+            # -- if that Certificate hasn't actually been issued yet (or
+            # cert-manager isn't installed), the path exists as an env var
+            # but not as a real file, and redis-py would otherwise only
+            # discover that by failing to build an SSL context at
+            # connection time.
+            client_cert = os.getenv("REDIS_CLIENT_CERT_PATH")
+            client_key = os.getenv("REDIS_CLIENT_KEY_PATH")
+            if client_cert and client_key and os.path.exists(client_cert) and os.path.exists(client_key):
+                pool_kwargs["ssl_certfile"] = client_cert
+                pool_kwargs["ssl_keyfile"] = client_key
+
         pool = redis.ConnectionPool(**pool_kwargs)
         self.redis = redis.Redis(connection_pool=pool)
         self.time_window_sec = 300

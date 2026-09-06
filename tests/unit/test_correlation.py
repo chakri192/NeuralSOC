@@ -63,6 +63,70 @@ class TestSslConnectionSetup:
         fake_client.ping.assert_called_once()
         assert correlator.redis is fake_client
 
+    def test_client_cert_is_presented_when_both_env_vars_are_set(self, monkeypatch, tmp_path):
+        client_cert, client_key = tmp_path / "client.crt", tmp_path / "client.key"
+        client_cert.write_text("fake-client-cert")
+        client_key.write_text("fake-client-key")
+        monkeypatch.setenv("REDIS_SSL", "true")
+        monkeypatch.setenv("REDIS_CLIENT_CERT_PATH", str(client_cert))
+        monkeypatch.setenv("REDIS_CLIENT_KEY_PATH", str(client_key))
+
+        captured = {}
+
+        def fake_pool(**kwargs):
+            captured.update(kwargs)
+            return MagicMock()
+
+        with patch("inference.correlation.redis.ConnectionPool", side_effect=fake_pool), \
+             patch("inference.correlation.redis.Redis", return_value=MagicMock()):
+            IncidentCorrelator()
+
+        assert captured.get("ssl_certfile") == str(client_cert)
+        assert captured.get("ssl_keyfile") == str(client_key)
+
+    def test_client_cert_is_not_presented_when_only_one_of_the_pair_is_set(self, monkeypatch, tmp_path):
+        # Both-or-neither: a cert with no key (or vice versa) is a real
+        # misconfiguration, not something to silently half-apply.
+        client_cert = tmp_path / "client.crt"
+        client_cert.write_text("fake-client-cert")
+        monkeypatch.setenv("REDIS_SSL", "true")
+        monkeypatch.setenv("REDIS_CLIENT_CERT_PATH", str(client_cert))
+        monkeypatch.delenv("REDIS_CLIENT_KEY_PATH", raising=False)
+
+        captured = {}
+
+        def fake_pool(**kwargs):
+            captured.update(kwargs)
+            return MagicMock()
+
+        with patch("inference.correlation.redis.ConnectionPool", side_effect=fake_pool), \
+             patch("inference.correlation.redis.Redis", return_value=MagicMock()):
+            IncidentCorrelator()
+
+        assert "ssl_certfile" not in captured
+        assert "ssl_keyfile" not in captured
+
+    def test_client_cert_paths_set_but_files_missing_are_not_presented(self, monkeypatch, tmp_path):
+        # k8s/soc-deployment.yaml sets both env vars unconditionally to a
+        # cert-manager Secret's mount path -- if that Certificate was
+        # never actually issued, the paths are set but not real files.
+        monkeypatch.setenv("REDIS_SSL", "true")
+        monkeypatch.setenv("REDIS_CLIENT_CERT_PATH", str(tmp_path / "client.crt"))  # never written
+        monkeypatch.setenv("REDIS_CLIENT_KEY_PATH", str(tmp_path / "client.key"))
+
+        captured = {}
+
+        def fake_pool(**kwargs):
+            captured.update(kwargs)
+            return MagicMock()
+
+        with patch("inference.correlation.redis.ConnectionPool", side_effect=fake_pool), \
+             patch("inference.correlation.redis.Redis", return_value=MagicMock()):
+            IncidentCorrelator()
+
+        assert "ssl_certfile" not in captured
+        assert "ssl_keyfile" not in captured
+
     def test_ssl_enabled_without_ca_cert_path_falls_back_to_certifi(self, monkeypatch):
         monkeypatch.setenv("REDIS_SSL", "true")
         monkeypatch.delenv("REDIS_CA_CERT_PATH", raising=False)

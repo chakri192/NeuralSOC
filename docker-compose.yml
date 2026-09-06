@@ -81,19 +81,15 @@ services:
     # var instead of silently starting redis-server with auth disabled --
     # the previous ${REDIS_PASSWORD:-} default was the difference between
     # a loud misconfiguration and a silent one.
-    # --tls-auth-clients no: redis-server defaults to REQUIRING a client
-    # certificate the moment --tls-ca-cert-file is set (mutual TLS) --
-    # discovered by actually running this compose file end-to-end, where
-    # every client (inference/correlation.py, api/deps.py) was refused
-    # with "certificate required" despite correctly authenticating via
-    # requirepass. Neither client was ever built to present one (there's
-    # no client cert generation anywhere in this repo, only the server
-    # cert scripts/generate_dev_certs.sh produces) -- as configured, the
-    # correlation engine could never connect to Redis at all. Server-side
-    # TLS (encryption + server-cert verification via REDIS_CA_CERT_PATH)
-    # plus requirepass is the auth model this codebase actually
-    # implements; mTLS was never wired up to be usable.
-    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD must be set}", "--tls-port", "6379", "--port", "0", "--tls-cert-file", "/certs/redis.crt", "--tls-key-file", "/certs/redis.key", "--tls-ca-cert-file", "/certs/ca.crt", "--tls-auth-clients", "no"]
+    # --tls-auth-clients yes (back from "no"): redis-server defaults to
+    # REQUIRING a client certificate the moment --tls-ca-cert-file is set
+    # (mutual TLS) -- this was flipped to "no" earlier because neither
+    # client presented one at all (no client cert existed anywhere in this
+    # repo). scripts/generate_dev_certs.sh now generates client.crt/
+    # client.key, and api/deps.py + inference/correlation.py present them
+    # via REDIS_CLIENT_CERT_PATH/REDIS_CLIENT_KEY_PATH -- real mutual TLS,
+    # not just server-side encryption + requirepass.
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD must be set}", "--tls-port", "6379", "--port", "0", "--tls-cert-file", "/certs/redis.crt", "--tls-key-file", "/certs/redis.key", "--tls-ca-cert-file", "/certs/ca.crt", "--tls-auth-clients", "yes"]
     ports:
       - "127.0.0.1:6379:6379"
     volumes:
@@ -117,7 +113,11 @@ services:
     environment:
       REDIS_PASSWORD: "${REDIS_PASSWORD:?REDIS_PASSWORD must be set}"
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli -h 127.0.0.1 -p 6379 --tls --cacert /certs/ca.crt -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+      # --cert/--key: with --tls-auth-clients yes above, this healthcheck's
+      # own redis-cli connection is subject to mutual TLS exactly like any
+      # other client -- without presenting client.crt/client.key here too,
+      # the healthcheck itself starts failing with "certificate required".
+      test: ["CMD-SHELL", "redis-cli -h 127.0.0.1 -p 6379 --tls --cacert /certs/ca.crt --cert /certs/client.crt --key /certs/client.key -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
       interval: 5s
       timeout: 5s
       retries: 10

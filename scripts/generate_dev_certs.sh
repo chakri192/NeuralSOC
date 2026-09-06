@@ -10,7 +10,7 @@ set -euo pipefail
 CERT_DIR="$(cd "$(dirname "$0")/.." && pwd)/certs"
 mkdir -p "$CERT_DIR"
 
-if [[ -f "$CERT_DIR/redis.crt" && -f "$CERT_DIR/redis.key" && -f "$CERT_DIR/ca.crt" ]]; then
+if [[ -f "$CERT_DIR/redis.crt" && -f "$CERT_DIR/redis.key" && -f "$CERT_DIR/ca.crt" && -f "$CERT_DIR/client.crt" && -f "$CERT_DIR/client.key" ]]; then
     echo "==> certs/ already populated; remove $CERT_DIR to regenerate."
     exit 0
 fi
@@ -28,7 +28,18 @@ openssl x509 -req -in "$CERT_DIR/redis.csr" -CA "$CERT_DIR/ca.crt" -CAkey "$CERT
     -CAcreateserial -out "$CERT_DIR/redis.crt" -days 3650 -sha256 \
     -extfile <(printf "subjectAltName=DNS:soc-redis,DNS:localhost,IP:127.0.0.1")
 
-rm -f "$CERT_DIR/redis.csr" "$CERT_DIR/ca.srl"
+# Client cert: presented by api/deps.py and inference/correlation.py so
+# redis-server's --tls-auth-clients yes (docker-compose.yml) can verify
+# the caller, not just encrypt the channel. One shared cert for both
+# consumers -- there's no per-service authorization distinction on the
+# Redis side here to justify separate identities for local dev.
+openssl genrsa -out "$CERT_DIR/client.key" 2048 2>/dev/null
+openssl req -new -key "$CERT_DIR/client.key" \
+    -subj "/CN=tsoc-redis-client" -out "$CERT_DIR/client.csr"
+openssl x509 -req -in "$CERT_DIR/client.csr" -CA "$CERT_DIR/ca.crt" -CAkey "$CERT_DIR/ca.key" \
+    -CAcreateserial -out "$CERT_DIR/client.crt" -days 3650 -sha256
+
+rm -f "$CERT_DIR/redis.csr" "$CERT_DIR/client.csr" "$CERT_DIR/ca.srl"
 # ca.key is never read by anything except this script (it only signs
 # redis.key at generation time, here, on the host) -- kept as owner-only.
 chmod 600 "$CERT_DIR/ca.key"
@@ -45,4 +56,9 @@ chmod 600 "$CERT_DIR/ca.key"
 # container-UID alignment for. World-readable is an acceptable trade for
 # working identically on every Docker host.
 chmod 644 "$CERT_DIR/redis.key"
+# client.key, unlike redis.key, is only ever read by whatever host process
+# generated it (api/inference run as bare `make api`/`make pipeline`
+# processes, not containers -- see README) -- no Docker UID boundary to
+# cross, so the stricter owner-only default is safe here.
+chmod 600 "$CERT_DIR/client.key"
 echo "==> Done. docker compose up can now start the redis service."

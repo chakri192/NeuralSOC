@@ -115,21 +115,66 @@ REDIS_SSL = os.getenv("REDIS_SSL", "true").lower() in ("true", "1", "yes")
 if REDIS_SSL and not REDIS_PASSWORD:
     raise RuntimeError("REDIS_PASSWORD required when REDIS_SSL=true")
 
-_scheme = "rediss" if REDIS_SSL else "redis"
-_auth = f":{urllib.parse.quote_plus(REDIS_PASSWORD)}@" if REDIS_PASSWORD else ""
-REDIS_STORAGE_URI = os.getenv("LIMITER_STORAGE_URI", f"{_scheme}://{_auth}{REDIS_HOST}:{REDIS_PORT}/1")
+def _build_redis_storage_uri(scheme, host, port, password, ssl_enabled, ca_cert_path, client_cert_path, client_key_path):
+    """Pulled out to a pure function (rather than inline module-level
+    statements) so the TLS query-param construction is directly
+    unit-testable without reimporting this module (which has real
+    side effects at import time -- constructing the actual Limiter).
 
-# redis-py's from_url() (what slowapi/limits use under storage_uri) has no
-# way to trust a custom CA short of a URL query parameter -- without this,
-# a self-signed or internal CA (inference/correlation.py already supports
-# the same REDIS_CA_CERT_PATH) fails verification here even though the
-# certificate itself is perfectly valid, discovered only by actually
-# running this against the docker-compose redis service's self-signed
-# dev cert rather than a mock.
-if REDIS_SSL:
-    _redis_ca_cert = os.getenv("REDIS_CA_CERT_PATH")
-    if _redis_ca_cert and os.path.exists(_redis_ca_cert):
-        REDIS_STORAGE_URI += f"?ssl_cert_reqs=required&ssl_ca_certs={urllib.parse.quote(_redis_ca_cert)}"
+    redis-py's from_url() (what slowapi/limits use under storage_uri) has
+    no way to trust a custom CA, or present a client cert for mutual TLS,
+    short of URL query parameters -- without ssl_ca_certs, a self-signed
+    or internal CA (inference/correlation.py already supports the same
+    REDIS_CA_CERT_PATH) fails verification here even though the
+    certificate itself is perfectly valid, discovered only by actually
+    running this against the docker-compose redis service's self-signed
+    dev cert rather than a mock.
+    """
+    auth = f":{urllib.parse.quote_plus(password)}@" if password else ""
+    uri = f"{scheme}://{auth}{host}:{port}/1"
+
+    if ssl_enabled:
+        ssl_query_params = {}
+        if ca_cert_path and os.path.exists(ca_cert_path):
+            ssl_query_params["ssl_cert_reqs"] = "required"
+            ssl_query_params["ssl_ca_certs"] = ca_cert_path
+        # Client cert (mutual TLS): both-or-neither -- a cert with no key
+        # (or vice versa) is a real misconfiguration, not a "just skip
+        # it" case, so it's deliberately not silently half-applied.
+        # Existence is checked (not just that the paths are non-empty)
+        # because k8s/soc-deployment.yaml sets both env vars
+        # unconditionally to a cert-manager-issued Secret's mount path --
+        # if that Certificate hasn't actually been issued yet, the path
+        # exists as a string but not as a real file, and redis-py would
+        # otherwise only discover that by failing to build an SSL context
+        # at connection time. Same pattern as inference/correlation.py's
+        # identical handling.
+        if client_cert_path and client_key_path and os.path.exists(client_cert_path) and os.path.exists(client_key_path):
+            ssl_query_params["ssl_certfile"] = client_cert_path
+            ssl_query_params["ssl_keyfile"] = client_key_path
+        if ssl_query_params:
+            uri += "?" + "&".join(f"{k}={urllib.parse.quote(v)}" for k, v in ssl_query_params.items())
+
+    return uri
+
+
+if "LIMITER_STORAGE_URI" in os.environ:
+    # Preserve os.getenv(key, default)'s exact semantics: only the
+    # variable's *absence* falls through to the built URI below -- an
+    # explicitly-set-but-empty value must still win, unlike `or`, which
+    # would treat "" as absent too.
+    REDIS_STORAGE_URI = os.environ["LIMITER_STORAGE_URI"]
+else:
+    REDIS_STORAGE_URI = _build_redis_storage_uri(
+        scheme="rediss" if REDIS_SSL else "redis",
+        host=REDIS_HOST,
+        port=REDIS_PORT,
+        password=REDIS_PASSWORD,
+        ssl_enabled=REDIS_SSL,
+        ca_cert_path=os.getenv("REDIS_CA_CERT_PATH"),
+        client_cert_path=os.getenv("REDIS_CLIENT_CERT_PATH"),
+        client_key_path=os.getenv("REDIS_CLIENT_KEY_PATH"),
+    )
 
 try:
     # Fail-closed rate limiter: do NOT swallow errors. If Redis is unreachable,

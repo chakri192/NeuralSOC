@@ -229,6 +229,15 @@ jobs:
           export DATABASE_URL="sqlite:///$(pwd)/tsoc_ci_smoke.db"
           export REDIS_SSL=true
           export REDIS_CA_CERT_PATH="$(pwd)/certs/ca.crt"
+          # docker-compose.yml's redis service now enforces
+          # --tls-auth-clients yes (real mutual TLS, not just server-side
+          # encryption) -- without presenting a client cert here too,
+          # every real connection from this job's api/inference processes
+          # gets refused with "certificate required", the same failure
+          # mode this repo hit once already before client certs existed
+          # at all.
+          export REDIS_CLIENT_CERT_PATH="$(pwd)/certs/client.crt"
+          export REDIS_CLIENT_KEY_PATH="$(pwd)/certs/client.key"
           export DB_SSLMODE=verify-full
           export FAUST_DATADIR=/tmp/faust-ci-data
           export REDPANDA_BROKERS=localhost:9092
