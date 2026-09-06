@@ -295,7 +295,11 @@ async def process_traffic(stream):
                     logger.error("Detection processing loop error for %s: %s", det, det_outer_err)
                     await _send_dlq_safely(event, {"detection": str(det)}, f"DetectionLoopError: {det_outer_err}")
 
-_DLQ_ALLOWED_BASE_DIR = os.path.abspath("/tmp/dlq")  # nosec B108
+# realpath() (not abspath()) so a symlink planted inside /tmp/dlq pointing
+# outside it is caught too -- abspath only collapses ".." lexically, it
+# doesn't follow symlinks, so a resolved string can start with the allowed
+# prefix while the actual file it names lives elsewhere.
+_DLQ_ALLOWED_BASE_DIR = os.path.realpath("/tmp/dlq")  # nosec B108
 _DLQ_DEFAULT_PATH = "/tmp/dlq/alerts.jsonl"  # nosec B108
 
 
@@ -317,7 +321,7 @@ def _resolve_dlq_file_path(raw_dlq_path, pod_name):
         name, ext = os.path.splitext(filename)
         candidate = os.path.join(base_dir, f"{name}-{pod_name}{ext}") if pod_name != "default" else raw_dlq_path
 
-    resolved = os.path.abspath(candidate)
+    resolved = os.path.realpath(candidate)
     if not resolved.startswith(_DLQ_ALLOWED_BASE_DIR):
         logger.warning("Dangerous or out-of-bounds DLQ path rejected (%s); defaulting to %s", candidate, _DLQ_DEFAULT_PATH)  # nosec B108
         return _DLQ_DEFAULT_PATH

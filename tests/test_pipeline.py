@@ -656,26 +656,34 @@ class TestSOCPipelineSecurity(unittest.TestCase):
         dedicated dlq-data volume mount, k8s/soc-deployment.yaml), falling
         back to the safe default -- mirroring the allow-listing
         api/kafka_sink.py already applies to its own DLQ_FILE_PATH env var."""
+        import inference.stream_processor_faust as sp
         from inference.stream_processor_faust import _resolve_dlq_file_path
 
-        # A legitimate templated path stays inside /tmp/dlq, per-pod partitioned.
+        # realpath() (not abspath()) resolves symlinks -- on macOS /tmp
+        # itself is a symlink to /private/tmp, so the allowed base dir and
+        # every expected resolved path here are derived the same way the
+        # real function derives them, rather than hardcoding "/tmp" and
+        # breaking on any platform where that symlink exists.
+        base = sp._DLQ_ALLOWED_BASE_DIR
+
+        # A legitimate templated path stays inside the allowed dir, per-pod partitioned.
         self.assertEqual(
             _resolve_dlq_file_path("/tmp/dlq/alerts-{pod}.jsonl", "stream-processor-0"),
-            "/tmp/dlq/alerts-stream-processor-0.jsonl",
+            f"{base}/alerts-stream-processor-0.jsonl",
         )
         # A legitimate non-templated path gets auto-partitioned by pod name.
         self.assertEqual(
             _resolve_dlq_file_path("/tmp/dlq/alerts.jsonl", "stream-processor-1"),
-            "/tmp/dlq/alerts-stream-processor-1.jsonl",
+            f"{base}/alerts-stream-processor-1.jsonl",
         )
         # An out-of-bounds STREAM_DLQ_FILE_PATH must be rejected and fall
-        # back to the safe default, never resolve outside /tmp/dlq.
-        self.assertEqual(_resolve_dlq_file_path("/etc/passwd-{pod}", "default"), "/tmp/dlq/alerts.jsonl")
-        self.assertEqual(_resolve_dlq_file_path("/tmp/dlq/../../etc/passwd", "default"), "/tmp/dlq/alerts.jsonl")
+        # back to the safe default, never resolve outside the allowed dir.
+        self.assertEqual(_resolve_dlq_file_path("/etc/passwd-{pod}", "default"), sp._DLQ_DEFAULT_PATH)
+        self.assertEqual(_resolve_dlq_file_path("/tmp/dlq/../../etc/passwd", "default"), sp._DLQ_DEFAULT_PATH)
         # A malicious pod name (e.g. an attacker-influenced HOSTNAME) must
-        # not be able to escape /tmp/dlq via embedded ".." segments either.
+        # not be able to escape the allowed dir via embedded ".." segments either.
         resolved = _resolve_dlq_file_path("/tmp/dlq/alerts.jsonl", "../../etc/evil")
-        self.assertTrue(resolved.startswith("/tmp/dlq"))
+        self.assertTrue(resolved.startswith(base))
 
     def test_pod_partitioned_dlq_paths(self):
         """Verify DLQ path formatting with pod names."""

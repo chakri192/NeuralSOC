@@ -23,10 +23,14 @@ brokers = os.getenv("REDPANDA_BROKERS", "soc-redpanda-cluster.prod.svc.cluster.l
 topic = os.getenv("ALERTS_TOPIC", "security_alerts")
 DLQ_TOPIC = os.getenv("ALERTS_DLQ_TOPIC", "security_alerts_dlq")
 
-# Path Sanitization and Directory Whitelisting to prevent path traversal
+# Path Sanitization and Directory Whitelisting to prevent path traversal.
+# realpath() (not abspath()) so a symlink planted inside /tmp/dlq pointing
+# outside it is caught too -- abspath only collapses ".." lexically, it
+# doesn't follow symlinks, so a resolved string can start with the allowed
+# prefix while the actual file it names lives elsewhere.
 _raw_dlq_path = os.getenv("DLQ_FILE_PATH", "/tmp/dlq/alerts.jsonl")  # nosec B108
-_allowed_base_dir = os.path.abspath("/tmp/dlq")  # nosec B108
-_resolved_dlq_path = os.path.abspath(_raw_dlq_path)
+_allowed_base_dir = os.path.realpath("/tmp/dlq")  # nosec B108
+_resolved_dlq_path = os.path.realpath(_raw_dlq_path)
 
 if not _resolved_dlq_path.startswith(_allowed_base_dir):
     logger.warning("Dangerous or out-of-bounds DLQ path rejected (%s); defaulting to %s", _raw_dlq_path, "/tmp/dlq/alerts.jsonl")  # nosec B108
