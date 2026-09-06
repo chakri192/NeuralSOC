@@ -93,6 +93,12 @@ spec:
       - name: cache
         emptyDir:
           sizeLimit: 500Mi
+      - name: redis-client-cert
+        secret:
+          # Populated by cert-manager (k8s/cert-manager-internal-ca.yaml's
+          # tsoc-redis-client-cert Certificate) as tls.crt/tls.key/ca.crt --
+          # standard kubernetes.io/tls secret shape.
+          secretName: tsoc-redis-client-cert
       containers:
       - env:
         # optional: true -- nothing in this codebase reads either variable
@@ -129,6 +135,15 @@ spec:
             secretKeyRef:
               name: tsoc-secrets
               key: redis_password
+        # Both optional: true -- Redis (deployed outside this repo, see
+        # k8s/network-policies.yaml) may not yet enforce
+        # --tls-auth-clients yes; api/deps.py and inference/correlation.py
+        # both treat an unset pair as "no client cert presented", matching
+        # every deployment that hasn't provisioned one yet.
+        - name: REDIS_CLIENT_CERT_PATH
+          value: /etc/redis-client-cert/tls.crt
+        - name: REDIS_CLIENT_KEY_PATH
+          value: /etc/redis-client-cert/tls.key
         # Always, matching the api/kafka-sink containers below and this
         # cluster's own require-signed-images Kyverno policy, which
         # enforces imagePullPolicy: Always on every pod in this namespace.
@@ -142,6 +157,9 @@ spec:
           mountPath: /tmp/dlq
         - name: cache
           mountPath: /var/lib/app
+        - name: redis-client-cert
+          mountPath: /etc/redis-client-cert
+          readOnly: true
         resources:
           limits:
             cpu: 1000m
@@ -217,6 +235,12 @@ spec:
       - name: cache
         emptyDir:
           sizeLimit: 500Mi
+      - name: redis-client-cert
+        secret:
+          # Same cert-manager-issued Secret the stream-processor mounts
+          # above -- one shared client identity for both Redis consumers,
+          # matching scripts/generate_dev_certs.sh's local-dev equivalent.
+          secretName: tsoc-redis-client-cert
       containers:
       - env:
         # optional: true -- nothing in this codebase reads either variable
@@ -267,6 +291,13 @@ spec:
             secretKeyRef:
               name: tsoc-secrets
               key: redis_password
+        # Both optional: true in effect (api/deps.py treats an unset pair
+        # as "no client cert presented") -- Redis (deployed outside this
+        # repo) may not yet enforce --tls-auth-clients yes.
+        - name: REDIS_CLIENT_CERT_PATH
+          value: /etc/redis-client-cert/tls.crt
+        - name: REDIS_CLIENT_KEY_PATH
+          value: /etc/redis-client-cert/tls.key
         image: your-registry.com/tsoc/api@sha256:9f32e2f4ec908b6531b278fa2ae3fe694ad4a2d4f874a3f56248c4ff85f5aa24
         imagePullPolicy: Always
         name: fastapi
@@ -282,6 +313,9 @@ spec:
           mountPath: /tmp/dlq
         - name: cache
           mountPath: /var/lib/app
+        - name: redis-client-cert
+          mountPath: /etc/redis-client-cert
+          readOnly: true
         resources:
           limits:
             cpu: 500m

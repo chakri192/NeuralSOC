@@ -50,3 +50,27 @@ metadata:
 spec:
   ca:
     secretName: tsoc-internal-ca-secret
+---
+# Client certificate for mutual TLS to Redis (inference/correlation.py,
+# api/deps.py's rate limiter). Redis itself is deployed and operated
+# outside this repo (see k8s/network-policies.yaml's cross-namespace
+# egress rule to namespace "redis") -- this only provisions the client
+# side, ready for whenever that Redis enforces --tls-auth-clients yes,
+# the same way docker-compose.yml's bundled Redis now does locally.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: tsoc-redis-client-cert
+  namespace: tsoc
+spec:
+  commonName: tsoc-redis-client
+  secretName: tsoc-redis-client-cert
+  duration: 8760h  # 1 year
+  renewBefore: 720h  # 30 days
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: tsoc-internal-ca-issuer
+    kind: ClusterIssuer
+    group: cert-manager.io

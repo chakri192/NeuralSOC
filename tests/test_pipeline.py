@@ -923,6 +923,45 @@ class TestSOCPipelineSecurity(unittest.TestCase):
         self.assertEqual(sink_monitor["spec"]["selector"]["matchLabels"]["app"], "tsoc-kafka-sink")
         self.assertEqual(sink_monitor["spec"]["endpoints"][0]["port"], "metrics")
 
+    def test_redis_client_cert_secret_name_matches_between_certificate_and_deployment_mounts(self):
+        """cert-manager-internal-ca.yaml's Certificate writes to a Secret
+        named by its own `secretName`; soc-deployment.yaml's volumes must
+        reference that exact name, and the API/stream-processor
+        containers' REDIS_CLIENT_CERT_PATH/_KEY_PATH env vars must point
+        inside wherever that volume is actually mounted -- a mismatch
+        anywhere in this chain means every Redis connection silently
+        presents no client cert instead of the intended one."""
+        import yaml
+
+        ca_file = os.path.join(os.path.dirname(__file__), "..", "k8s", "cert-manager-internal-ca.yaml")
+        with open(ca_file, "r") as f:
+            ca_docs = [d for d in yaml.safe_load_all(f) if d]
+
+        cert_doc = next(
+            d for d in ca_docs if d.get("kind") == "Certificate" and d["metadata"]["name"] == "tsoc-redis-client-cert"
+        )
+        secret_name = cert_doc["spec"]["secretName"]
+        self.assertTrue(secret_name)
+
+        deploy_file = os.path.join(os.path.dirname(__file__), "..", "k8s", "soc-deployment.yaml")
+        with open(deploy_file, "r") as f:
+            deploy_docs = [d for d in yaml.safe_load_all(f) if d]
+
+        for workload_name in ("tsoc-stream-processor", "tsoc-api"):
+            workload = next(
+                d for d in deploy_docs
+                if d.get("kind") in ("StatefulSet", "Deployment") and d["metadata"]["name"] == workload_name
+            )
+            pod_spec = workload["spec"]["template"]["spec"]
+            cert_volume = next(v for v in pod_spec["volumes"] if v.get("secret", {}).get("secretName") == secret_name)
+
+            container = pod_spec["containers"][0]
+            mount = next(m for m in container["volumeMounts"] if m["name"] == cert_volume["name"])
+            env_by_name = {e["name"]: e.get("value") for e in container["env"]}
+
+            self.assertTrue(env_by_name["REDIS_CLIENT_CERT_PATH"].startswith(mount["mountPath"]), workload_name)
+            self.assertTrue(env_by_name["REDIS_CLIENT_KEY_PATH"].startswith(mount["mountPath"]), workload_name)
+
     # ----------------------------------------------------------------
     # stream_processor_faust.py coverage was concentrated in the single
     # constant-wiring test above; these exercise the DLQ fallback and
