@@ -18,6 +18,14 @@ def test_livez():
     assert r.json()["status"] == "alive"
 
 
+def test_csp_header_present_on_every_response():
+    # Pure JSON API, no endpoint reflects user input into HTML, and docs
+    # are off by default -- a restrictive CSP is a free backstop.
+    client = TestClient(app)
+    r = client.get("/livez")
+    assert r.headers.get("Content-Security-Policy") == "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"
+
+
 def test_readyz():
     client = TestClient(app)
     r = client.get("/readyz")

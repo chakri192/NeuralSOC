@@ -110,6 +110,12 @@ async def request_tracing_middleware(request: Request, call_next):
         _correlation_id_ctx.reset(corr_token)
         _path_ctx.reset(path_token)
     response.headers["X-Request-ID"] = req_id
+    # This is a pure JSON API (no endpoint returns or reflects HTML) and
+    # ENABLE_DOCS is off by default, so nothing here should ever load a
+    # script or stylesheet -- a restrictive CSP costs nothing today and
+    # is a real backstop if the Swagger UI is ever enabled or a future
+    # endpoint reflects user input into an HTML response.
+    response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"
     return response
 
 
