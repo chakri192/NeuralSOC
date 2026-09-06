@@ -285,6 +285,11 @@ class TestRunSink:
         monkeypatch.setattr(sink, "KafkaConsumer", MagicMock(return_value=fake_consumer))
         monkeypatch.setattr(sink, "get_dlq_producer", lambda: None)
         monkeypatch.setattr(sink.time, "sleep", lambda s: None)
+        # start_http_server binds a real socket and leaves a background
+        # thread listening for the rest of the process's life -- harmless
+        # in production (called once), but a second test calling run_sink()
+        # again would hit "Address already in use" on the same port.
+        monkeypatch.setattr(sink, "start_http_server", lambda port: None)
 
         sink.run_sink()  # must return, not hang, once SIGINT is delivered
         return fake_consumer, committed_offsets
@@ -343,5 +348,6 @@ class TestRunSink:
         monkeypatch.setattr(sink, "KafkaConsumer", MagicMock(return_value=fake_consumer))
         monkeypatch.setattr(sink, "get_dlq_producer", lambda: None)
         monkeypatch.setattr(sink.time, "sleep", lambda s: None)
+        monkeypatch.setattr(sink, "start_http_server", lambda port: None)
 
         sink.run_sink()  # must not crash on a poll() exception

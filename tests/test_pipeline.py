@@ -854,6 +854,75 @@ class TestSOCPipelineSecurity(unittest.TestCase):
         self.assertIsNotNone(dlq_vct)
         self.assertIn("ReadWriteOnce", dlq_vct.get("spec", {}).get("accessModes", []))
 
+    def test_prometheus_rules_reference_real_metric_names(self):
+        """Verify k8s/prometheus-rules.yaml parses and every alert's expr
+        references a metric this codebase actually exports (or, for the
+        one exception documented in the file itself, an external exporter's
+        standard metric name) -- a typo'd metric name here would silently
+        never fire, the alerting equivalent of a test that never runs."""
+        import re
+        import yaml
+
+        rules_file = os.path.join(os.path.dirname(__file__), "..", "k8s", "prometheus-rules.yaml")
+        with open(rules_file, "r") as f:
+            doc = yaml.safe_load(f)
+
+        self.assertEqual(doc.get("kind"), "PrometheusRule")
+        groups = doc.get("spec", {}).get("groups", [])
+        self.assertTrue(len(groups) >= 4)
+
+        exported_here = {
+            "kafka_sink_dlq_size_bytes",       # api/kafka_sink.py
+            "stream_dlq_size_bytes",           # inference/stream_processor_faust.py
+            "correlation_redis_errors_total",  # inference/correlation.py
+            "model_inference_duration_seconds",  # inference/models.py (Histogram -> _bucket/_sum/_count)
+        }
+        externally_exported = {"kafka_consumergroup_lag_sum"}  # documented exporter dependency, see the rule's own comment
+
+        all_exprs = [rule["expr"] for group in groups for rule in group["rules"]]
+        self.assertTrue(all_exprs)
+        for expr in all_exprs:
+            metric_names = re.findall(r"[a-zA-Z_:][a-zA-Z0-9_:]*(?=[\{\[\s]|$)", expr)
+            known = {m for m in metric_names if any(
+                m == name or m.startswith(name.split("_seconds")[0]) for name in exported_here
+            ) or m in externally_exported}
+            self.assertTrue(known, f"expr references no recognized metric: {expr}")
+
+    def test_kafka_sink_metrics_service_and_servicemonitor_are_wired_together(self):
+        """The kafka-sink metrics Service (soc-deployment.yaml), the
+        container's own metrics containerPort, and prometheus.yaml's
+        ServiceMonitor must all agree on port name/number -- a mismatch
+        here means Prometheus silently scrapes nothing."""
+        import yaml
+
+        deploy_file = os.path.join(os.path.dirname(__file__), "..", "k8s", "soc-deployment.yaml")
+        with open(deploy_file, "r") as f:
+            deploy_docs = [d for d in yaml.safe_load_all(f) if d]
+
+        sink_deployment = next(
+            d for d in deploy_docs if d.get("kind") == "Deployment" and d["metadata"]["name"] == "tsoc-kafka-sink"
+        )
+        container = sink_deployment["spec"]["template"]["spec"]["containers"][0]
+        container_port = next(p for p in container["ports"] if p["name"] == "metrics")
+        self.assertEqual(container_port["containerPort"], 9101)
+
+        sink_service = next(
+            d for d in deploy_docs if d.get("kind") == "Service" and d["metadata"]["name"] == "tsoc-kafka-sink"
+        )
+        service_port = next(p for p in sink_service["spec"]["ports"] if p["name"] == "metrics")
+        self.assertEqual(service_port["port"], 9101)
+
+        prom_file = os.path.join(os.path.dirname(__file__), "..", "k8s", "prometheus.yaml")
+        with open(prom_file, "r") as f:
+            prom_docs = [d for d in yaml.safe_load_all(f) if d]
+
+        sink_monitor = next(
+            d for d in prom_docs
+            if d.get("kind") == "ServiceMonitor" and d["metadata"]["name"] == "tsoc-kafka-sink-monitor"
+        )
+        self.assertEqual(sink_monitor["spec"]["selector"]["matchLabels"]["app"], "tsoc-kafka-sink")
+        self.assertEqual(sink_monitor["spec"]["endpoints"][0]["port"], "metrics")
+
     # ----------------------------------------------------------------
     # stream_processor_faust.py coverage was concentrated in the single
     # constant-wiring test above; these exercise the DLQ fallback and

@@ -156,7 +156,19 @@ spec:
     matchLabels:
       app: tsoc-kafka-sink
       k8s:io.kubernetes.pod.namespace: tsoc
-  ingress: []
+  ingress:
+    # Prometheus metrics scraping (k8s/soc-deployment.yaml's kafka-sink
+    # container now runs a prometheus_client HTTP server on 9101 -- this
+    # was ingress: [] before that existed, correctly, since kafka-sink is
+    # otherwise a pure Kafka consumer with no inbound HTTP surface at all).
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: monitoring
+            app: prometheus
+      toPorts:
+        - ports:
+            - port: "9101"
+              protocol: TCP
   egress:
     # DNS resolution
     - toEndpoints:

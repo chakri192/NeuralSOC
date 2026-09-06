@@ -14,6 +14,7 @@ import redis
 from datetime import datetime, timezone
 from faust import App
 from concurrent.futures import ThreadPoolExecutor
+from prometheus_client import CONTENT_TYPE_LATEST, Gauge, generate_latest
 
 from inference.features import extract_features
 from inference.rules import evaluate_rules
@@ -108,6 +109,10 @@ _infer_pending_sem = _LazySemaphore(8)
 @app.page('/healthz')
 async def healthz(web, request):
     return web.json({'status': 'ok'})
+
+@app.page('/metrics')
+async def metrics(web, request):
+    return web.bytes(generate_latest(), content_type=CONTENT_TYPE_LATEST)
 
 @app.agent(raw_traffic_topic, concurrency=16)
 async def process_traffic(stream):
@@ -337,6 +342,8 @@ DLQ_MAX_SIZE_MB = int(os.getenv("STREAM_DLQ_MAX_SIZE_MB", "100"))
 DLQ_ROTATE_COUNT = int(os.getenv("STREAM_DLQ_ROTATE_COUNT", "5"))
 _dlq_file_lock = threading.Lock()
 
+DLQ_SIZE_BYTES = Gauge('stream_dlq_size_bytes', 'Current size of the Faust worker local-disk DLQ file')
+
 def _rotate_dlq_if_needed():
     """Rotate DLQ_FILE_PATH when it exceeds DLQ_MAX_SIZE_MB, same
     size-capped rotation api/kafka_sink.py already applies to its own local
@@ -346,7 +353,12 @@ def _rotate_dlq_if_needed():
     holding the exclusive lock on DLQ_LOCK_PATH (see _write_local_dlq_fallback).
     """
     try:
-        if os.path.exists(DLQ_FILE_PATH) and (os.path.getsize(DLQ_FILE_PATH) / (1024 * 1024)) > DLQ_MAX_SIZE_MB:
+        if not os.path.exists(DLQ_FILE_PATH):
+            DLQ_SIZE_BYTES.set(0)
+            return
+        size_bytes = os.path.getsize(DLQ_FILE_PATH)
+        DLQ_SIZE_BYTES.set(size_bytes)
+        if (size_bytes / (1024 * 1024)) > DLQ_MAX_SIZE_MB:
             for i in range(DLQ_ROTATE_COUNT - 1, 0, -1):
                 src, dst = f"{DLQ_FILE_PATH}.{i}", f"{DLQ_FILE_PATH}.{i + 1}"
                 if os.path.exists(src):
@@ -355,6 +367,7 @@ def _rotate_dlq_if_needed():
             # Recreate empty, 0600-permissioned so a rotated-in file never
             # briefly exists at the umask-default mode.
             os.close(os.open(DLQ_FILE_PATH, os.O_CREAT | os.O_WRONLY, 0o600))
+            DLQ_SIZE_BYTES.set(0)
             logger.info("Atomic rotated local disk DLQ file.")
     except Exception as e:
         logger.error("Local disk DLQ rotation failed: %s", e)

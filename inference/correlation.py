@@ -119,6 +119,10 @@ return 1
 
 from prometheus_client import Counter
 race_counter = Counter('correlation_engine_race_conditions_detected', 'Two-phase commit conflicts')
+correlation_redis_errors = Counter(
+    'correlation_redis_errors_total',
+    'redis.RedisError occurrences in IncidentCorrelator (transient outages, not code bugs -- see check_redis_master)',
+)
 
 class IncidentCorrelator:
     def __init__(self):
@@ -207,6 +211,7 @@ class IncidentCorrelator:
             # TypeError from a misconfigured connection pool) is a bug and
             # must propagate and crash loudly instead of being read as a
             # routine outage.
+            correlation_redis_errors.inc()
             logger.error("Redis connection error: %s", e)
             return False
 
@@ -330,6 +335,7 @@ class IncidentCorrelator:
                     "trace_id": alert.get("trace_id")
                 }
         except redis.RedisError as e:
+            correlation_redis_errors.inc()
             logger.error("Redis correlation execution failed for %s: %s", src_ip, e)
             raise
         return None
@@ -379,5 +385,6 @@ class IncidentCorrelator:
             # earlier step failed). Anything else here is a genuine bug in
             # this rollback logic and must crash loudly instead of being
             # logged as if Redis were merely unreachable.
+            correlation_redis_errors.inc()
             logger.warning("Failed to rollback alert state in Redis: %s", e)
 

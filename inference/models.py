@@ -10,8 +10,14 @@ import string
 import secrets
 import threading
 from typing import Tuple, Optional
+from prometheus_client import Histogram
 
 logger = logging.getLogger(__name__)
+
+MODEL_INFERENCE_DURATION = Histogram(
+    'model_inference_duration_seconds',
+    'Wall time of DeepLearningEngine.predict(), including every early-exit guard clause',
+)
 
 class DeepLearningEngine:
     def _load_model_from_disk(self) -> Tuple[torch.jit.ScriptModule, str]:
@@ -101,6 +107,14 @@ class DeepLearningEngine:
         return True
 
     def predict(self, features: dict, domain: str = "", deadline: Optional[float] = None):
+        # Thin timing wrapper so every exit path -- including the earliest
+        # guard-clause returns below, not just a successful full inference --
+        # is captured under the same P99-latency SLO the model_inference_
+        # duration_seconds alert (k8s/prometheus-rules.yaml) watches.
+        with MODEL_INFERENCE_DURATION.time():
+            return self._predict_impl(features, domain, deadline)
+
+    def _predict_impl(self, features: dict, domain: str = "", deadline: Optional[float] = None):
         if not domain or not self.model or not isinstance(domain, str) or len(domain) > 512:
             return False, 0.0, 0.0
 

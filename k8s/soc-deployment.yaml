@@ -362,6 +362,9 @@ spec:
           value: security_alerts_dlq
         - name: DLQ_FILE_PATH
           value: /tmp/dlq/alerts.jsonl
+        ports:
+        - containerPort: 9101
+          name: metrics
         volumeMounts:
         - name: tmp
           mountPath: /tmp
@@ -401,3 +404,22 @@ spec:
           failureThreshold: 3
           periodSeconds: 10
       serviceAccountName: tsoc-sink-sa
+---
+# kafka-sink has no other ports (it's a plain Kafka consumer, no HTTP API
+# for the alert pipeline itself) -- this Service exists solely so
+# Prometheus (k8s/prometheus.yaml's tsoc-kafka-sink-monitor) can reach the
+# prometheus_client metrics server started in api/kafka_sink.py's run_sink().
+apiVersion: v1
+kind: Service
+metadata:
+  name: tsoc-kafka-sink
+  namespace: tsoc
+  labels:
+    app: tsoc-kafka-sink
+spec:
+  clusterIP: None
+  selector:
+    app: tsoc-kafka-sink
+  ports:
+  - port: 9101
+    name: metrics

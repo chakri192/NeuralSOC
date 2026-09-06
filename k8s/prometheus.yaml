@@ -21,3 +21,40 @@ spec:
     bearerTokenSecret:
       name: tsoc-secrets
       key: api_key
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: tsoc-stream-processor-monitor
+  namespace: tsoc
+  labels:
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: tsoc-stream-processor
+  endpoints:
+  # Same headless Service (k8s/soc-deployment.yaml) already used for
+  # /healthz -- /metrics is unauthenticated (unlike the API's), since this
+  # Service has no ingress route at all and is only reachable in-cluster,
+  # already gated by k8s/cilium-identity-policy.yaml to the monitoring
+  # namespace's prometheus pods specifically.
+  - port: metrics
+    path: /metrics
+    interval: 15s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: tsoc-kafka-sink-monitor
+  namespace: tsoc
+  labels:
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: tsoc-kafka-sink
+  endpoints:
+  - port: metrics
+    path: /metrics
+    interval: 15s

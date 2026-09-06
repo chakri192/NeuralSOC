@@ -1,0 +1,97 @@
+# SLO alerting rules for the metrics k8s/prometheus.yaml's ServiceMonitors
+# scrape. Previously nothing here at all -- the platform had dashboards
+# (via Grafana/whatever reads these metrics) but no alert would actually
+# fire on any of them. Every threshold below is judgment-call-conservative
+# (better to page once too often while these are new than to miss a real
+# incident); tune with real production data once this has run a while.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: tsoc-slo-alerts
+  namespace: tsoc
+  labels:
+    release: prometheus
+spec:
+  groups:
+    - name: tsoc-dlq
+      rules:
+        - alert: KafkaSinkDlqGrowing
+          expr: kafka_sink_dlq_size_bytes > 50000000
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "kafka_sink's local DLQ file exceeds 50MB"
+            description: >-
+              Alerts are landing in kafka_sink's local-disk dead-letter
+              queue faster than they're being replayed/investigated
+              (scripts/replay_dlq.py). Sustained growth usually means the
+              Postgres sink or the Kafka broker itself is degraded --
+              check api/kafka_sink.py's own logs for "Bulk upsert failed"
+              or "Batch DB commit failure" first.
+        - alert: StreamProcessorDlqGrowing
+          expr: stream_dlq_size_bytes > 50000000
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Faust worker's local DLQ file exceeds 50MB"
+            description: >-
+              Alerts are failing to publish to Kafka faster than the
+              local-disk fallback rotates them out. Usually means Redpanda
+              itself is unreachable or overloaded -- check for
+              "KafkaPublishError"/timeout log lines in the stream-processor.
+
+    - name: tsoc-correlation
+      rules:
+        - alert: CorrelationRedisErrorsElevated
+          expr: increase(correlation_redis_errors_total[5m]) > 10
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "IncidentCorrelator is hitting Redis errors repeatedly"
+            description: >-
+              More than 10 redis.RedisError occurrences in 5 minutes across
+              check_redis_master()/add_alert()/rollback_alert_seen(). Each
+              is already handled gracefully (correlation is skipped for
+              that call, nothing crashes), but sustained elevation means
+              Redis itself is degraded, not a one-off blip.
+
+    - name: tsoc-inference
+      rules:
+        - alert: ModelInferenceP99LatencyHigh
+          expr: histogram_quantile(0.99, rate(model_inference_duration_seconds_bucket[5m])) > 0.1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "DeepLearningEngine.predict() P99 latency above 100ms"
+            description: >-
+              inference/stream_processor_faust.py wires a 5s deadline into
+              every predict() call specifically so a slow model can't
+              starve the CPU threadpool -- P99 creeping toward that ceiling
+              is the leading indicator, well before requests actually start
+              timing out.
+
+    - name: tsoc-kafka-consumer-lag
+      rules:
+        - alert: StreamProcessorConsumerLagHigh
+          # Assumes a standard Kafka lag exporter (e.g. danielqsj/kafka_exporter
+          # or kminion) is deployed cluster-wide and exports this metric name --
+          # this repo doesn't own or deploy that exporter itself, the same way
+          # it doesn't own Prometheus/Grafana. k8s/hpa.yaml's KEDA ScaledObject
+          # computes lag independently for scaling decisions and doesn't need
+          # this exporter, but alerting on a scaling *ceiling* being hit
+          # (maxReplicaCount: 4, still not draining the backlog) does.
+          expr: kafka_consumergroup_lag_sum{consumergroup="tsoc-stream-processor", topic="raw_traffic"} > 10000
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "tsoc-stream-processor consumer lag exceeds 10,000 messages"
+            description: >-
+              KEDA (k8s/hpa.yaml) already scales this StatefulSet 2-4 replicas
+              on the same lag signal -- sustained lag past this threshold means
+              it's scaled to its ceiling and still falling behind, not a
+              transient burst KEDA will absorb on its own.

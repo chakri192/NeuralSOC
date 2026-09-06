@@ -9,6 +9,7 @@ import time
 
 from kafka import KafkaConsumer, KafkaProducer
 from kafka.structs import OffsetAndMetadata
+from prometheus_client import Gauge, start_http_server
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import bindparam, insert, update
 
@@ -42,11 +43,18 @@ DLQ_LOCK_PATH = f"{DLQ_PATH}.lock"
 DLQ_MAX_SIZE_MB = int(os.getenv("DLQ_MAX_SIZE_MB", "100"))
 DLQ_ROTATE_COUNT = int(os.getenv("DLQ_ROTATE_COUNT", "5"))
 
+DLQ_SIZE_BYTES = Gauge('kafka_sink_dlq_size_bytes', 'Current size of the kafka_sink local-disk DLQ file')
+
 
 def _rotate_dlq_if_needed():
     """Rotate DLQ file when it exceeds size limit using atomic temp-rename."""
     try:
-        if os.path.exists(DLQ_PATH) and (os.path.getsize(DLQ_PATH) / (1024 * 1024)) > DLQ_MAX_SIZE_MB:
+        if not os.path.exists(DLQ_PATH):
+            DLQ_SIZE_BYTES.set(0)
+            return
+        size_bytes = os.path.getsize(DLQ_PATH)
+        DLQ_SIZE_BYTES.set(size_bytes)
+        if (size_bytes / (1024 * 1024)) > DLQ_MAX_SIZE_MB:
             for i in range(DLQ_ROTATE_COUNT - 1, 0, -1):
                 src, dst = f"{DLQ_PATH}.{i}", f"{DLQ_PATH}.{i + 1}"
                 if os.path.exists(src):
@@ -54,6 +62,7 @@ def _rotate_dlq_if_needed():
             os.replace(DLQ_PATH, f"{DLQ_PATH}.1")
             # Recreate empty DLQ file atomically
             open(DLQ_PATH, 'a').close()
+            DLQ_SIZE_BYTES.set(0)
             logger.info("Atomic rotated DLQ file.")
     except Exception as e:
         logger.error(f"DLQ rotation failed: {e}")
@@ -229,6 +238,13 @@ def process_batch(current_batch, dlq_producer=None, session_factory=SessionLocal
 
 
 def run_sink():
+    # kafka_sink has no web framework of its own (a plain Kafka consumer
+    # loop) -- prometheus_client's own lightweight WSGI server is the
+    # standard way to expose /metrics without pulling in a full framework
+    # just for this. Port is a separate env var so it doesn't collide with
+    # anything; the k8s Service/ServiceMonitor for it live in
+    # k8s/soc-deployment.yaml and k8s/prometheus.yaml.
+    start_http_server(int(os.getenv("METRICS_PORT", "9101")))
     broker_list = [b.strip() for b in brokers.split(',') if b.strip()]
     consumer = KafkaConsumer(
         topic,
