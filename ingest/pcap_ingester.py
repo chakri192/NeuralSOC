@@ -18,6 +18,9 @@ from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
+MAX_FLOWS = 50000  # bound memory regardless of how long the capture runs
+MAX_PACKET_BYTES = 65535  # a single packet larger than this is not a normal Ethernet frame
+
 try:
     from scapy.all import IP, TCP, UDP
     from kafka import KafkaProducer
@@ -69,9 +72,6 @@ def ingest_pcap(pcap_file: str, broker: str = "localhost:9092", topic: str = "ra
         "duration": 0.0,
         "start_time": None
     })
-
-    MAX_FLOWS = 50000  # bound memory regardless of how long the capture runs
-    MAX_PACKET_BYTES = 65535  # a single packet larger than this is not a normal Ethernet frame
 
     packet_count = 0
     try:
