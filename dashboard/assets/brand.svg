@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 132 28">
+  <g transform="translate(2,2) scale(1.5)" fill="none" stroke="#eeeeee" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M8 1.2l6 2.3v4c0 4-2.6 6.9-6 8.3-3.4-1.4-6-4.3-6-8.3v-4l6-2.3z"/>
+  </g>
+  <text x="32" y="20" font-family="Arial, Helvetica, sans-serif" font-weight="700" font-size="18" letter-spacing="0.3" fill="#eeeeee">T-SOC</text>
+</svg>

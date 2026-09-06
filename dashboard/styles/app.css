@@ -1,73 +1,361 @@
-/* Professional SOC CSS Overrides */
+/* T-SOC dashboard design system.
+   Tokens (colors, fonts) come from dashboard/theme.py's css_variables(),
+   injected as a :root block immediately before this file. Nothing below
+   should hardcode a color -- use var(--token) so the palette (dark-only,
+   see .streamlit/config.toml) and severity/status colors stay the
+   single source of truth. */
+
 .stApp {
-    background-color: #16161e;
+  background-color: var(--bg);
+  font-family: var(--font-ui);
 }
 
-/* Hide Streamlit top padding and branding */
+.stApp, .stApp p, .stApp span, .stApp label, .stApp div {
+  color: var(--text, #eeeeee);
+}
+
+[data-testid="stHeader"] {
+  background-color: transparent;
+}
+
+[data-testid="stSidebar"] {
+  background-color: var(--surface);
+  border-right: 1px solid var(--border);
+}
+
+[data-testid="stSidebarHeader"] {
+  padding-top: 1.25rem;
+}
+
+[data-testid="stSidebarNav"] li a {
+  border-radius: 6px;
+}
+
 .block-container {
-    padding-top: 2rem;
-    padding-bottom: 2rem;
-    max-width: 95%;
-}
-header {
-    visibility: hidden;
-}
-footer {
-    visibility: hidden;
+  padding-top: 1.5rem;
+  padding-bottom: 2rem;
+  max-width: 1400px;
 }
 
-/* Style the metric cards */
-div[data-testid="metric-container"] {
-    background-color: #1f2335;
-    border: 1px solid #292e42;
-    border-radius: 8px;
-    padding: 15px;
-    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+footer { visibility: hidden; }
+
+::selection { background: var(--accent-soft); }
+
+/* ---------- Typography ---------- */
+
+h1, h2, h3, h4 {
+  /* Hardcoded fallback (not just var(--text)): if the :root custom
+     property block above this rule in the stylesheet ever fails to
+     apply -- a slow/partial style injection on first load, a browser
+     that parses this differently -- headings should degrade to
+     "readable on the default dark background" rather than falling back
+     to the browser's own default (near-black), which is invisible
+     against this app's near-black background. */
+  color: var(--text, #eeeeee) !important;
+  font-weight: 600 !important;
+  letter-spacing: -0.01em;
 }
 
-div[data-testid="metric-container"] label {
-    color: #a9b1d6 !important;
-    font-weight: 600;
-    font-size: 0.9rem;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
+.tsoc-mono {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
 }
 
-div[data-testid="metric-container"] div[data-testid="stMetricValue"] {
-    color: #c0caf5;
-    font-size: 2rem;
+/* ---------- Top bar ---------- */
+
+.tsoc-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.9rem 1.25rem;
+  margin-bottom: 1.25rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
 }
 
-/* Style headers */
-h1, h2, h3 {
-    color: #c0caf5 !important;
-    font-weight: 500;
+.tsoc-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 1.15rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
 }
 
-/* Dataframe styling overrides */
-.stDataFrame {
-    border: 1px solid #292e42;
-    border-radius: 8px;
-    overflow: hidden;
+.tsoc-topbar__title {
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
 }
 
-/* Expander styling */
-.streamlit-expanderHeader {
-    background-color: #1f2335 !important;
-    border-bottom: 1px solid #292e42 !important;
+.tsoc-login-card {
+  text-align: center;
+  margin-top: 4rem;
+  margin-bottom: 1.5rem;
 }
 
-/* Button styling */
-.stButton>button {
-    background-color: #3d59a1;
-    color: white;
-    border: none;
-    border-radius: 4px;
-    padding: 0.5rem 1rem;
-    font-weight: bold;
-    transition: background-color 0.2s;
+.tsoc-login-card__title {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  font-size: 1.6rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
 }
-.stButton>button:hover {
-    background-color: #7aa2f7;
-    color: white;
+
+.tsoc-login-card__subtitle {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  margin-top: 0.25rem;
+}
+
+.tsoc-topbar__meta {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+/* ---------- Connection / status pills ---------- */
+
+.tsoc-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.2rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.tsoc-pill--ok {
+  color: #2fae60;
+  background: rgba(47, 174, 96, 0.14);
+}
+
+.tsoc-pill--down {
+  color: var(--severity-critical);
+  background: rgba(229, 72, 77, 0.14);
+}
+
+/* ---------- KPI cards ---------- */
+
+.tsoc-kpi-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 0.9rem;
+  margin-bottom: 1.4rem;
+}
+
+.tsoc-kpi {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-top: 3px solid var(--kpi-color, var(--accent));
+  border-radius: 10px;
+  padding: 0.9rem 1.1rem;
+}
+
+.tsoc-kpi__label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin-bottom: 0.35rem;
+}
+
+.tsoc-kpi__value {
+  font-size: 1.9rem;
+  font-weight: 700;
+  line-height: 1.1;
+  color: var(--text);
+}
+
+.tsoc-kpi__sub {
+  margin-top: 0.25rem;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+/* ---------- Badges (severity / triage status) ---------- */
+
+.tsoc-badge {
+  display: inline-block;
+  padding: 0.12rem 0.55rem;
+  border-radius: 5px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  color: var(--badge-color);
+  background: color-mix(in srgb, var(--badge-color) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--badge-color) 40%, transparent);
+  white-space: nowrap;
+}
+
+.tsoc-badge--status {
+  font-weight: 600;
+}
+
+/* ---------- Panels / cards ---------- */
+
+.tsoc-panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.1rem 1.25rem;
+  margin-bottom: 1rem;
+}
+
+.tsoc-panel__title {
+  font-size: 0.95rem;
+  font-weight: 700;
+  margin-bottom: 0.7rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.tsoc-empty {
+  text-align: center;
+  padding: 3rem 1rem;
+  color: var(--text-muted);
+}
+
+.tsoc-empty__icon { font-size: 2.2rem; margin-bottom: 0.6rem; }
+.tsoc-empty__title { font-size: 1.05rem; font-weight: 700; color: var(--text); margin-bottom: 0.3rem; }
+
+/* ---------- Evidence key/value rows (Investigate / incident detail) ---------- */
+
+.tsoc-kv { display: flex; flex-direction: column; gap: 0.4rem; }
+.tsoc-kv__row {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.35rem 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.85rem;
+}
+.tsoc-kv__row:last-child { border-bottom: none; }
+.tsoc-kv__key { color: var(--text-muted); flex: 1 1 auto; min-width: 0; }
+.tsoc-kv__val { font-family: var(--font-mono); text-align: right; word-break: break-all; flex: 0 0 auto; white-space: nowrap; }
+
+/* ---------- Streamlit component overrides ---------- */
+
+div[data-testid="stMetric"], div[data-testid="metric-container"] {
+  background-color: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.9rem 1.1rem;
+}
+
+div[data-testid="stMetricLabel"] {
+  color: var(--text-muted) !important;
+}
+
+div[data-testid="stMetricValue"] {
+  color: var(--text) !important;
+  font-size: 1.5rem !important;
+  white-space: normal !important;
+  overflow: visible !important;
+}
+
+/* st.dataframe renders to a <canvas> that follows Streamlit's own native
+   theme (.streamlit/config.toml's [theme]), not this page's CSS
+   variables -- it already matches as long as that section mirrors this
+   file's palette. Only the frame around it is this page's to style. */
+[data-testid="stDataFrame"] {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+[data-testid="stExpander"] {
+  border: 1px solid var(--border) !important;
+  border-radius: 8px !important;
+  background: var(--surface);
+}
+
+[data-testid="stTabs"] button[role="tab"] {
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+[data-testid="stTabs"] button[aria-selected="true"] {
+  color: var(--accent);
+}
+
+div[data-baseweb="tab-highlight"] {
+  background-color: var(--accent) !important;
+}
+
+.stButton > button,
+[data-testid="stBaseButton-secondary"],
+[data-testid="stBaseButton-primary"],
+[data-testid="stBaseButton-primaryFormSubmit"] {
+  background-color: var(--surface-raised) !important;
+  color: var(--text) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 6px;
+  padding: 0.4rem 0.9rem;
+  font-weight: 600;
+  transition: background-color 0.15s, border-color 0.15s;
+}
+
+.stButton > button:hover,
+[data-testid="stBaseButton-secondary"]:hover,
+[data-testid="stBaseButton-primary"]:hover,
+[data-testid="stBaseButton-primaryFormSubmit"]:hover {
+  border-color: var(--accent) !important;
+  color: var(--accent) !important;
+}
+
+.stButton > button[kind="primary"],
+[data-testid="stBaseButton-primary"],
+[data-testid="stBaseButton-primaryFormSubmit"] {
+  background-color: var(--accent) !important;
+  color: #fff !important;
+  border: none !important;
+}
+
+[data-testid="stBaseButton-primary"]:hover,
+[data-testid="stBaseButton-primaryFormSubmit"]:hover {
+  color: #fff !important;
+  opacity: 0.9;
+}
+
+[data-testid="stTextInput"] input,
+[data-testid="stSelectbox"] div[data-baseweb="select"] > div,
+[data-testid="stMultiSelect"] div[data-baseweb="select"] > div {
+  background-color: var(--surface-raised);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+hr {
+  border-color: var(--border);
+}
+
+/* The "Press Enter to submit form" hint under a text_input inside
+   st.form -- self-evident, not worth the extra line under every field. */
+[data-testid="InputInstructions"] {
+  display: none;
+}
+
+/* Per-page Refresh button: pinned to the top-right corner (where the
+   "⋮" menu sat before toolbarMode="minimal" removed it) rather than
+   flowing inline with the page title. st.container(key="refresh_corner")
+   is what makes this class selector stable across reruns. */
+.st-key-refresh_corner {
+  position: fixed;
+  top: 0.75rem;
+  right: 1.25rem;
+  width: fit-content !important;
+  z-index: 1000;
 }

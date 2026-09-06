@@ -1,4 +1,4 @@
-.PHONY: up down api pipeline kafka-sink simulate dashboard clean
+.PHONY: up down api pipeline kafka-sink simulate dashboard terminal cli-dashboard clean
 
 # Resolves through the normal PATH -- a hardcoded macOS Docker Desktop
 # path here previously broke this Makefile on any other machine or CI
@@ -50,6 +50,14 @@ simulate:
 dashboard:
 	@echo "[+] Starting SOC Dashboard..."
 	export REDPANDA_BROKERS=127.0.0.1:9092 && PYTHONPATH="$(PWD)" $(STREAMLIT) run dashboard/app.py
+
+terminal:
+	@echo "[+] Starting T-SOC Console..."
+	export REDPANDA_BROKERS=127.0.0.1:9092 && PYTHONPATH="$(PWD)" $(PYTHON) terminal/tsoc_console.py
+
+cli-dashboard:
+	@echo "[+] Starting T-SOC Terminal Dashboard (live feed)..."
+	PYTHONPATH="$(PWD)" $(PYTHON) dashboard/cli_dashboard.py
 
 clean:
 	@echo "[+] Cleaning up local environment..."

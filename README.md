@@ -43,7 +43,8 @@ The platform never writes back to the monitored network — ingestion is read-on
                     │
                     ▼
      api/main.py (FastAPI)  ──┬──  dashboard/app.py (Streamlit)
-                               └──  terminal/tsoc_console.py (Textual TUI)
+                               ├──  terminal/tsoc_console.py (Textual TUI, triage)
+                               └──  dashboard/cli_dashboard.py (Rich live feed, read-only)
 ```
 
 `ingest/simulator.py` generates synthetic Zeek-style traffic (including labeled attack scenarios) for local testing without a real data-diode feed.
@@ -68,8 +69,8 @@ api/            FastAPI backend, auth, ORM models, Kafka→Postgres sink
 inference/      Stream processor, detection rules, ML models, correlation
 ingest/         Log tailer, PCAP ingester, synthetic traffic simulator
 shared/         Code shared between the dashboard and terminal console
-dashboard/      Streamlit web UI
-terminal/       Textual-based terminal console
+dashboard/      Streamlit web UI, plus cli_dashboard.py (Rich read-only live feed)
+terminal/       Textual-based terminal console (triage: Ack/False Positive/Confirm)
 scripts/        Training, topic setup, dev cert generation, integrity checks, backup/restore, DLQ replay
 k8s/            Kubernetes manifests (NetworkPolicy, Kyverno, HPA, etc.)
 tests/          pytest suite (unit + integration + load)
@@ -123,9 +124,14 @@ make kafka-sink      # or: PYTHONPATH=. venv/bin/python3 api/kafka_sink.py
 # 4. API
 make api            # or: venv/bin/uvicorn api.main:app --host 0.0.0.0 --port 8000
 
-# 5. Dashboards (separate terminals)
+# 5. Dashboards (separate terminals) -- all three gated behind the same
+#    shared login credential (DASHBOARD_PASSWORD, default user/user; see
+#    shared/auth.py)
 make dashboard       # or: venv/bin/streamlit run dashboard/app.py
-venv/bin/python3 terminal/tsoc_console.py
+make terminal        # or: PYTHONPATH=. venv/bin/python3 terminal/tsoc_console.py
+make cli-dashboard   # or: PYTHONPATH=. venv/bin/python3 dashboard/cli_dashboard.py
+                     # a read-only live feed (no triage actions) -- use
+                     # terminal/tsoc_console.py to Ack/False-Positive/Confirm
 
 # 6. Synthetic traffic
 make simulate        # or: venv/bin/python3 ingest/simulator.py --scenario mixed --burst

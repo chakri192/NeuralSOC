@@ -1,12 +1,20 @@
 [theme]
+# One fixed theme, deliberately -- no light mode. st.dataframe's canvas
+# grid and native elements (e.g. <hr>) follow this config, not this
+# app's page CSS, and dashboard/theme.py mirrors these exact colors as
+# CSS variables for the rest of the page (badges, KPI cards, panels), so
+# there's a single source of truth either way.
 base="dark"
-primaryColor="#00bcd4"
-backgroundColor="#1e1e24"
-secondaryBackgroundColor="#2b2b36"
-textColor="#f8f9fa"
 font="sans serif"
+primaryColor="#3b82f6"
+backgroundColor="#0a0a0a"
+secondaryBackgroundColor="#131313"
+textColor="#eeeeee"
 
 [client]
+# "minimal": with only one theme configured, the Settings menu's
+# System/Light/Dark picker would just be a toggle that does nothing --
+# hide the whole top-right menu rather than offer a dead control.
 toolbarMode="minimal"
 showErrorDetails=false
 

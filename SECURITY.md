@@ -223,18 +223,24 @@ degrading silently:
 - DLQ overflow: if a local-disk DLQ fallback exceeds its configured max
   size, alert on-call and rotate manually.
 
-## Dashboard access control
+## Dashboard and terminal console access control
 
-[dashboard/app.py](dashboard/app.py) has no Ingress in this repo and, until
-now, no app-level auth either -- it relied entirely on whoever could reach
-the Streamlit port already being trusted (a shell, a `kubectl port-forward`).
-Setting `DASHBOARD_PASSWORD` now gates the whole app behind a password
-(constant-time compared via `secrets.compare_digest`) before rendering
-anything else; leaving it unset preserves the original zero-config local
-dev/demo behavior. This is a single shared password, not per-user auth --
-if the dashboard is ever exposed to more than a small trusted team, put a
-real auth layer (SSO via the Ingress, e.g. oauth2-proxy) in front of it
-instead.
+Neither [dashboard/app.py](dashboard/app.py) nor
+[terminal/tsoc_console.py](terminal/tsoc_console.py) has an Ingress or
+any other perimeter in this repo, so without an app-level gate anyone
+who can reach the Streamlit port or run the console binary is in. Both
+share one login gate (constant-time password compare via
+`secrets.compare_digest`, resolved through
+[shared/auth.py](shared/auth.py) so the two interfaces can't drift onto
+different credentials) that is mandatory, not opt-in: set
+`DASHBOARD_PASSWORD` for a persistent password, or leave it unset and it
+defaults to `user`/`user` -- a printed console warning names that
+default explicitly every time it's in use, so it's never silently relied
+on. Set a real `DASHBOARD_PASSWORD` before either interface is reachable
+by anyone other than the person running it locally. This is a single
+shared password, not per-user auth -- if either is ever exposed to more
+than a small trusted team, put a real auth layer (SSO via the Ingress,
+e.g. oauth2-proxy) in front of it instead.
 
 ## Genuinely out of scope here
 
