@@ -378,3 +378,215 @@ jobs:
             exit 1
           fi
           echo "PASS: backup -> wipe -> restore preserved 3 rows with matching content."
+
+  # Every fallback path this session added or hardened (correlation.py's
+  # graceful check_redis_master()/add_alert() degradation, kafka_sink.py's
+  # bulk-upsert-fails-fall-back-to-per-item loop) is unit-tested against
+  # MOCKED failures. Mocks can't prove the real thing behaves the same way
+  # -- three real bugs this session (Faust deserialization, Redis mutual-
+  # TLS default, rate-limiter CA trust) were only ever found by actually
+  # running the real stack, never by a mock. This job kills a real
+  # dependency mid-run, the same way integration-smoke-test above proves
+  # the happy path, and is kept as its own job specifically so a chaos-test
+  # flake never blocks that job's fast, reliable signal.
+  #
+  # Assertions here are deliberately outcome-based (does the pipeline
+  # survive and keep making progress) rather than exact-log-line matches:
+  # the precise error path SQLite/Redis take under a given failure
+  # injection is a real implementation detail that can legitimately shift
+  # release to release without the underlying resilience guarantee
+  # (nothing crashes, nothing permanently wedges) actually regressing.
+  chaos-resilience-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Generate dev TLS certs for Redis
+        run: scripts/generate_dev_certs.sh
+
+      - name: Start Redpanda + Redis (real docker-compose services)
+        run: |
+          echo "TSOC_API_KEY=$(openssl rand -hex 24)" >> "$GITHUB_ENV"
+          echo "TSOC_JWT_SECRET=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
+          echo "REDIS_PASSWORD=$(openssl rand -hex 16)" >> "$GITHUB_ENV"
+          echo "COMPOSE_POSTGRES_USER=soc_admin" >> "$GITHUB_ENV"
+          echo "COMPOSE_POSTGRES_PASSWORD=$(openssl rand -hex 16)" >> "$GITHUB_ENV"
+          set -a && source "$GITHUB_ENV" && set +a
+          docker compose up -d redpanda redis
+
+      - name: Wait for Redpanda and Redis to report healthy
+        run: |
+          for svc in soc-redpanda soc-redis; do
+            for i in $(seq 1 30); do
+              status=$(docker inspect --format='{{.State.Health.Status}}' "$svc" 2>/dev/null || echo "starting")
+              [ "$status" = "healthy" ] && echo "$svc healthy" && break
+              sleep 3
+              if [ "$i" = "30" ]; then
+                echo "$svc never became healthy"; docker logs "$svc"; exit 1
+              fi
+            done
+          done
+
+      - name: Create Kafka topics
+        run: scripts/create_topics.sh
+
+      - name: Start the real pipeline (API, Faust worker, kafka_sink)
+        run: |
+          export DATABASE_URL="sqlite:///$(pwd)/tsoc_chaos.db"
+          export REDIS_SSL=true
+          export REDIS_CA_CERT_PATH="$(pwd)/certs/ca.crt"
+          export REDIS_CLIENT_CERT_PATH="$(pwd)/certs/client.crt"
+          export REDIS_CLIENT_KEY_PATH="$(pwd)/certs/client.key"
+          export DB_SSLMODE=verify-full
+          export FAUST_DATADIR=/tmp/faust-chaos-data
+          export REDPANDA_BROKERS=localhost:9092
+          export ENABLE_DOCS=false
+          export PYTHONPATH="$(pwd)"
+          mkdir -p /tmp/faust-chaos-data logs
+
+          nohup python -m uvicorn api.main:app --host 127.0.0.1 --port 8000 > logs/chaos_api.log 2>&1 &
+          echo $! > /tmp/chaos_api.pid
+          nohup python inference/stream_processor_faust.py worker -l info > logs/chaos_faust.log 2>&1 &
+          echo $! > /tmp/chaos_faust.pid
+          nohup python api/kafka_sink.py > logs/chaos_kafka_sink.log 2>&1 &
+          echo $! > /tmp/chaos_kafka_sink.pid
+
+          for i in $(seq 1 20); do
+            api_ok=$(curl -sf http://localhost:8000/healthz > /dev/null && echo yes || echo no)
+            faust_ok=$(curl -sf http://localhost:6066/healthz > /dev/null && echo yes || echo no)
+            [ "$api_ok" = "yes" ] && [ "$faust_ok" = "yes" ] && echo "API and Faust worker both healthy" && exit 0
+            sleep 2
+          done
+          echo "Pipeline did not become healthy in time"
+          cat logs/chaos_api.log logs/chaos_faust.log
+          exit 1
+
+      - name: Baseline -- feed traffic and confirm alerts flow normally
+        run: |
+          export REDPANDA_BROKERS=localhost:9092
+          timeout 20 python ingest/simulator.py --scenario mixed --burst > logs/chaos_simulator_baseline.log 2>&1 || true
+          sleep 15
+          count=$(curl -sf "http://localhost:8000/api/v1/alerts?limit=100" -H "Authorization: Bearer ${TSOC_API_KEY}" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))")
+          echo "BASELINE_COUNT=$count" >> "$GITHUB_ENV"
+          echo "Baseline alert count: $count"
+          if [ "$count" -lt 1 ]; then
+            echo "FAIL: baseline produced zero alerts -- chaos assertions below would be meaningless"
+            exit 1
+          fi
+
+      - name: "Chaos 1/2 -- kill Redis mid-run, verify the pipeline degrades gracefully instead of crashing"
+        run: |
+          echo "==> Stopping soc-redis"
+          docker compose stop redis
+
+          export REDPANDA_BROKERS=localhost:9092
+          timeout 15 python ingest/simulator.py --scenario mixed --burst > logs/chaos_simulator_redis_down.log 2>&1 || true
+          sleep 8
+
+          # The real assertion: the Faust worker (which owns the Redis
+          # connection via inference/correlation.py) must not have crashed.
+          # correlation.py's check_redis_master()/add_alert() are supposed
+          # to catch redis.RedisError and degrade gracefully -- if that
+          # regressed, the whole process dies here instead of surviving.
+          if ! kill -0 "$(cat /tmp/chaos_faust.pid)" 2>/dev/null; then
+            echo "FAIL: Faust worker process died while Redis was down"
+            cat logs/chaos_faust.log
+            exit 1
+          fi
+          if ! curl -sf http://localhost:6066/healthz > /dev/null; then
+            echo "FAIL: Faust worker's /healthz stopped responding while Redis was down"
+            exit 1
+          fi
+          echo "PASS: Faust worker survived Redis outage (process alive, /healthz still responding)"
+
+          # Informational, not a hard gate -- the exact log line depends on
+          # whether Redis died between check_redis_master() calls (clean,
+          # logged "Redis connection error") or mid-command (raises,
+          # DLQ'd as "RedisUnavailable"). Either is correct; only a crash
+          # or silent hang would be a real regression.
+          grep -E "Redis connection error|RedisUnavailable" logs/chaos_faust.log && \
+            echo "(informational) found expected Redis-outage handling in the Faust log" || \
+            echo "(informational) no explicit Redis-outage log line yet -- not a failure by itself, see the process/healthz checks above"
+
+          echo "==> Restarting soc-redis"
+          docker compose start redis
+          for i in $(seq 1 20); do
+            status=$(docker inspect --format='{{.State.Health.Status}}' soc-redis 2>/dev/null || echo "starting")
+            [ "$status" = "healthy" ] && echo "soc-redis healthy again" && break
+            sleep 3
+            if [ "$i" = "20" ]; then echo "soc-redis never came back healthy"; docker logs soc-redis; exit 1; fi
+          done
+
+          timeout 20 python ingest/simulator.py --scenario mixed --burst > logs/chaos_simulator_redis_recovered.log 2>&1 || true
+          sleep 15
+          recovered_count=$(curl -sf "http://localhost:8000/api/v1/alerts?limit=100" -H "Authorization: Bearer ${TSOC_API_KEY}" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))")
+          echo "Alert count after Redis recovery: $recovered_count (was $BASELINE_COUNT before this chaos step)"
+          if [ "$recovered_count" -le "$BASELINE_COUNT" ]; then
+            echo "FAIL: alert count did not increase after Redis recovered -- pipeline may be permanently wedged"
+            exit 1
+          fi
+          echo "PASS: alert flow resumed and grew after Redis recovered"
+          echo "POST_REDIS_COUNT=$recovered_count" >> "$GITHUB_ENV"
+
+      - name: "Chaos 2/2 -- make the DB read-only mid-run, verify kafka_sink survives and self-heals"
+        run: |
+          echo "==> Revoking write access to the SQLite DB file"
+          chmod 444 "$(pwd)/tsoc_chaos.db"
+
+          export REDPANDA_BROKERS=localhost:9092
+          timeout 15 python ingest/simulator.py --scenario mixed --burst > logs/chaos_simulator_db_down.log 2>&1 || true
+          sleep 8
+
+          # The real assertion: kafka_sink.py's outer batch-level exception
+          # handler (and the bulk-upsert-fails-falls-back-to-per-item path)
+          # exist specifically so a DB write failure rolls back and retries
+          # the batch instead of crashing the consumer.
+          if ! kill -0 "$(cat /tmp/chaos_kafka_sink.pid)" 2>/dev/null; then
+            echo "FAIL: kafka_sink process died when the database became read-only"
+            cat logs/chaos_kafka_sink.log
+            exit 1
+          fi
+          echo "PASS: kafka_sink survived the database write failure (process still alive)"
+
+          # Informational -- SQLite's exact error surfaces at whichever
+          # point it first attempts a write (bulk insert/update, or the
+          # final commit), which this test doesn't control precisely.
+          grep -E "Bulk upsert failed|Batch DB commit failure|Item DB write failed" logs/chaos_kafka_sink.log && \
+            echo "(informational) found expected DB-write-failure handling in the kafka_sink log" || \
+            echo "(informational) no explicit DB-failure log line yet -- not a failure by itself, see the process-alive check above"
+
+          echo "==> Restoring write access to the SQLite DB file"
+          chmod 644 "$(pwd)/tsoc_chaos.db"
+
+          timeout 20 python ingest/simulator.py --scenario mixed --burst > logs/chaos_simulator_db_recovered.log 2>&1 || true
+          sleep 15
+          final_count=$(curl -sf "http://localhost:8000/api/v1/alerts?limit=100" -H "Authorization: Bearer ${TSOC_API_KEY}" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))")
+          echo "Alert count after DB recovery: $final_count (was $POST_REDIS_COUNT before this chaos step)"
+          if [ "$final_count" -le "$POST_REDIS_COUNT" ]; then
+            echo "FAIL: alert count did not increase after DB write access was restored -- batch retry may not be working"
+            exit 1
+          fi
+          echo "PASS: alert flow resumed and grew after DB write access was restored -- no permanent stall from either failure"
+
+      - name: Dump logs (always, for debugging)
+        if: always()
+        run: |
+          for f in logs/chaos_*.log; do
+            echo "--- $f (tail) ---"; tail -60 "$f" 2>&1 || true
+          done
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
