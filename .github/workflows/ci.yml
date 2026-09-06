@@ -478,7 +478,11 @@ jobs:
           export REDPANDA_BROKERS=localhost:9092
           timeout 20 python ingest/simulator.py --scenario mixed --burst > logs/chaos_simulator_baseline.log 2>&1 || true
           sleep 15
-          count=$(curl -sf "http://localhost:8000/api/v1/alerts?limit=100" -H "Authorization: Bearer ${TSOC_API_KEY}" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))")
+          # /api/v1/stats' total_alerts (not /api/v1/alerts?limit=100's
+          # response length, which caps at 100 and would make every later
+          # "did the count increase" check unwinnable once baseline
+          # traffic alone reaches that cap).
+          count=$(curl -sf "http://localhost:8000/api/v1/stats" -H "Authorization: Bearer ${TSOC_API_KEY}" | python3 -c "import json,sys; print(json.load(sys.stdin)['total_alerts'])")
           echo "BASELINE_COUNT=$count" >> "$GITHUB_ENV"
           echo "Baseline alert count: $count"
           if [ "$count" -lt 1 ]; then
@@ -531,7 +535,7 @@ jobs:
 
           timeout 20 python ingest/simulator.py --scenario mixed --burst > logs/chaos_simulator_redis_recovered.log 2>&1 || true
           sleep 15
-          recovered_count=$(curl -sf "http://localhost:8000/api/v1/alerts?limit=100" -H "Authorization: Bearer ${TSOC_API_KEY}" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))")
+          recovered_count=$(curl -sf "http://localhost:8000/api/v1/stats" -H "Authorization: Bearer ${TSOC_API_KEY}" | python3 -c "import json,sys; print(json.load(sys.stdin)['total_alerts'])")
           echo "Alert count after Redis recovery: $recovered_count (was $BASELINE_COUNT before this chaos step)"
           if [ "$recovered_count" -le "$BASELINE_COUNT" ]; then
             echo "FAIL: alert count did not increase after Redis recovered -- pipeline may be permanently wedged"
@@ -572,7 +576,7 @@ jobs:
 
           timeout 20 python ingest/simulator.py --scenario mixed --burst > logs/chaos_simulator_db_recovered.log 2>&1 || true
           sleep 15
-          final_count=$(curl -sf "http://localhost:8000/api/v1/alerts?limit=100" -H "Authorization: Bearer ${TSOC_API_KEY}" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))")
+          final_count=$(curl -sf "http://localhost:8000/api/v1/stats" -H "Authorization: Bearer ${TSOC_API_KEY}" | python3 -c "import json,sys; print(json.load(sys.stdin)['total_alerts'])")
           echo "Alert count after DB recovery: $final_count (was $POST_REDIS_COUNT before this chaos step)"
           if [ "$final_count" -le "$POST_REDIS_COUNT" ]; then
             echo "FAIL: alert count did not increase after DB write access was restored -- batch retry may not be working"
