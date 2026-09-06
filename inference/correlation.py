@@ -332,20 +332,27 @@ class IncidentCorrelator:
         (never below zero) the count in Redis if downstream incident
         emission fails. Allows DLQ replay to re-evaluate the incident.
         """
+        import re
+        raw_src = str(alert.get("source_ip", "127.0.0.1")).strip()
         try:
-            import re
-            raw_src = str(alert.get("source_ip", "127.0.0.1")).strip()
             addr = ipaddress.ip_address(raw_src)
             src_ip = str(addr)
-            aid = str(alert.get("alert_id", "")).strip()
+        except ValueError:
+            # Same graceful skip as add_alert()'s own IP validation: a
+            # malformed source_ip is anticipated bad input, not a bug in
+            # this code, and there's no valid Redis key to roll back anyway.
+            logger.warning("Rollback skipped: invalid source_ip %r", raw_src)
+            return
 
-            threat_class = str(alert.get("threat_class", "unknown"))
-            safe_threat = re.sub(r"[^A-Za-z0-9_ ]", "", threat_class)
-            safe_threat = safe_threat.replace(" ", "_")[:64] or "unknown"
+        aid = str(alert.get("alert_id", "")).strip()
+        threat_class = str(alert.get("threat_class", "unknown"))
+        safe_threat = re.sub(r"[^A-Za-z0-9_ ]", "", threat_class)
+        safe_threat = safe_threat.replace(" ", "_")[:64] or "unknown"
 
-            key_name = f"{{{src_ip}}}:alerts"
-            dedup_name = f"{{{src_ip}}}:dedup:{safe_threat}"
+        key_name = f"{{{src_ip}}}:alerts"
+        dedup_name = f"{{{src_ip}}}:dedup:{safe_threat}"
 
+        try:
             self._rollback_lua(
                 keys=[key_name, dedup_name],
                 args=[
@@ -355,6 +362,13 @@ class IncidentCorrelator:
                 ]
             )
             logger.info("Rolled back alert %s state in Redis for %s", aid, src_ip)
-        except Exception as e:
+        except redis.RedisError as e:
+            # Narrowed from `except Exception`, matching check_redis_master()'s
+            # rationale above: a Redis connectivity/protocol error during a
+            # best-effort compensating rollback is expected and must not
+            # propagate (rollback is itself already running because an
+            # earlier step failed). Anything else here is a genuine bug in
+            # this rollback logic and must crash loudly instead of being
+            # logged as if Redis were merely unreachable.
             logger.warning("Failed to rollback alert state in Redis: %s", e)
 
