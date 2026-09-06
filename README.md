@@ -101,6 +101,12 @@ For local TLS on Redis, generate self-signed dev certificates with:
 scripts/generate_dev_certs.sh
 ```
 
+Distributed tracing (api/main.py, api/kafka_sink.py, inference/stream_processor_faust.py)
+is opt-in: set `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318` to export
+spans to the `jaeger` service in `docker-compose.yml` (UI at
+http://localhost:16686). Unset, tracing is a real no-op (near-zero
+overhead) -- nothing needs it configured to run normally.
+
 ## Running locally
 
 ```bash

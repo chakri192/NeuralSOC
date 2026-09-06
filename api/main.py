@@ -75,8 +75,12 @@ def startup_event():
 
 
 from prometheus_fastapi_instrumentator import Instrumentator  # noqa: E402
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor  # noqa: E402
+from shared.tracing import init_tracing  # noqa: E402
 
 Instrumentator().instrument(app).expose(app, dependencies=[Depends(verify_auth)])
+init_tracing("tsoc-api")
+FastAPIInstrumentor.instrument_app(app)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 

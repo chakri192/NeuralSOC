@@ -127,6 +127,42 @@ services:
     security_opt:
       - no-new-privileges:true
 
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    container_name: soc-jaeger
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      # UI only on loopback, same as every other service here.
+      - "127.0.0.1:16686:16686"
+      # OTLP HTTP receiver -- api/main.py, api/kafka_sink.py, and
+      # inference/stream_processor_faust.py (via shared/tracing.py) all
+      # export here when OTEL_EXPORTER_OTLP_ENDPOINT points at this
+      # service's in-cluster/in-network name. gRPC (4317) intentionally
+      # not exposed -- this repo only ships the lighter -proto-http
+      # exporter (see requirements.txt), not the gRPC one.
+      - "127.0.0.1:4318:4318"
+    networks:
+      - soc-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:16686/ >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # read_only: true is a reasonable default here -- the default all-in-one
+    # storage backend is pure in-memory, unlike redpanda (which needs real
+    # writable paths beyond its data dir, confirmed by actually running it,
+    # see that service's own comment above) -- but unlike postgres/redis's
+    # read_only, this one was NOT verified against a real container in this
+    # environment (no Docker available while this was written). Confirm it
+    # actually starts clean before relying on it; revert to the redpanda
+    # pattern (documented failed attempt, hardening dropped) if it doesn't.
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+
 volumes:
   redpanda-data:
     driver: local

@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 from faust import App
 from concurrent.futures import ThreadPoolExecutor
 from prometheus_client import CONTENT_TYPE_LATEST, Gauge, generate_latest
+from opentelemetry import propagate
+from opentelemetry.trace import set_span_in_context
 
 from inference.features import extract_features
 from inference.rules import evaluate_rules
@@ -22,6 +24,7 @@ from inference.models import DeepLearningEngine
 from inference.correlation import IncidentCorrelator
 from inference.enrichment import ThreatEnricher
 from inference.schemas import validate_alert
+from shared.tracing import init_tracing
 
 dl_engine = DeepLearningEngine()
 correlator = IncidentCorrelator()
@@ -50,6 +53,8 @@ app = App(
 # topic. Omitting value_type (matching incidents_topic below, which
 # already worked) uses Faust's default autodetect path, which returns
 # the decoded JSON dict as-is.
+tracer = init_tracing("tsoc-stream-processor")
+
 raw_traffic_topic = app.topic('raw_traffic')
 alerts_topic = app.topic('security_alerts')
 incidents_topic = app.topic("incidents")
@@ -118,16 +123,32 @@ async def metrics(web, request):
 async def process_traffic(stream):
     async for event in stream:
         async with backpressure_sem:
+            # One parent span per event, covering every stage below through
+            # the Kafka publish/correlation step -- created and ended
+            # explicitly (rather than as a `with`/`async with` block) so
+            # adding it didn't require re-indenting this entire,
+            # already-intricate, already-hardened per-event body. Every
+            # early exit from this block (the "continue" a few lines down,
+            # or falling through to the end after the detections loop)
+            # must end it exactly once; child spans below are linked to it
+            # explicitly via set_span_in_context() rather than relying on
+            # "current span" nesting, for the same reason.
+            event_span = tracer.start_span("stream_processor.process_event")
+            event_span_ctx = set_span_in_context(event_span)
+
             # 1. Feature extraction (pure dictionary operations; avoids threadpool overhead/starvation)
             try:
-                features = extract_features(event)
+                with tracer.start_as_current_span("feature_extraction", context=event_span_ctx):
+                    features = extract_features(event)
             except Exception as e:
                 logger.error(f"Feature extraction failed: {e}")
+                event_span.end()
                 continue
 
             # 2. Rule evaluation
             try:
-                detections = evaluate_rules(event, features)
+                with tracer.start_as_current_span("rule_evaluation", context=event_span_ctx):
+                    detections = evaluate_rules(event, features)
             except Exception as e:
                 logger.error(f"Rule Evaluation Error: {e}")
                 detections = []
@@ -190,10 +211,26 @@ async def process_traffic(stream):
                 except Exception as e:
                     logger.error(f"DL inference failed: {e}")
 
-            # Extract or initialize distributed W3C trace context
-            event_trace_id = str(event.get("trace_id") or event.get("uid") or f"trc-{uuid.uuid4().hex[:16]}")
+            # Extract or initialize distributed W3C trace context. When
+            # tracing is configured (OTEL_EXPORTER_OTLP_ENDPOINT set), this
+            # is a real W3C traceparent tied to event_span -- inject()
+            # against an unconfigured (no-op) provider's invalid span
+            # context correctly yields an empty carrier, so this falls
+            # through to the exact same fallback as before tracing existed
+            # when it's disabled. kafka_sink.py extracts this back out to
+            # link its own process_batch span into the SAME trace Jaeger
+            # shows here, rather than an opaque, tracing-invisible id.
+            _trace_carrier = {}
+            propagate.inject(_trace_carrier, context=event_span_ctx)
+            event_trace_id = _trace_carrier.get("traceparent") or str(
+                event.get("trace_id") or event.get("uid") or f"trc-{uuid.uuid4().hex[:16]}"
+            )
 
             # 4. Emit alerts / incidents (IO-bound Redis Correlator)
+            # Explicit start/end (not `with`) so this doesn't require
+            # re-indenting the entire, already-intricate detections loop
+            # below -- same reasoning as event_span above.
+            publish_span = tracer.start_span("correlate_and_publish", context=event_span_ctx)
             for det in detections:
                 try:
                     raw_alert = {
@@ -299,6 +336,8 @@ async def process_traffic(stream):
                 except Exception as det_outer_err:
                     logger.error("Detection processing loop error for %s: %s", det, det_outer_err)
                     await _send_dlq_safely(event, {"detection": str(det)}, f"DetectionLoopError: {det_outer_err}")
+            publish_span.end()
+            event_span.end()
 
 # realpath() (not abspath()) so a symlink planted inside /tmp/dlq pointing
 # outside it is caught too -- abspath only collapses ".." lexically, it

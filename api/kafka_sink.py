@@ -9,6 +9,8 @@ import time
 
 from kafka import KafkaConsumer, KafkaProducer
 from kafka.structs import OffsetAndMetadata
+from opentelemetry import propagate, trace
+from opentelemetry.trace import Link
 from prometheus_client import Gauge, start_http_server
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import bindparam, insert, update
@@ -17,8 +19,10 @@ MAX_MSG_SIZE = 5 * 1024 * 1024  # 5MB
 from api.database import SessionLocal, engine, Base
 from api.models import Alert
 from api.schemas import AlertPayload
+from shared.tracing import init_tracing
 
 logger = logging.getLogger(__name__)
+tracer = init_tracing("tsoc-kafka-sink")
 
 brokers = os.getenv("REDPANDA_BROKERS", "soc-redpanda-cluster.prod.svc.cluster.local:9092")
 topic = os.getenv("ALERTS_TOPIC", "security_alerts")
@@ -171,6 +175,21 @@ def process_batch(current_batch, dlq_producer=None, session_factory=SessionLocal
     """
     offsets_map = {}
     db = session_factory(expire_on_commit=False)
+    # Started here (not `with`) and ended in the existing `finally:` below,
+    # which already covers every exit path of this function -- avoids
+    # re-indenting the whole try/except/finally body just to add tracing.
+    # Linked (not parented) to each item's own trace, matching OTel's own
+    # convention for a batch operation that logically belongs to several
+    # upstream traces at once rather than exactly one.
+    _links = []
+    for raw_item, _tp, _offset in current_batch:
+        raw_trace_id = raw_item.get("trace_id") if isinstance(raw_item, dict) else None
+        if raw_trace_id:
+            span_ctx = trace.get_current_span(propagate.extract({"traceparent": raw_trace_id})).get_span_context()
+            if span_ctx.is_valid:
+                _links.append(Link(span_ctx))
+    batch_span = tracer.start_span("kafka_sink.process_batch", links=_links)
+    batch_span.set_attribute("batch_size", len(current_batch))
     try:
         valid_items = []
         for raw_item, tp, offset in current_batch:
@@ -235,6 +254,7 @@ def process_batch(current_batch, dlq_producer=None, session_factory=SessionLocal
         return {}
     finally:
         db.close()
+        batch_span.end()
 
 
 def run_sink():

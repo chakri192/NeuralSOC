@@ -77,3 +77,12 @@ PyJWT==2.13.0
 # Transitive (via streamlit/faust-streaming), unpinned; resolved to
 # 8.1.8, a known CVE. Pin explicitly.
 click==8.3.3
+
+# Distributed tracing. -proto-http (not the full opentelemetry-exporter-otlp
+# meta-package) specifically: that package also pulls in the gRPC exporter,
+# which drags in grpcio -- a large native-compiled dependency this doesn't
+# need since Jaeger accepts OTLP over plain HTTP just as well.
+opentelemetry-api==1.44.0
+opentelemetry-sdk==1.44.0
+opentelemetry-instrumentation-fastapi==0.65b0
+opentelemetry-exporter-otlp-proto-http==1.44.0
