@@ -6,12 +6,29 @@ from inference.features import safe_int, safe_float
 # demo attack injector produces, clearly not a real-world signature.
 # Populate JA4_MALICIOUS_FINGERPRINTS (comma-separated) with a real,
 # curated feed before relying on this in production.
+#
+# Reloaded from the environment on a TTL (JA4_RELOAD_INTERVAL_SEC, default
+# 60s) rather than read once at import: this process runs for the whole
+# lifetime of the stream processor, and a static import-time snapshot would
+# mean the only way to push an updated fingerprint feed is a full restart.
 import os as _os
-_JA4_MALICIOUS_FINGERPRINTS = frozenset(
-    f.strip() for f in _os.getenv(
-        "JA4_MALICIOUS_FINGERPRINTS", "t13d000000_rare_fingerprint"
-    ).split(",") if f.strip()
-)
+import time as _time
+
+_JA4_RELOAD_INTERVAL_SEC = float(_os.getenv("JA4_RELOAD_INTERVAL_SEC", "60"))
+_ja4_cache = {"fingerprints": frozenset(), "loaded_at": 0.0}
+
+
+def _load_ja4_fingerprints() -> frozenset:
+    raw = _os.getenv("JA4_MALICIOUS_FINGERPRINTS", "t13d000000_rare_fingerprint")
+    return frozenset(f.strip() for f in raw.split(",") if f.strip())
+
+
+def _get_malicious_ja4_fingerprints() -> frozenset:
+    now = _time.time()
+    if now - _ja4_cache["loaded_at"] >= _JA4_RELOAD_INTERVAL_SEC:
+        _ja4_cache["fingerprints"] = _load_ja4_fingerprints()
+        _ja4_cache["loaded_at"] = now
+    return _ja4_cache["fingerprints"]
 
 
 def evaluate_rules(event: dict, features: dict) -> list:
@@ -122,7 +139,7 @@ def evaluate_rules(event: dict, features: dict) -> list:
         # implementation; match against a curated set of known-malicious
         # FULL fingerprints, not a 4-character version prefix shared by
         # most of the internet.
-        if ja4 and ja4 in _JA4_MALICIOUS_FINGERPRINTS:
+        if ja4 and ja4 in _get_malicious_ja4_fingerprints():
             alerts.append({
                 "rule_id": "RULE_TLS_JA4_MALWARE",
                 "threat_class": "Encrypted-Traffic Malware",

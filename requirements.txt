@@ -1,3 +1,12 @@
+# terminal/tsoc_console.py imports this directly (App, DataTable, Binding,
+# etc.) but it was never listed here -- an undeclared dependency that only
+# worked locally because some other install happened to pull it in.
+# Capped at 6.2.0: textual>=6.3.0 requires rich>=14.2.0, which conflicts
+# with rich==13.8.1 pinned below (streamlit/altair/plotly's resolved
+# version) -- confirmed by bisecting pip's actual resolver, not scraped
+# PyPI metadata (which returns environment-marker-conditioned requirements
+# out of order). 6.2.0 is the newest release still on rich>=13.3.3.
+textual==6.2.0
 kafka-python-ng==2.2.2
 scikit-learn==1.5.2
 numpy==1.26.4

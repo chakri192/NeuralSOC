@@ -1,5 +1,6 @@
 import sys
 import os
+import secrets
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import streamlit as st
@@ -14,6 +15,38 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+_DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
+
+
+def _authenticated() -> bool:
+    """Optional app-level password gate.
+
+    This dashboard has no other app-level auth and, unlike the API, has no
+    Ingress in front of it in this repo -- today it's reached only by an
+    operator who already has a shell/port-forward. DASHBOARD_PASSWORD is
+    opt-in: leaving it unset preserves the existing zero-config local
+    dev/demo flow, while setting it lets operators require a password
+    before this becomes reachable more broadly than "my own machine."
+    """
+    if not _DASHBOARD_PASSWORD:
+        return True
+    if st.session_state.get("dashboard_authenticated"):
+        return True
+    st.markdown("### T-SOC Operations Center")
+    entered = st.text_input("Password", type="password", key="dashboard_password_input")
+    if entered:
+        if secrets.compare_digest(entered, _DASHBOARD_PASSWORD):
+            st.session_state["dashboard_authenticated"] = True
+            st.rerun()
+        else:
+            st.error("Incorrect password.")
+    return False
+
+
+if not _authenticated():
+    st.stop()
+
 
 def load_css():
     css_path = os.path.join(os.path.dirname(__file__), "styles", "app.css")

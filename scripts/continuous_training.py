@@ -198,9 +198,18 @@ def continuous_train_loop():
 
             print(f"[*] Cycle {cycle} Complete. Max Accuracy: {best_acc:.3f}%. Deploying to production...")
 
-            # Atomic deployment: update hash FIRST, then replace model file
-            os.replace("models/cnn_dga_temp.pt.sha256", "models/cnn_dga.pt.sha256")
+            # Deployment is NOT atomic across these two os.replace() calls --
+            # POSIX only guarantees each individual rename is atomic, not a
+            # pair of them together. Model-before-hash (matching how every
+            # other writer in this repo does it -- save_traced_model(),
+            # train_dl_models.py) means a reader racing this narrow window
+            # sees either the fully-old pair or, briefly, a new .pt against
+            # the still-old .sha256 -- which DeepLearningEngine's integrity
+            # check (inference/models.py) safely fails closed on rather than
+            # loading a torn/mismatched model. Doing it hash-first would
+            # instead risk flagging the still-valid OLD model as corrupt.
             os.replace("models/cnn_dga_temp.pt", "models/cnn_dga.pt")
+            os.replace("models/cnn_dga_temp.pt.sha256", "models/cnn_dga.pt.sha256")
 
             print(f"[+] Deployed New Secure Model Hash: {new_hash}")
             cycle += 1

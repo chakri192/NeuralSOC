@@ -223,6 +223,19 @@ degrading silently:
 - DLQ overflow: if a local-disk DLQ fallback exceeds its configured max
   size, alert on-call and rotate manually.
 
+## Dashboard access control
+
+[dashboard/app.py](dashboard/app.py) has no Ingress in this repo and, until
+now, no app-level auth either -- it relied entirely on whoever could reach
+the Streamlit port already being trusted (a shell, a `kubectl port-forward`).
+Setting `DASHBOARD_PASSWORD` now gates the whole app behind a password
+(constant-time compared via `secrets.compare_digest`) before rendering
+anything else; leaving it unset preserves the original zero-config local
+dev/demo behavior. This is a single shared password, not per-user auth --
+if the dashboard is ever exposed to more than a small trusted team, put a
+real auth layer (SSO via the Ingress, e.g. oauth2-proxy) in front of it
+instead.
+
 ## Genuinely out of scope here
 
 - **A genuinely offline/air-gapped signing key**, as opposed to the
