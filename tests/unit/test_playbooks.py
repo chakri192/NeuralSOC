@@ -6,12 +6,18 @@ with the same ipaddress-module logic inference/enrichment.py already used
 correctly -- these tests exercise that boundary directly, plus the
 command-injection-safe shell quoting in generate_playbook().
 """
+import inspect
+import re
+
 from inference.playbooks import (
+    THREAT_CLASS_MAP,
     enrich_ip_intel,
     generate_playbook,
     safe_format_string,
     sanitize_input,
 )
+import inference.models as models_module
+import inference.rules as rules_module
 
 
 class TestEnrichIpIntel:
@@ -101,3 +107,30 @@ class TestGeneratePlaybook:
             "evidence": {"domain": "evil-dga-domain.biz"},
         })
         assert "evil-dga-domain.biz" in playbook["recommended_firewall_rule"]
+
+
+def test_every_detection_threat_class_has_a_playbook_mapping():
+    """generate_playbook() already falls back to the DATA_EXFILTRATION
+    template for an unmapped threat_class -- so a missing THREAT_CLASS_MAP
+    entry never crashes, it just silently shows an analyst the wrong
+    playbook. Statically scanning inference/rules.py, inference/models.py,
+    and inference/stream_processor_faust.py for every literal
+    "threat_class": "..." string (rather than driving each rule's real
+    trigger conditions, which would tightly couple this test to internal
+    thresholds) catches a newly-added detection rule/class whose author
+    forgot to add the matching THREAT_CLASS_MAP entry."""
+    # Imported lazily (not at module top level): stream_processor_faust
+    # constructs a real IncidentCorrelator() at import time, which needs
+    # the session-scoped Redis fake from tests/conftest.py to be active --
+    # true once a test is actually running, not yet true during pytest's
+    # collection of this file's top-level imports.
+    import inference.stream_processor_faust as stream_processor_module
+
+    pattern = re.compile(r'"threat_class"\s*:\s*"([^"]+)"')
+    found = set()
+    for module in (rules_module, models_module, stream_processor_module):
+        found.update(pattern.findall(inspect.getsource(module)))
+
+    assert found, "no literal threat_class assignments found -- pattern or module list is stale"
+    unmapped = {tc for tc in found if tc.strip().upper() not in THREAT_CLASS_MAP}
+    assert not unmapped, f"threat_class values with no THREAT_CLASS_MAP entry: {unmapped}"
