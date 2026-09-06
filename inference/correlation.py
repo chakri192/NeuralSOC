@@ -271,6 +271,15 @@ class IncidentCorrelator:
 
                 for raw_a in raw_alerts:
                     try:
+                        # A value returned via a Lua EVAL's own redis.call('lrange', ...)
+                        # can come back as bytes rather than the decode_responses=True
+                        # str every other command on this client returns (observed via
+                        # fakeredis's Lua emulation; harmless to handle regardless of
+                        # whether real Redis can do the same) -- treating it as
+                        # "already parsed" like a dict would silently drop this alert
+                        # from aggregation instead of decoding and parsing it.
+                        if isinstance(raw_a, bytes):
+                            raw_a = raw_a.decode("utf-8")
                         parsed_a = json.loads(raw_a) if isinstance(raw_a, str) else raw_a
                         if isinstance(parsed_a, dict):
                             parsed_alerts_list.append(parsed_a)
