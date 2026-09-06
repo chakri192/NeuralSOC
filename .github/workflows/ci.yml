@@ -59,13 +59,19 @@ jobs:
         # (fake KafkaConsumer + a real SIGINT for the former, Faust's
         # Agent.fun to reach the undecorated function for the latter) --
         # both previously only exercised end-to-end via test_load.py, with
-        # no unit-level coverage of their own branches. 65 leaves a margin
-        # for the real Python-3.12 CI runner while still being a gate that
-        # would actually catch a coverage regression.
+        # no unit-level coverage of their own branches. Raised from 65 to
+        # 80 after closing the five thinnest modules (ingest/simulator.py,
+        # shared/data_access.py, inference/correlation.py -- which also
+        # surfaced a real bug: history alerts returned as bytes rather
+        # than str from a Lua EVAL snapshot were silently dropped from
+        # incident aggregation -- inference/train_model.py,
+        # ingest/pcap_ingester.py) took real coverage from 73% to 84%; 80
+        # leaves the same kind of margin for the real Python-3.12 CI
+        # runner while still catching a real regression, not rubber-stamping.
         run: |
           PYTHONPATH=. pytest tests/ -v --tb=short --durations=10 \
             --cov=api --cov=inference --cov=shared --cov=ingest \
-            --cov-report=term-missing --cov-report=xml --cov-fail-under=65
+            --cov-report=term-missing --cov-report=xml --cov-fail-under=80
 
       - name: Model integrity verification (real digest check)
         run: |

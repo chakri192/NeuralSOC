@@ -93,3 +93,150 @@ def test_poll_api_marks_unhealthy_on_non_200(monkeypatch):
 
     # A non-200 response must not leave a stale "healthy" reading.
     assert mgr.broker_healthy is False
+
+
+def _configured_manager(monkeypatch):
+    monkeypatch.setenv("API_URL", "https://api.tsoc.local/api/v1")
+    monkeypatch.setenv("TSOC_API_KEY", "k")
+    return DataStreamManager()
+
+
+def test_poll_api_updates_alerts_and_stats_on_success(monkeypatch):
+    mgr = _configured_manager(monkeypatch)
+    mgr.is_running = True
+
+    alerts_resp = MagicMock(status_code=200)
+    alerts_resp.json.return_value = [{"alert_id": "a1", "source_ip": "10.0.0.1"}]
+    stats_resp = MagicMock(status_code=200)
+    stats_resp.json.return_value = {"total_alerts": 1, "critical": 0, "high": 1, "medium": 0, "low": 0}
+
+    calls = {"n": 0}
+
+    def fake_get(url, timeout=3):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            mgr.is_running = False
+        return alerts_resp if "/alerts" in url else stats_resp
+
+    with patch.object(mgr.session, "get", side_effect=fake_get), \
+         patch("shared.data_access.time.sleep"):
+        mgr._poll_api()
+
+    assert mgr.alerts == [{"alert_id": "a1", "source_ip": "10.0.0.1"}]
+    assert mgr.stats["high"] == 1
+    assert mgr.broker_healthy is True
+    assert mgr.last_event_time > 0
+
+
+def test_poll_api_survives_a_connection_exception(monkeypatch):
+    mgr = _configured_manager(monkeypatch)
+    mgr.broker_healthy = True
+    mgr.is_running = True
+
+    def _raise_then_stop(*a, **kw):
+        mgr.is_running = False
+        raise ConnectionError("broker unreachable")
+
+    with patch.object(mgr.session, "get", side_effect=_raise_then_stop), \
+         patch("shared.data_access.time.sleep"):
+        mgr._poll_api()  # must not raise
+
+    assert mgr.broker_healthy is False
+
+
+def test_start_listeners_starts_a_background_thread_when_configured(monkeypatch):
+    mgr = _configured_manager(monkeypatch)
+    with patch.object(mgr, "_poll_api"):
+        mgr.start_listeners()
+        assert mgr.is_running is True
+
+
+def test_start_listeners_is_idempotent_when_already_running(monkeypatch):
+    mgr = _configured_manager(monkeypatch)
+    with patch.object(mgr, "_poll_api"), patch("shared.data_access.threading.Thread") as thread_cls:
+        mgr.start_listeners()
+        mgr.start_listeners()
+        # The already-running guard must prevent a second thread from ever
+        # being constructed, not just from being started twice.
+        assert thread_cls.call_count == 1
+
+
+class TestGetIncidents:
+    def test_empty_alerts_returns_empty_list(self, monkeypatch):
+        mgr = _configured_manager(monkeypatch)
+        mgr.alerts = []
+        assert mgr.get_incidents() == []
+
+    def test_alerts_from_same_source_ip_aggregate_into_one_incident(self, monkeypatch):
+        mgr = _configured_manager(monkeypatch)
+        mgr.alerts = [
+            {"alert_id": "a1", "source_ip": "10.0.0.5", "destination_ip": "1.1.1.1",
+             "threat_class": "DDoS", "severity": "low"},
+            {"alert_id": "a2", "source_ip": "10.0.0.5", "destination_ip": "2.2.2.2",
+             "threat_class": "Reconnaissance", "severity": "critical"},
+        ]
+        incidents = mgr.get_incidents()
+        assert len(incidents) == 1
+        inc = incidents[0]
+        assert inc["incident_id"] == "INC-10-0-0-5"
+        # Severity must escalate to the highest-scored alert seen, not stay at the first.
+        assert inc["severity"] == "critical"
+        assert set(inc["threat_classes"]) == {"DDoS", "Reconnaissance"}
+        assert set(inc["affected_entities"]) == {"10.0.0.5", "1.1.1.1", "2.2.2.2"}
+        assert inc["related_alert_ids"] == ["a1", "a2"]
+        # base_score 100 (critical) + volume_bonus min(20, (2-1)*5) = 5 -> 100 (capped)
+        assert inc["risk_score"] == 100.0
+
+    def test_alerts_from_different_source_ips_produce_separate_incidents(self, monkeypatch):
+        mgr = _configured_manager(monkeypatch)
+        mgr.alerts = [
+            {"alert_id": "a1", "source_ip": "10.0.0.1", "severity": "high"},
+            {"alert_id": "a2", "source_ip": "10.0.0.2", "severity": "medium"},
+        ]
+        incidents = mgr.get_incidents()
+        assert {i["incident_id"] for i in incidents} == {"INC-10-0-0-1", "INC-10-0-0-2"}
+
+    def test_missing_optional_fields_use_safe_defaults(self, monkeypatch):
+        mgr = _configured_manager(monkeypatch)
+        mgr.alerts = [{}]  # no source_ip, threat_class, destination_ip, alert_id
+        incidents = mgr.get_incidents()
+        assert len(incidents) == 1
+        assert incidents[0]["threat_classes"] == ["Unclassified Threat"]
+        assert incidents[0]["affected_entities"] == ["127.0.0.1"]
+
+
+class TestGetAlerts:
+    def test_string_evidence_is_deserialized_to_a_dict(self, monkeypatch):
+        mgr = _configured_manager(monkeypatch)
+        mgr.alerts = [{"alert_id": "a1", "evidence": '{"domain": "bad.example"}'}]
+        alerts = mgr.get_alerts()
+        assert alerts[0]["evidence"] == {"domain": "bad.example"}
+
+    def test_malformed_evidence_json_falls_back_to_the_raw_string(self, monkeypatch):
+        mgr = _configured_manager(monkeypatch)
+        mgr.alerts = [{"alert_id": "a1", "evidence": "not valid json"}]
+        alerts = mgr.get_alerts()  # must not raise
+        assert alerts[0]["evidence"] == "not valid json"
+
+    def test_dict_evidence_passes_through_unchanged(self, monkeypatch):
+        mgr = _configured_manager(monkeypatch)
+        mgr.alerts = [{"alert_id": "a1", "evidence": {"already": "a dict"}}]
+        alerts = mgr.get_alerts()
+        assert alerts[0]["evidence"] == {"already": "a dict"}
+
+
+def test_status_reports_health_and_counts(monkeypatch):
+    mgr = _configured_manager(monkeypatch)
+    mgr.alerts = [{"alert_id": "a1"}, {"alert_id": "a2"}]
+    mgr.broker_healthy = True
+    mgr.last_event_time = 123.0
+    mgr.stats = {"total_alerts": 2}
+
+    result = mgr.status()
+    assert result == {
+        "broker_healthy": True,
+        "last_event_time": 123.0,
+        "incident_count": 2,
+        "alert_count": 2,
+        "stats": {"total_alerts": 2},
+    }
