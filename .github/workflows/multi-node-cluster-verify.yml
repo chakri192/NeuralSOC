@@ -1,0 +1,43 @@
+# Multi-node kind+Cilium cluster verification (scripts/verify_multi_node_cluster.sh).
+#
+# Deliberately NOT run on every push, unlike ci.yml -- standing up a real
+# 3-node kind cluster + Cilium + metrics-server takes several minutes and
+# is meant to catch cross-node policy/scaling gaps the single-node
+# interactive verification (see SECURITY.md) couldn't, not to gate every
+# commit. Triggered manually (workflow_dispatch) or weekly.
+name: Multi-Node Cluster Verification
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: '0 6 * * 1'  # Mondays 06:00 UTC
+
+jobs:
+  multi-node-cluster-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.24.0/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+          kind version
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: 'v1.30.0'
+
+      - name: Install Cilium CLI
+        run: |
+          CILIUM_CLI_VERSION=$(curl -s https://raw.githubusercontent.com/cilium/cilium-cli/main/stable.txt)
+          curl -L --fail --remote-name-all "https://github.com/cilium/cilium-cli/releases/download/${CILIUM_CLI_VERSION}/cilium-linux-amd64.tar.gz"
+          sudo tar xzvfC cilium-linux-amd64.tar.gz /usr/local/bin
+          rm cilium-linux-amd64.tar.gz
+          cilium version --client
+
+      - name: Run multi-node cluster verification
+        run: scripts/verify_multi_node_cluster.sh

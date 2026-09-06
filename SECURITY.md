@@ -152,13 +152,32 @@ installed via its official Helm chart) — not just schema-checked:
   non-`Always` images there). A pod using a real digest reference and
   `imagePullPolicy: Always` in `tsoc` was allowed.
 
-This was a one-time interactive verification (the cluster is not
-persisted — spinning up kind+Cilium+Kyverno on every CI run would be
-slow and is not currently wired in), reproducible with: `kind create
-cluster` (CNI disabled) → `cilium install` → apply
-`network-policies.yaml` + `cilium-identity-policy.yaml` → `helm install
-kyverno` → apply `kyverno-verify.yaml` → the connectivity/admission
-tests described above.
+This was originally a one-time interactive verification on a
+single-node cluster. `scripts/verify_multi_node_cluster.sh` now
+automates the NetworkPolicy/Cilium half of it on a real 3-node cluster
+(1 control-plane + 2 workers) instead, with the test pods deliberately
+scheduled onto *different* nodes — a single-node run can't catch a
+policy that only worked because every pod shared one node's Cilium
+agent state. It also verifies `k8s/hpa.yaml`'s plain
+HorizontalPodAutoscaler definitions actually scale a workload under
+real CPU load, not just that they're schema-valid. Run via
+`.github/workflows/multi-node-cluster-verify.yml` (manually, or weekly)
+rather than on every push — standing up kind+Cilium+metrics-server
+takes several minutes, which is fine for a scheduled check but not for
+gating every commit.
+
+Genuinely not covered by that script (see its own header/summary
+output): KEDA/Kafka-consumer-lag-based scaling (the stream-processor's
+`ScaledObject`, which needs a real KEDA install and a real Kafka
+deployment generating real lag) and Kyverno admission control (still
+only verified the original, one-time, interactive way described above
+— admission control doesn't depend on which node a pod lands on, so a
+multi-node re-run wouldn't add new information the way the
+NetworkPolicy re-run does). Reproducible interactively the same way as
+before: `kind create cluster` (CNI disabled) → `cilium install` →
+apply `network-policies.yaml` + `cilium-identity-policy.yaml` → `helm
+install kyverno` → apply `kyverno-verify.yaml` → the connectivity/
+admission tests described above.
 
 ## Internal TLS (no public domain required)
 
