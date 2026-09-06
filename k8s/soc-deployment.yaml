@@ -67,13 +67,6 @@ metadata:
 spec:
   serviceName: "tsoc-stream-processor"
   replicas: 3
-  topologySpreadConstraints:
-  - maxSkew: 1
-    topologyKey: topology.kubernetes.io/zone
-    whenUnsatisfiable: DoNotSchedule
-    labelSelector:
-      matchLabels:
-        app: tsoc-stream-processor
   persistentVolumeClaimRetentionPolicy:
     whenDeleted: Retain
     whenScaled: Retain
@@ -85,6 +78,16 @@ spec:
       labels:
         app: tsoc-stream-processor
     spec:
+      # Belongs on the pod spec (StatefulSetSpec has no such field) --
+      # kubeconform -strict caught this one level too shallow, which would
+      # have made kubectl apply reject the whole StatefulSet outright.
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector:
+          matchLabels:
+            app: tsoc-stream-processor
       terminationGracePeriodSeconds: 60
       volumes:
       - name: tmp
