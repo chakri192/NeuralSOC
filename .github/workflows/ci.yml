@@ -306,3 +306,75 @@ jobs:
       - name: Tear down
         if: always()
         run: docker compose down -v
+
+  # docs/DISASTER_RECOVERY.md documents scripts/backup_postgres.sh /
+  # restore_postgres.sh as the actual DR procedure -- a runbook nobody has
+  # ever exercised is just a hope, not a plan. This proves the mechanism
+  # (not a production-scale rehearsal, see that doc's own "out of scope"
+  # section) on every push: create real data, back it up, wipe the
+  # database, restore, and assert the data actually came back unchanged.
+  # A plain GitHub Actions service container (not docker-compose.yml's
+  # postgres) since this only needs an isolated Postgres, not the rest of
+  # the stack integration-smoke-test above already covers.
+  backup-restore-drill:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: drill_user
+          POSTGRES_PASSWORD: drill_pass
+          POSTGRES_DB: tsoc_drill
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PGPASSWORD: drill_pass
+      DATABASE_URL: postgresql://drill_user:drill_pass@localhost:5432/tsoc_drill
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install postgresql-client (pg_dump/pg_restore/psql)
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      - name: Create real test data
+        run: |
+          psql -h localhost -U drill_user -d tsoc_drill -c \
+            "CREATE TABLE drill_alerts (id SERIAL PRIMARY KEY, alert_id TEXT UNIQUE NOT NULL, payload TEXT NOT NULL);"
+          psql -h localhost -U drill_user -d tsoc_drill -c \
+            "INSERT INTO drill_alerts (alert_id, payload) VALUES ('ALT-1', 'test-payload-1'), ('ALT-2', 'test-payload-2'), ('ALT-3', 'test-payload-3');"
+
+      - name: Backup
+        run: echo "BACKUP_FILE=$(scripts/backup_postgres.sh)" >> "$GITHUB_ENV"
+
+      - name: Wipe the database
+        run: psql -h localhost -U drill_user -d tsoc_drill -c "DROP TABLE drill_alerts;"
+
+      - name: Confirm the wipe actually happened (sanity-check the drill itself)
+        run: |
+          if psql -h localhost -U drill_user -d tsoc_drill -c "SELECT 1 FROM drill_alerts LIMIT 1;" 2>/dev/null; then
+            echo "Table still exists after DROP -- this drill isn't testing anything real"
+            exit 1
+          fi
+
+      - name: Restore
+        run: scripts/restore_postgres.sh "$BACKUP_FILE"
+
+      - name: Verify restored data matches exactly
+        run: |
+          COUNT=$(psql -h localhost -U drill_user -d tsoc_drill -tAc "SELECT COUNT(*) FROM drill_alerts;")
+          if [ "$COUNT" != "3" ]; then
+            echo "FAIL: expected 3 rows after restore, got $COUNT"
+            exit 1
+          fi
+          PAYLOAD=$(psql -h localhost -U drill_user -d tsoc_drill -tAc "SELECT payload FROM drill_alerts WHERE alert_id='ALT-2';")
+          if [ "$PAYLOAD" != "test-payload-2" ]; then
+            echo "FAIL: restored payload mismatch for ALT-2: got '$PAYLOAD'"
+            exit 1
+          fi
+          echo "PASS: backup -> wipe -> restore preserved 3 rows with matching content."

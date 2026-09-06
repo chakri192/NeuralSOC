@@ -70,10 +70,10 @@ ingest/         Log tailer, PCAP ingester, synthetic traffic simulator
 shared/         Code shared between the dashboard and terminal console
 dashboard/      Streamlit web UI
 terminal/       Textual-based terminal console
-scripts/        Training, topic setup, dev cert generation, integrity checks
+scripts/        Training, topic setup, dev cert generation, integrity checks, backup/restore, DLQ replay
 k8s/            Kubernetes manifests (NetworkPolicy, Kyverno, HPA, etc.)
 tests/          pytest suite (unit + integration + load)
-docs/           Model methodology, rotation policy, threat taxonomy
+docs/           Model methodology, rotation policy, threat taxonomy, disaster recovery
 ```
 
 ## Requirements
