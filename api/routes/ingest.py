@@ -55,11 +55,26 @@ def bulk_upsert_alerts(db: Session, tenant_id: int, alert_dicts: List[dict]) -> 
     while it wrote to Postgres directly -- this endpoint is now the
     single place that does. Stamps tenant_id onto every row itself;
     never trusts a client-supplied tenant_id in the payload (the sensor
-    token IS the tenant -- that's the entire point of this boundary)."""
+    token IS the tenant -- that's the entire point of this boundary).
+
+    The "does this alert already exist" lookup below is scoped to this
+    same tenant_id, not a bare alert_id match -- alert_id only has a
+    global UNIQUE constraint (api/models.py), not a (tenant_id,
+    alert_id) one, so an unscoped lookup would let one tenant's sensor
+    silently overwrite (and reassign the tenant_id of) another tenant's
+    existing alert row just by sending a colliding alert_id. Scoped this
+    way, a genuine cross-tenant collision instead fails the INSERT on
+    the DB's own unique constraint and gets DLQ'd by the per-item
+    fallback below -- data loss for that one alert, never a silent
+    cross-tenant hijack.
+    """
     for d in alert_dicts:
         d["tenant_id"] = tenant_id
     aids = [d["alert_id"] for d in alert_dicts]
-    existing_aids = {row[0] for row in db.query(Alert.alert_id).filter(Alert.alert_id.in_(aids)).all()}
+    existing_aids = {
+        row[0]
+        for row in db.query(Alert.alert_id).filter(Alert.alert_id.in_(aids), Alert.tenant_id == tenant_id).all()
+    }
     to_insert = [d for d in alert_dicts if d["alert_id"] not in existing_aids]
     to_update = [d for d in alert_dicts if d["alert_id"] in existing_aids]
     if to_insert:
@@ -106,7 +121,11 @@ def ingest_alerts(
             d["tenant_id"] = sensor.tenant_id
             try:
                 with db.begin_nested():
-                    existing = db.query(Alert).filter(Alert.alert_id == d["alert_id"]).first()
+                    existing = (
+                        db.query(Alert)
+                        .filter(Alert.alert_id == d["alert_id"], Alert.tenant_id == sensor.tenant_id)
+                        .first()
+                    )
                     if existing:
                         for k, v in d.items():
                             setattr(existing, k, v)

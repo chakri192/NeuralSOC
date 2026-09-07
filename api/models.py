@@ -131,8 +131,9 @@ class SensorToken(Base):
     authenticates with one of these against POST /api/v1/ingest/alerts,
     so a compromised sensor at Tenant A can never write data tagged as
     Tenant B. Only the SHA-256 hash is stored -- the cleartext token is
-    shown once at creation time (see api/routes/sensor_tokens.py) and
-    is not retrievable again, the same convention as GitHub/AWS API keys."""
+    shown once at creation time (see api/routes/ingest.py's
+    create_sensor_token) and is not retrievable again, the same
+    convention as GitHub/AWS API keys."""
 
     __tablename__ = "sensor_tokens"
 

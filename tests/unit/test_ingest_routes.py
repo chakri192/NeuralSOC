@@ -196,6 +196,48 @@ class TestIngestAlerts:
         assert stored.tenant_id == tenant_b
         assert stored.tenant_id != tenant_a
 
+    def test_a_tenant_bs_sensor_cannot_hijack_tenant_as_existing_alert_via_an_alert_id_collision(self):
+        """Regression test: alert_id only has a global UNIQUE constraint
+        (api/models.py), not a (tenant_id, alert_id) one. Before
+        bulk_upsert_alerts()/the per-item fallback scoped their "does this
+        alert already exist" lookup to the caller's own tenant_id, tenant
+        B's sensor sending an alert_id that already belonged to tenant A
+        would be treated as an UPDATE and silently reassign that alert's
+        tenant_id to B -- overwriting tenant A's data and evicting the
+        alert from tenant A's view entirely, exactly the kind of
+        cross-tenant write this whole module's docstring says a
+        compromised sensor must never be able to do.
+        """
+        tenant_a = _seed_tenant_and_admin(tenant_slug="acme", email="admin@acme.example.com")
+        tenant_b = _seed_tenant_and_admin(tenant_slug="globex", email="admin@globex.example.com")
+        with TestClient(app) as client:
+            token_a = _login(client, "admin@acme.example.com")
+            created_a = _create_sensor_token(client, token_a, tenant_a)
+            r1 = client.post(
+                "/api/v1/ingest/alerts", json=[_SAMPLE_ALERT], headers={"Authorization": f"Bearer {created_a['token']}"}
+            )
+            assert r1.json() == {"accepted": 1, "failed": []}
+
+            token_b = _login(client, "admin@globex.example.com")
+            created_b = _create_sensor_token(client, token_b, tenant_b)
+            colliding_alert = {**_SAMPLE_ALERT, "severity": "low", "threat_class": "Hijacked"}
+            r2 = client.post(
+                "/api/v1/ingest/alerts", json=[colliding_alert], headers={"Authorization": f"Bearer {created_b['token']}"}
+            )
+
+        # Tenant B's colliding write must be rejected, not silently applied.
+        assert r2.json()["accepted"] == 0
+        assert len(r2.json()["failed"]) == 1
+        assert r2.json()["failed"][0]["alert_id"] == "ALERT-1"
+
+        db = SessionLocal()
+        rows = db.query(Alert).filter(Alert.alert_id == "ALERT-1").all()
+        db.close()
+        assert len(rows) == 1  # still exactly one row -- no duplicate, no silent overwrite
+        assert rows[0].tenant_id == tenant_a
+        assert rows[0].severity == "critical"  # tenant A's original value, untouched
+        assert rows[0].threat_class == "DGA"
+
     def test_ingest_upserts_an_existing_alert_by_alert_id(self):
         tenant_id = _seed_tenant_and_admin()
         with TestClient(app) as client:

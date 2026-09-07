@@ -238,7 +238,7 @@ jobs:
         # k8s/'s Kyverno policy (kyverno-verify.yaml) requires every image
         # to be digest-pinned, not just tagged -- these are the real refs
         # a deploy step should write into the manifests (e.g. via
-        # `kustomize edit set image`, see k8s/overlays/) in place of the
+        # `kustomize edit set image`, see k8s-overlays/) in place of the
         # placeholder your-registry.com/tsoc/... digests. No deploy step
         # consumes this automatically yet -- there's no live cluster in
         # this repo to deploy to -- so it's recorded here for now.
