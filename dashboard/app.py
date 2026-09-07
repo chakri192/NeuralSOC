@@ -1,16 +1,17 @@
 import sys
 import os
-import secrets
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+import requests
 import streamlit as st
 import streamlit.components.v1 as components
 
-from shared.auth import DEFAULT_DASHBOARD_USERNAME, resolve_dashboard_password
-from shared.data_access import stream_manager
+from dashboard import session_data
 from dashboard.components.icons import svg
 from dashboard.components.ui import inject_theme, connection_pill
+
+_API_URL = os.getenv("API_URL", "http://127.0.0.1:8000/api/v1")
 
 st.set_page_config(
     page_title="T-SOC Operations Center",
@@ -20,7 +21,7 @@ st.set_page_config(
 )
 
 inject_theme()
-_is_authenticated = bool(st.session_state.get("dashboard_authenticated"))
+_is_authenticated = bool(st.session_state.get("access_token"))
 
 # st.logo() renders into the sidebar's dedicated header slot, which is
 # always the first thing in the sidebar regardless of call order --
@@ -34,17 +35,6 @@ _is_authenticated = bool(st.session_state.get("dashboard_authenticated"))
 if _is_authenticated:
     st.logo(os.path.join(os.path.dirname(__file__), "assets", "brand.svg"), size="large")
 
-
-@st.cache_resource
-def _resolve_dashboard_password() -> str:
-    """Wraps resolve_dashboard_password() so its warning prints once per
-    process, not once per rerun -- Streamlit re-executes this whole
-    script on every interaction, so a bare module-level call would spam
-    the log on every click."""
-    return resolve_dashboard_password(warn=True)
-
-
-_DASHBOARD_PASSWORD = _resolve_dashboard_password()
 
 # Defined and called unconditionally, before the auth check: the moment
 # ANY session calls st.navigation(), Streamlit permanently stops falling
@@ -68,7 +58,11 @@ nav = st.navigation(pages, position="sidebar" if _is_authenticated else "hidden"
 
 
 def _authenticated() -> bool:
-    """Mandatory app-level login gate (see _DASHBOARD_PASSWORD above)."""
+    """Mandatory app-level login gate: a real per-employee account
+    (api/routes/auth.py's /auth/login), not a single password shared by
+    everyone -- the JWT it returns is what identifies both which tenant
+    this session belongs to and who is acting, for every API call and
+    every triage action this session makes from here on."""
     if _is_authenticated:
         return True
 
@@ -82,11 +76,7 @@ def _authenticated() -> bool:
             unsafe_allow_html=True,
         )
         with st.form("login_form"):
-            # No default/prefilled value: "user"/"user" is a convenience
-            # fallback credential (see _DASHBOARD_PASSWORD above), not
-            # something the login form itself should hint at to whoever
-            # opens it.
-            name = st.text_input("Your name", autocomplete="name")
+            email = st.text_input("Email", autocomplete="username")
             # A correct, standard autocomplete hint (vs none/"off") makes
             # password managers more likely to fill this the same way a
             # real browser login form works -- via a proper input event
@@ -134,27 +124,53 @@ def _authenticated() -> bool:
         )
 
         if submitted:
-            if secrets.compare_digest(entered, _DASHBOARD_PASSWORD):
-                st.session_state["dashboard_authenticated"] = True
-                st.session_state["analyst_name"] = name.strip() or DEFAULT_DASHBOARD_USERNAME
-                st.rerun()
+            try:
+                resp = requests.post(
+                    f"{_API_URL}/auth/login",
+                    json={"email": email.strip(), "password": entered},
+                    timeout=5,
+                )
+            except requests.RequestException:
+                st.error("Could not reach the T-SOC API. Try again shortly.")
             else:
-                st.error("Incorrect password.")
+                if resp.status_code == 200:
+                    st.session_state["access_token"] = resp.json()["access_token"]
+                    st.session_state["analyst_name"] = email.strip()
+                    st.rerun()
+                elif resp.status_code == 429:
+                    st.error("Too many failed attempts. Try again later.")
+                else:
+                    st.error("Incorrect email or password.")
     return False
 
 
 if not _authenticated():
     st.stop()
 
-# Idempotent (guarded by is_running) -- runs once here for every page,
-# since st.navigation always executes this entrypoint first regardless
-# of which page is selected.
-stream_manager.start_listeners()
-status = stream_manager.status()
+# Runs once here for every page, since st.navigation always executes
+# this entrypoint first regardless of which page is selected -- reads
+# this session's own tenant via st.session_state["access_token"], not a
+# process-wide poll shared across every tenant's employees.
+status = session_data.status()
 
 with st.sidebar:
     st.markdown(connection_pill(status["broker_healthy"]), unsafe_allow_html=True)
-    st.text_input("Analyst name", key="analyst_name")
+    # Read-only: this is a verified identity from login now, not a
+    # free-text field anyone could edit to attribute their actions to
+    # someone else's name.
+    st.caption(f"Signed in as {st.session_state.get('analyst_name', '')}")
+    if st.button("Log out", width="stretch"):
+        try:
+            requests.post(
+                f"{_API_URL}/auth/logout",
+                json={"token": st.session_state.get("access_token", "")},
+                timeout=5,
+            )
+        except requests.RequestException:
+            pass  # best-effort revocation; the session is being cleared either way
+        st.session_state.pop("access_token", None)
+        st.session_state.pop("analyst_name", None)
+        st.rerun()
     st.caption("ENV: DEMO · DIODE: ONE-WAY")
 
 nav.run()

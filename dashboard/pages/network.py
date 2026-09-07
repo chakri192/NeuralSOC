@@ -7,21 +7,21 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from dashboard import session_data
 from dashboard.components.empty_states import render_broker_unavailable, render_no_alerts
 from dashboard.components.ui import relative_time
-from shared.data_access import stream_manager
 
 _NEW_PAIR_WINDOW_MINUTES = 10
 
 st.markdown("## Network")
 st.caption("Top communicating pairs observed in the active telemetry window.")
 
-status = stream_manager.status()
+status = session_data.status()
 if not status["broker_healthy"]:
     render_broker_unavailable()
     st.stop()
 
-alerts = stream_manager.get_alerts()
+alerts = session_data.get_alerts()
 if not alerts:
     render_no_alerts()
     st.stop()

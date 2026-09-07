@@ -13,6 +13,12 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger("data_access")
 
+# Same env var _load_config() resolves below for DataStreamManager, and
+# the same one shared/triage_store.py and terminal/tsoc_console.py each
+# read independently -- one source of truth for where the API lives.
+_API_URL = os.getenv("API_URL", "http://127.0.0.1:8000/api/v1")
+_REQUEST_TIMEOUT_SEC = 5
+
 
 class ConfigError(RuntimeError):
     """Raised by _load_config() when required dashboard config (API_URL,
@@ -38,6 +44,124 @@ def _load_config():
         raise ConfigError("TSOC_API_KEY not set")
 
     return api_url, api_key
+
+
+def synthesize_incidents(alerts: list) -> list:
+    """Synthesizes structured Incident objects from a list of raw alerts.
+    Enforces schema conformity to prevent KeyError in UI pages.
+
+    A free function (not a DataStreamManager method) so a caller with its
+    own, differently-sourced alert list -- terminal/tsoc_console.py reads
+    tenant-scoped alerts via its own per-employee JWT, not through this
+    module's single-service-key singleton -- can reuse the exact same
+    grouping/risk-scoring logic instead of re-implementing it.
+    """
+    if not alerts:
+        return []
+
+    incidents_by_src = {}
+    severity_scores = {"critical": 100.0, "high": 75.0, "medium": 50.0, "low": 25.0}
+
+    for a in alerts:
+        src = a.get("source_ip") or "127.0.0.1"
+        if src not in incidents_by_src:
+            incidents_by_src[src] = {
+                "incident_id": f"INC-{src.replace('.', '-')}",
+                "created_timestamp": a.get("timestamp", datetime.now(timezone.utc).isoformat()),
+                "severity": a.get("severity", "low"),
+                "threat_classes": set(),
+                "affected_entities": set([src, a.get("destination_ip", "")]),
+                "related_alert_ids": [],
+                "evidence_summary": "",
+                "status": "active",
+                "max_sev_score": 0.0,
+                "alert_count": 0
+            }
+        inc = incidents_by_src[src]
+        inc["alert_count"] += 1
+        if a.get("threat_class"):
+            inc["threat_classes"].add(a["threat_class"])
+        if a.get("destination_ip"):
+            inc["affected_entities"].add(a["destination_ip"])
+        if a.get("alert_id"):
+            inc["related_alert_ids"].append(a["alert_id"])
+
+        sev = str(a.get("severity", "low")).lower()
+        score = severity_scores.get(sev, 25.0)
+        if score > inc["max_sev_score"]:
+            inc["max_sev_score"] = score
+            inc["severity"] = sev
+
+    formatted_incidents = []
+    for src, inc in incidents_by_src.items():
+        base_score = inc["max_sev_score"]
+        volume_bonus = min(20.0, (inc["alert_count"] - 1) * 5.0)
+        risk_score = min(100.0, base_score + volume_bonus)
+
+        threats = list(inc["threat_classes"]) if inc["threat_classes"] else ["Unclassified Threat"]
+        entities = [e for e in inc["affected_entities"] if e]
+
+        formatted_incidents.append({
+            "incident_id": inc["incident_id"],
+            "created_timestamp": inc["created_timestamp"],
+            "severity": inc["severity"],
+            "risk_score": float(risk_score),
+            "threat_classes": threats,
+            "affected_entities": entities if entities else [src],
+            "related_alert_ids": inc["related_alert_ids"],
+            "evidence_summary": f"Aggregated {inc['alert_count']} alert(s) across {len(threats)} threat class(es) involving {src}",
+            "status": "active",
+            "mitre_tactics": ["Command and Control", "Initial Access"],
+            "mitre_techniques": ["T1071", "T1132"]
+        })
+
+    return formatted_incidents
+
+
+def _headers(token: str) -> dict:
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _deserialize_evidence(alerts: list) -> list:
+    """api/schemas.py's AlertResponse sends `evidence` as a JSON string
+    (matching api/models.py's underlying Text column) -- callers that
+    render it (dashboard/components/ui.py's render_evidence_columns,
+    shared/formatters.categorize_evidence) expect a dict, not a string,
+    so every raw fetch needs this same normalization applied once."""
+    for item in alerts:
+        if isinstance(item.get("evidence"), str):
+            try:
+                item["evidence"] = json.loads(item["evidence"])
+            except Exception as ex:
+                logger.debug("Evidence deserialization fallback: %s", ex)
+    return alerts
+
+
+def fetch_alerts(token: str, limit: int = 100) -> list:
+    """Tenant-scoped alert fetch using the caller's own per-employee JWT --
+    the API's /alerts endpoint already filters by that token's tenant_id
+    (api/deps.py's scope_to_tenant), so there is no separate, client-side
+    tenant filter to apply here. This is the shared implementation behind
+    both terminal/tsoc_console.py's incident queue and the web dashboard's
+    per-session reads (dashboard/session_data.py) -- neither can go
+    through DataStreamManager below, which authenticates with the single,
+    all-tenant TSOC_API_KEY rather than a per-employee token.
+    """
+    resp = requests.get(
+        f"{_API_URL}/alerts",
+        params={"limit": limit},
+        headers=_headers(token),
+        timeout=_REQUEST_TIMEOUT_SEC,
+    )
+    resp.raise_for_status()
+    return _deserialize_evidence(resp.json())
+
+
+def fetch_stats(token: str) -> dict:
+    """Tenant-scoped severity counts -- see fetch_alerts()'s docstring."""
+    resp = requests.get(f"{_API_URL}/stats", headers=_headers(token), timeout=_REQUEST_TIMEOUT_SEC)
+    resp.raise_for_status()
+    return resp.json()
 
 
 class DataStreamManager:
@@ -122,82 +246,10 @@ class DataStreamManager:
             time.sleep(2)
 
     def get_incidents(self) -> list:
-        """
-        Synthesizes structured Incident objects from active alerts.
-        Enforces schema conformity to prevent KeyError in UI pages.
-        """
-        if not self.alerts:
-            return []
-
-        incidents_by_src = {}
-        severity_scores = {"critical": 100.0, "high": 75.0, "medium": 50.0, "low": 25.0}
-
-        for a in self.alerts:
-            src = a.get("source_ip") or "127.0.0.1"
-            if src not in incidents_by_src:
-                incidents_by_src[src] = {
-                    "incident_id": f"INC-{src.replace('.', '-')}",
-                    "created_timestamp": a.get("timestamp", datetime.now(timezone.utc).isoformat()),
-                    "severity": a.get("severity", "low"),
-                    "threat_classes": set(),
-                    "affected_entities": set([src, a.get("destination_ip", "")]),
-                    "related_alert_ids": [],
-                    "evidence_summary": "",
-                    "status": "active",
-                    "max_sev_score": 0.0,
-                    "alert_count": 0
-                }
-            inc = incidents_by_src[src]
-            inc["alert_count"] += 1
-            if a.get("threat_class"):
-                inc["threat_classes"].add(a["threat_class"])
-            if a.get("destination_ip"):
-                inc["affected_entities"].add(a["destination_ip"])
-            if a.get("alert_id"):
-                inc["related_alert_ids"].append(a["alert_id"])
-
-            sev = str(a.get("severity", "low")).lower()
-            score = severity_scores.get(sev, 25.0)
-            if score > inc["max_sev_score"]:
-                inc["max_sev_score"] = score
-                inc["severity"] = sev
-
-        formatted_incidents = []
-        for src, inc in incidents_by_src.items():
-            base_score = inc["max_sev_score"]
-            volume_bonus = min(20.0, (inc["alert_count"] - 1) * 5.0)
-            risk_score = min(100.0, base_score + volume_bonus)
-
-            threats = list(inc["threat_classes"]) if inc["threat_classes"] else ["Unclassified Threat"]
-            entities = [e for e in inc["affected_entities"] if e]
-
-            formatted_incidents.append({
-                "incident_id": inc["incident_id"],
-                "created_timestamp": inc["created_timestamp"],
-                "severity": inc["severity"],
-                "risk_score": float(risk_score),
-                "threat_classes": threats,
-                "affected_entities": entities if entities else [src],
-                "related_alert_ids": inc["related_alert_ids"],
-                "evidence_summary": f"Aggregated {inc['alert_count']} alert(s) across {len(threats)} threat class(es) involving {src}",
-                "status": "active",
-                "mitre_tactics": ["Command and Control", "Initial Access"],
-                "mitre_techniques": ["T1071", "T1132"]
-            })
-
-        return formatted_incidents
+        return synthesize_incidents(self.alerts)
 
     def get_alerts(self) -> list:
-        formatted = []
-        for a in self.alerts:
-            item = dict(a)
-            if isinstance(item.get("evidence"), str):
-                try:
-                    item["evidence"] = json.loads(item["evidence"])
-                except Exception as ex:
-                    logger.debug("Evidence deserialization fallback: %s", ex)
-            formatted.append(item)
-        return formatted
+        return _deserialize_evidence([dict(a) for a in self.alerts])
 
     def status(self) -> dict:
         return {
@@ -207,6 +259,7 @@ class DataStreamManager:
             "alert_count": len(self.alerts),
             "stats": self.stats
         }
+
 
 # Global singleton accessor
 stream_manager = DataStreamManager()

@@ -1,0 +1,47 @@
+# Production overlay -- see k8s-overlays/staging/kustomization.yaml's
+# comment for why this is meant for its own cluster/context rather than
+# a second namespace sharing a cluster with staging, and for why this
+# directory lives outside k8s/ instead of at k8s/overlays/.
+#
+# Replace the placeholder digests and hostnames below with real values:
+# digests come from CI's `publish-images` job output (.github/workflows/
+# ci.yml) for a commit that has actually been promoted to production
+# (not necessarily the latest one CI built), hostnames need real DNS
+# records pointing at this cluster's ingress controller before
+# letsencrypt-prod (k8s/cert-manager-public-ca.yaml) can issue anything
+# for them.
+resources:
+  - ../../k8s
+
+images:
+  - name: your-registry.com/tsoc/api
+    newName: ghcr.io/chakri192/neuralsoc/tsoc-api
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000
+  - name: your-registry.com/tsoc/dashboard
+    newName: ghcr.io/chakri192/neuralsoc/tsoc-dashboard
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000
+
+patches:
+  # Base replica/HPA counts (k8s/hpa.yaml) are already sized for
+  # production steady-state load -- only the hostnames need to move off
+  # the base's local placeholders onto this environment's real domain.
+  - target:
+      kind: Ingress
+      name: tsoc-api-ingress
+    patch: |
+      - op: replace
+        path: /spec/rules/0/host
+        value: api.tsoc.example.com
+      - op: replace
+        path: /spec/tls/0/hosts/0
+        value: api.tsoc.example.com
+  - target:
+      kind: Ingress
+      name: tsoc-dashboard-ingress
+    patch: |
+      - op: replace
+        path: /spec/rules/0/host
+        value: app.tsoc.example.com
+      - op: replace
+        path: /spec/tls/0/hosts/0
+        value: app.tsoc.example.com

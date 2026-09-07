@@ -3,37 +3,44 @@ kind: Ingress
 metadata:
   name: tsoc-api-ingress
   namespace: tsoc
-  # Previously two separate `annotations:` keys in this mapping -- valid
-  # per non-strict YAML decoding (last-key-wins), so `kubectl apply`
-  # accepted it with no warning while silently dropping the ModSecurity
-  # and OWASP Core Rule Set annotations that were in the first (discarded)
-  # map. Merged into one block below; every prior annotation is retained.
   annotations:
     nginx.ingress.kubernetes.io/enable-modsecurity: "true"
     nginx.ingress.kubernetes.io/enable-owasp-core-rules: "true"
-    nginx.ingress.kubernetes.io/auth-url: "https://auth.tsoc.local/verify"
-    nginx.ingress.kubernetes.io/auth-response-headers: "X-User,X-Role"
-    nginx.ingress.kubernetes.io/auth-snippet: |
-      proxy_intercept_errors on;
-      error_page 401 403 500 502 503 504 =401 /error-auth;
-    # api.tsoc.local is not a real, publicly-resolvable domain, so a public
-    # ACME issuer (letsencrypt-prod) could never validate it -- and
-    # shouldn't be asked to: this platform sits behind a data diode and is
-    # never meant to be internet-facing, so a publicly-trusted cert isn't
-    # the right tool regardless. tsoc-internal-ca-issuer (see
-    # k8s/cert-manager-internal-ca.yaml) issues from a cluster-local CA
-    # instead -- verified end-to-end against a real cert-manager
-    # installation (see SECURITY.md).
-    cert-manager.io/cluster-issuer: "tsoc-internal-ca-issuer"
-    nginx.ingress.kubernetes.io/auth-tls-verify-client: "on"
-    nginx.ingress.kubernetes.io/auth-tls-secret: "tsoc/client-cert"
-    nginx.ingress.kubernetes.io/auth-tls-verify-depth: "1"
+    # api.tsoc.local is not a real, publicly-resolvable domain -- replace
+    # this and app.tsoc.local below (see the dashboard Ingress) with real
+    # hostnames you control before applying, and point their DNS A/AAAA
+    # records at the ingress controller's load balancer. letsencrypt-prod
+    # (k8s/cert-manager-public-ca.yaml) cannot issue a cert for a
+    # placeholder or unresolvable hostname.
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
     nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
     nginx.ingress.kubernetes.io/limit-rps: "100"
     nginx.ingress.kubernetes.io/hsts: "true"
     nginx.ingress.kubernetes.io/hsts-include-subdomains: "true"
     nginx.ingress.kubernetes.io/hsts-max-age: "31536000"
+    # Removed from here, both dead in this cluster and wrong for a public
+    # multi-tenant SaaS:
+    #   - auth-url: "https://auth.tsoc.local/verify" (+ auth-response-headers,
+    #     auth-snippet) -- an NGINX forward-auth gate pointing at a host
+    #     with no matching Service/route anywhere in this repo (confirmed:
+    #     nothing implements a /verify endpoint). Left enabled, every
+    #     request through this Ingress would fail its auth subrequest
+    #     against an unresolvable host and get rejected -- this would have
+    #     taken the whole API down the moment it was ever internet-facing.
+    #     Per-request auth is handled inside the app itself now
+    #     (api/deps.py's verify_auth, checking each caller's own JWT or
+    #     sensor token), which is also the only place that can tell one
+    #     tenant's caller from another's -- an ingress-level gate can't.
+    #   - auth-tls-verify-client/auth-tls-secret/auth-tls-verify-depth --
+    #     required every caller to present a client certificate from a
+    #     Secret (tsoc/client-cert) that is never provisioned anywhere in
+    #     this repo, and assumed one shared client PKI, which fit a single
+    #     on-prem appliance behind a data diode but not arbitrary tenant
+    #     sensors and browsers connecting from arbitrary networks. Sensor
+    #     identity is now a per-tenant bearer token checked at the app
+    #     layer (api/routes/ingest.py's require_sensor_token), not a
+    #     shared mTLS client cert.
 spec:
   ingressClassName: nginx
   tls:
@@ -63,5 +70,55 @@ spec:
         backend:
           service:
             name: tsoc-api-service
+            port:
+              number: 80
+---
+# The dashboard (tsoc-dashboard-service, k8s/services.yaml) gets its own
+# Ingress rather than a second path on tsoc-api-ingress above: Streamlit
+# serves itself from "/" and doesn't cleanly share a host with the API's
+# own "/" (there is no API route at "/" for a path-based split to key
+# off), and putting each service on its own host keeps this Ingress's
+# per-host TLS cert and ModSecurity/OWASP CRS tuning independent of the
+# API's.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: tsoc-dashboard-ingress
+  namespace: tsoc
+  annotations:
+    nginx.ingress.kubernetes.io/enable-modsecurity: "true"
+    nginx.ingress.kubernetes.io/enable-owasp-core-rules: "true"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/hsts: "true"
+    nginx.ingress.kubernetes.io/hsts-include-subdomains: "true"
+    nginx.ingress.kubernetes.io/hsts-max-age: "31536000"
+    # Streamlit's own login form (dashboard/app.py, calling POST
+    # /auth/login) is the real rate-limited gate against credential
+    # stuffing (see api/deps.py's login lockout) -- no separate
+    # limit-rps annotation here, unlike the API Ingress above, since this
+    # host only ever serves the dashboard's own UI/websocket traffic, not
+    # a general-purpose API surface.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    # Streamlit's live UI updates run over a long-lived WebSocket
+    # (/_stcore/stream) -- without a long read timeout, nginx's default
+    # would silently cut the connection and the UI would stop updating.
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+    - app.tsoc.local
+    secretName: tsoc-dashboard-tls
+  rules:
+  - host: app.tsoc.local
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: tsoc-dashboard-service
             port:
               number: 80

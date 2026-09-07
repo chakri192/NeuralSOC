@@ -98,3 +98,4 @@ spec:
       tsoc-api: "tsoc-api-sa"
       tsoc-stream-processor: "tsoc-stream-sa"
       tsoc-kafka-sink: "tsoc-sink-sa"
+      tsoc-dashboard: "tsoc-dashboard-sa"

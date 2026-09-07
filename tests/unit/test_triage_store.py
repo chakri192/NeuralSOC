@@ -1,68 +1,83 @@
-"""shared/triage_store.py backs the dashboard's Acknowledge / False
-Positive / Confirm actions -- previously decorative buttons that
-persisted nothing. Each test points TRIAGE_DB_PATH at its own tmp_path
-file so tests never share state through a real triage.db on disk.
+"""shared/triage_store.py is now a thin HTTP client for
+api/routes/triage.py's tenant-scoped Postgres-backed endpoints (see
+tests/unit/test_triage_routes.py for the server-side behavior) rather
+than a local SQLite file. These tests verify the client builds the
+right request and handles the response/errors correctly, mocking
+`requests` directly -- the same pattern tests/unit/test_data_access.py
+already uses for shared/data_access.py's HTTP calls.
 """
-import importlib
+from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 
 import shared.triage_store as triage_store
 
 
-@pytest.fixture(autouse=True)
-def _isolated_db(tmp_path, monkeypatch):
-    db_path = str(tmp_path / "triage.db")
-    monkeypatch.setenv("TRIAGE_DB_PATH", db_path)
-    importlib.reload(triage_store)
-    yield
-    importlib.reload(triage_store)
+def _mock_response(json_body, status_code=200):
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.json.return_value = json_body
+    if status_code >= 400:
+        resp.raise_for_status.side_effect = requests.HTTPError(response=resp)
+    else:
+        resp.raise_for_status.side_effect = None
+    return resp
 
 
-def test_get_status_on_unknown_incident_returns_open_default():
-    result = triage_store.get_status("INC-does-not-exist")
-    assert result == {"status": "open", "note": "", "actor": "", "updated_at": ""}
+def test_set_status_rejects_an_invalid_status_before_making_a_request():
+    with patch("shared.triage_store.requests.post") as mock_post:
+        with pytest.raises(ValueError):
+            triage_store.set_status("tok", "INC-1", "not_a_real_status")
+        mock_post.assert_not_called()
 
 
-def test_set_status_then_get_status_roundtrips():
-    triage_store.set_status("INC-1", triage_store.ACKNOWLEDGED, actor="priya", note="looking into it")
-    result = triage_store.get_status("INC-1")
-    assert result["status"] == "acknowledged"
-    assert result["actor"] == "priya"
-    assert result["note"] == "looking into it"
-    assert result["updated_at"]
+def test_set_status_posts_the_right_url_headers_and_body():
+    with patch("shared.triage_store.requests.post", return_value=_mock_response({"status": "acknowledged"})) as mock_post:
+        result = triage_store.set_status("my-jwt", "INC-1", triage_store.ACKNOWLEDGED, note="looking into it")
+
+    mock_post.assert_called_once()
+    args, kwargs = mock_post.call_args
+    assert args[0] == f"{triage_store._API_URL}/triage/INC-1"
+    assert kwargs["json"] == {"status": "acknowledged", "note": "looking into it"}
+    assert kwargs["headers"] == {"Authorization": "Bearer my-jwt"}
+    assert result == {"status": "acknowledged"}
 
 
-def test_set_status_rejects_invalid_status():
-    with pytest.raises(ValueError):
-        triage_store.set_status("INC-1", "not_a_real_status")
+def test_set_status_raises_on_an_http_error():
+    with patch("shared.triage_store.requests.post", return_value=_mock_response({"detail": "nope"}, status_code=400)):
+        with pytest.raises(requests.HTTPError):
+            triage_store.set_status("tok", "INC-1", triage_store.CONFIRMED)
 
 
-def test_set_status_overwrites_previous_status_for_same_incident():
-    triage_store.set_status("INC-1", triage_store.ACKNOWLEDGED, actor="priya")
-    triage_store.set_status("INC-1", triage_store.CONFIRMED, actor="sam")
-    result = triage_store.get_status("INC-1")
-    assert result["status"] == "confirmed"
-    assert result["actor"] == "sam"
+def test_get_status_gets_the_right_url_and_headers():
+    with patch(
+        "shared.triage_store.requests.get",
+        return_value=_mock_response({"status": "open", "note": "", "actor": "", "updated_at": ""}),
+    ) as mock_get:
+        result = triage_store.get_status("my-jwt", "INC-1")
+
+    mock_get.assert_called_once()
+    args, kwargs = mock_get.call_args
+    assert args[0] == f"{triage_store._API_URL}/triage/INC-1"
+    assert kwargs["headers"] == {"Authorization": "Bearer my-jwt"}
+    assert result["status"] == "open"
 
 
-def test_get_all_statuses_returns_every_persisted_incident():
-    triage_store.set_status("INC-1", triage_store.ACKNOWLEDGED)
-    triage_store.set_status("INC-2", triage_store.FALSE_POSITIVE)
-    all_statuses = triage_store.get_all_statuses()
-    assert set(all_statuses) == {"INC-1", "INC-2"}
-    assert all_statuses["INC-1"]["status"] == "acknowledged"
-    assert all_statuses["INC-2"]["status"] == "false_positive"
+def test_get_all_statuses_gets_the_bulk_endpoint():
+    with patch(
+        "shared.triage_store.requests.get",
+        return_value=_mock_response({"INC-1": {"status": "confirmed", "note": "", "actor": "a@x.com", "updated_at": "t"}}),
+    ) as mock_get:
+        result = triage_store.get_all_statuses("my-jwt")
+
+    args, kwargs = mock_get.call_args
+    assert args[0] == triage_store._API_URL + "/triage"
+    assert kwargs["headers"] == {"Authorization": "Bearer my-jwt"}
+    assert result == {"INC-1": {"status": "confirmed", "note": "", "actor": "a@x.com", "updated_at": "t"}}
 
 
-def test_get_all_statuses_empty_when_nothing_persisted():
-    assert triage_store.get_all_statuses() == {}
-
-
-def test_state_persists_across_a_fresh_connection():
-    """No in-memory caching papering over a real persistence bug --
-    every call opens its own connection, so this only passes if the
-    write actually landed on disk."""
-    triage_store.set_status("INC-1", triage_store.CONFIRMED, actor="sam")
-    # A brand new call, not reusing any object from the write above.
-    assert triage_store.get_status("INC-1")["status"] == "confirmed"
+def test_get_all_statuses_raises_on_a_network_error():
+    with patch("shared.triage_store.requests.get", side_effect=requests.ConnectionError("unreachable")):
+        with pytest.raises(requests.ConnectionError):
+            triage_store.get_all_statuses("tok")

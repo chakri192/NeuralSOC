@@ -90,8 +90,9 @@ Copy `.env.example` to `.env` and fill in the required values. At minimum, the A
 | Variable | Purpose |
 |---|---|
 | `DATABASE_URL` | Postgres connection string |
-| `TSOC_API_KEY` | Static service-to-service credential (dashboard → API) |
-| `TSOC_JWT_SECRET` | HS256 signing secret, ≥32 bytes (RFC 7518 §3.2) |
+| `TSOC_API_KEY` | Static, all-tenant service-to-service credential (dashboard/terminal → API) |
+| `TSOC_JWT_SECRET` | HS256 signing secret, ≥32 bytes (RFC 7518 §3.2) -- backs per-employee login sessions |
+| `TSOC_SENSOR_TOKEN` | `api/kafka_sink.py`'s per-tenant ingest credential, minted via `POST /api/v1/ingest/tenants/{id}/sensor-tokens` (admin-only) -- distinct from `TSOC_API_KEY` |
 | `REDIS_PASSWORD` | Required whenever `REDIS_SSL=true` (the default) |
 
 See `.env.example` for the full list, including optional CORS, proxy-trust, and docs-exposure settings.
@@ -108,32 +109,60 @@ spans to the `jaeger` service in `docker-compose.yml` (UI at
 http://localhost:16686). Unset, tracing is a real no-op (near-zero
 overhead) -- nothing needs it configured to run normally.
 
+### Database schema
+
+Schema changes go through Alembic (`alembic/`), not `Base.metadata.create_all()`
+(the API's startup event still calls that too, but only to bootstrap tables on
+a brand-new database -- it can't express a column or constraint change against
+one that already exists). Point `DATABASE_URL` at your database and run:
+
+```bash
+venv/bin/alembic upgrade head
+```
+
+A database that already has the `alerts` table from before Alembic existed
+(i.e. anything running before the `tenants`/`users` migration landed) should
+run `venv/bin/alembic stamp 95bddea6b154` once first, to mark that baseline
+as already applied without re-running its DDL, then `upgrade head` for
+everything after it.
+
 ## Running locally
 
 ```bash
 # 1. Infrastructure (Redpanda, Postgres, Redis)
 make up            # or: docker compose up -d
 
-# 2. Stream processor
-make pipeline       # or: PYTHONPATH=. venv/bin/python3 inference/stream_processor_faust.py worker -l info
-
-# 3. Kafka-to-Postgres sink -- required for alerts to actually persist;
-#    without it the API/dashboards will show zero alerts indefinitely.
-make kafka-sink      # or: PYTHONPATH=. venv/bin/python3 api/kafka_sink.py
-
-# 4. API
+# 2. API -- start this before step 3, which needs it to be reachable
 make api            # or: venv/bin/uvicorn api.main:app --host 0.0.0.0 --port 8000
 
-# 5. Dashboards (separate terminals) -- all three gated behind the same
-#    shared login credential (DASHBOARD_PASSWORD, default user/user; see
-#    shared/auth.py)
+# 3. Bootstrap a tenant, its first admin account, and an ingest sensor
+#    token -- there is no other way to get a first account: /auth/login
+#    needs an existing user, and the invite endpoint needs an existing
+#    admin to call it. Prints a TSOC_SENSOR_TOKEN value; export it (or
+#    add it to .env) before step 5.
+PYTHONPATH=. venv/bin/python3 scripts/bootstrap_tenant.py
+
+# 4. Stream processor
+make pipeline       # or: PYTHONPATH=. venv/bin/python3 inference/stream_processor_faust.py worker -l info
+
+# 5. Kafka-to-API sink -- required for alerts to actually persist;
+#    without it the API/dashboards will show zero alerts indefinitely.
+#    Needs TSOC_SENSOR_TOKEN from step 3.
+make kafka-sink      # or: PYTHONPATH=. venv/bin/python3 api/kafka_sink.py
+
+# 6. Dashboards (separate terminals). dashboard/app.py and
+#    terminal/tsoc_console.py both log in with the real per-employee
+#    account from step 3 (or any account created/invited since);
+#    dashboard/cli_dashboard.py is the exception -- a read-only ops
+#    view still gated behind the single shared DASHBOARD_PASSWORD (see
+#    shared/auth.py), not a tenant account.
 make dashboard       # or: venv/bin/streamlit run dashboard/app.py
 make terminal        # or: PYTHONPATH=. venv/bin/python3 terminal/tsoc_console.py
 make cli-dashboard   # or: PYTHONPATH=. venv/bin/python3 dashboard/cli_dashboard.py
-                     # a read-only live feed (no triage actions) -- use
+                     # read-only, no triage actions -- use
                      # terminal/tsoc_console.py to Ack/False-Positive/Confirm
 
-# 6. Synthetic traffic
+# 7. Synthetic traffic
 make simulate        # or: venv/bin/python3 ingest/simulator.py --scenario mixed --burst
 ```
 
@@ -183,4 +212,10 @@ Full details, current gaps, and how to independently verify the model signatures
 
 ## Deployment
 
-Kubernetes manifests are in `k8s/`: NetworkPolicies (default-deny plus explicit allow rules), a Kyverno `ClusterPolicy` requiring signed images, `HorizontalPodAutoscaler`s for the API and Kafka sink, a KEDA `ScaledObject` for the stream processor, and a `PodDisruptionBudget` for all three. The stream processor is a `StatefulSet`, not a `Deployment`, since its DLQ volume is `ReadWriteOnce`. `k8s/secrets.yaml.example` is a template — populate a real `k8s/secrets.yaml` via Vault/Sealed Secrets, never commit it directly.
+Kubernetes manifests are in `k8s/`: NetworkPolicies (default-deny plus explicit allow rules), a Kyverno `ClusterPolicy` requiring signed images, `HorizontalPodAutoscaler`s for the API, dashboard, and Kafka sink, a KEDA `ScaledObject` for the stream processor, and a `PodDisruptionBudget` for all four. The stream processor is a `StatefulSet`, not a `Deployment`, since its DLQ volume is `ReadWriteOnce`. `k8s/secrets.yaml.example` is a template — populate a real `k8s/secrets.yaml` via Vault/Sealed Secrets, never commit it directly.
+
+Two images are built and published to GHCR by CI's `publish-images` job on every push to `main`: the backend (`Dockerfile` — API, stream processor, and Kafka sink all share this one image) and the dashboard (`Dockerfile.dashboard`, a separate lean image so the dashboard container never ships `torch`/`faust-streaming`/`scikit-learn`/etc. that only the backend needs). `k8s/soc-deployment.yaml`'s `your-registry.com/tsoc/...@sha256:...` image refs are placeholders — replace them with the real, digest-pinned GHCR images that job prints (Kyverno's `require-digest-pin` rule rejects anything else).
+
+`k8s/kustomization.yaml` lets the manifests in `k8s/` be applied directly (`kubectl apply -k k8s/`) or layered with a per-environment overlay (`k8s/overlays/staging`, `k8s/overlays/production`) for environment-specific image digests, hostnames, and replica counts.
+
+The API and dashboard Ingresses (`k8s/ingress.yaml`) need real, DNS-resolvable hostnames in place of the `api.tsoc.local`/`app.tsoc.local` placeholders before `letsencrypt-prod` (`k8s/cert-manager-public-ca.yaml`) can issue a certificate for either — see [SECURITY.md](SECURITY.md)'s TLS section for why this deployment uses two separate CAs (one public, one internal-only for service-to-service mTLS).

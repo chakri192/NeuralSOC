@@ -7,17 +7,15 @@ import sys
 import threading
 import time
 
+import requests
 from kafka import KafkaConsumer, KafkaProducer
 from kafka.structs import OffsetAndMetadata
 from opentelemetry import propagate, trace
 from opentelemetry.trace import Link
 from prometheus_client import Gauge, start_http_server
 from pydantic import BaseModel, ValidationError
-from sqlalchemy import bindparam, insert, update
 
 MAX_MSG_SIZE = 5 * 1024 * 1024  # 5MB
-from api.database import SessionLocal, engine, Base
-from api.models import Alert
 from api.schemas import AlertPayload
 from shared.tracing import init_tracing
 
@@ -27,6 +25,17 @@ tracer = init_tracing("tsoc-kafka-sink")
 brokers = os.getenv("REDPANDA_BROKERS", "soc-redpanda-cluster.prod.svc.cluster.local:9092")
 topic = os.getenv("ALERTS_TOPIC", "security_alerts")
 DLQ_TOPIC = os.getenv("ALERTS_DLQ_TOPIC", "security_alerts_dlq")
+
+# This tenant's own on-prem collector authenticates to the shared API
+# with a per-tenant sensor token (api/routes/ingest.py), not the
+# blanket TSOC_API_KEY -- so a compromised collector can never write
+# data tagged as a different tenant. Minted via
+# POST /api/v1/ingest/tenants/{id}/sensor-tokens (admin-only).
+INGEST_API_URL = os.getenv("INGEST_API_URL", "http://127.0.0.1:8000/api/v1")
+SENSOR_TOKEN = os.getenv("TSOC_SENSOR_TOKEN")
+if not SENSOR_TOKEN:
+    raise RuntimeError("CRITICAL: TSOC_SENSOR_TOKEN must be configured.")
+INGEST_TIMEOUT_SEC = 10
 
 # Path Sanitization and Directory Whitelisting to prevent path traversal.
 # realpath() (not abspath()) so a symlink planted inside /tmp/dlq pointing
@@ -70,8 +79,6 @@ def _rotate_dlq_if_needed():
             logger.info("Atomic rotated DLQ file.")
     except Exception as e:
         logger.error(f"DLQ rotation failed: {e}")
-
-Base.metadata.create_all(bind=engine)
 
 def get_dlq_producer():
     try:
@@ -128,56 +135,46 @@ def _safe_dlq_send(dlq_producer, alert_id, raw_item, error_msg):
     write_to_file_dlq(raw_item, error_msg)
 
 
-def _bulk_upsert(db, alert_dicts):
-    """Insert-or-update many alerts in a fixed small number of round trips
-    (one existence-check SELECT, one bulk INSERT, one bulk UPDATE) instead
-    of one read-then-write pair per row. The previous implementation ran a
-    SELECT + INSERT/UPDATE inside its own SAVEPOINT for every single item
-    in a batch of up to 100 -- correct, but up to 200 individual statements
-    per cycle regardless of how cheap each one is.
+def _ingest_via_api(alert_dicts):
+    """POSTs a batch to the tenant-scoped ingest endpoint
+    (api/routes/ingest.py), which does the actual insert-or-update
+    against Postgres (and its own bulk-then-per-item-fallback) now that
+    this process no longer holds a direct database connection at all.
 
-    A bulk statement fails all-or-nothing: if it raises, the caller falls
-    back to the original per-item path so one bad row (one that passed
-    AlertPayload's validation but somehow violates a DB-level constraint)
-    can't silently take the rest of an otherwise-healthy batch down with
-    it -- that fallback is the load-bearing part of this function's
-    contract, not an afterthought.
+    Raises on a whole-batch failure (network error, auth rejection,
+    5xx) -- the caller (process_batch) treats that exactly like the old
+    direct-DB-write path's "commit failed" case: don't advance any
+    offsets, let the batch retry next cycle. A 2xx response's own
+    `failed` list is for individual rows the server rejected (e.g. a
+    DB-level constraint AlertPayload's own validation didn't catch) --
+    NOT a whole-batch failure, so the caller DLQs those one at a time
+    instead of retrying the whole batch forever.
     """
-    aids = [d["alert_id"] for d in alert_dicts]
-    existing_aids = {row[0] for row in db.query(Alert.alert_id).filter(Alert.alert_id.in_(aids)).all()}
-
-    to_insert = [d for d in alert_dicts if d["alert_id"] not in existing_aids]
-    to_update = [d for d in alert_dicts if d["alert_id"] in existing_aids]
-
-    if to_insert:
-        db.execute(insert(Alert), to_insert)
-    if to_update:
-        # bindparam("_alert_id") -- not "alert_id" -- because the same key
-        # can't drive both the WHERE match and a SET assignment in one bulk
-        # UPDATE; alert_id itself is excluded from the SET side since it's
-        # the (unchanging) lookup key, not a field being updated.
-        update_dicts = [
-            {**{k: v for k, v in d.items() if k != "alert_id"}, "_alert_id": d["alert_id"]}
-            for d in to_update
-        ]
-        db.execute(update(Alert).where(Alert.alert_id == bindparam("_alert_id")), update_dicts)
-    db.flush()
+    resp = requests.post(
+        f"{INGEST_API_URL}/ingest/alerts",
+        json=alert_dicts,
+        headers={"Authorization": f"Bearer {SENSOR_TOKEN}"},
+        timeout=INGEST_TIMEOUT_SEC,
+    )
+    resp.raise_for_status()
+    return resp.json()
 
 
-def process_batch(current_batch, dlq_producer=None, session_factory=SessionLocal):
-    """Processes an entire batch within a single DB session.
+def process_batch(current_batch, dlq_producer=None, ingest_fn=None):
+    """Processes an entire batch by sending it to the tenant-scoped
+    ingest API (api/routes/ingest.py) rather than writing to Postgres
+    directly -- this process now authenticates as one tenant's sensor,
+    not as an internal service with blanket database access.
 
-    Module-level (not a run_sink() closure) so the validate-before-ORM path --
-    the fix that stops an attacker-influenced Kafka payload from ever setting
-    the primary key or a SQLAlchemy internal attribute name -- is directly
-    unit-testable against a real (sqlite) session instead of only reachable
-    through a live Kafka consumer loop.
+    Module-level (not a run_sink() closure) so the validate-before-send
+    path -- the fix that stops an attacker-influenced Kafka payload from
+    ever setting the primary key or a SQLAlchemy internal attribute
+    name -- is directly unit-testable without a live Kafka consumer loop.
+    ingest_fn is injectable for exactly that reason (defaults to the
+    real _ingest_via_api HTTP call).
     """
+    ingest_fn = ingest_fn or _ingest_via_api
     offsets_map = {}
-    db = session_factory(expire_on_commit=False)
-    # Started here (not `with`) and ended in the existing `finally:` below,
-    # which already covers every exit path of this function -- avoids
-    # re-indenting the whole try/except/finally body just to add tracing.
     # Linked (not parented) to each item's own trace, matching OTel's own
     # convention for a batch operation that logically belongs to several
     # upstream traces at once rather than exactly one.
@@ -196,11 +193,13 @@ def process_batch(current_batch, dlq_producer=None, session_factory=SessionLocal
             try:
                 if isinstance(raw_item.get("evidence"), (dict, list)):
                     raw_item = {**raw_item, "evidence": json.dumps(raw_item["evidence"])}
-                # Validate against the whitelisted schema BEFORE touching the ORM.
-                # This is what stops an attacker-influenced Kafka payload from ever
-                # setting the primary key or a SQLAlchemy internal attribute name —
-                # AlertPayload has no "id" field and no "metadata"/"registry" field,
-                # so neither can reach the ORM no matter what raw_item contains.
+                # Validate against the whitelisted schema BEFORE sending it
+                # anywhere. This is what stops an attacker-influenced Kafka
+                # payload from ever setting the primary key or a SQLAlchemy
+                # internal attribute name -- AlertPayload has no "id" field
+                # and no "metadata"/"registry" field, so neither can reach
+                # the ORM no matter what raw_item contains (the API applies
+                # the same AlertPayload validation again server-side too).
                 alert_dict = AlertPayload(**raw_item).model_dump()
                 valid_items.append((alert_dict, tp, offset))
             except Exception as item_err:
@@ -212,48 +211,38 @@ def process_batch(current_batch, dlq_producer=None, session_factory=SessionLocal
         if valid_items:
             # De-dup by alert_id within this one batch, keeping the last
             # occurrence -- a fast double-send or replay could put the same
-            # alert_id twice in one batch; the old per-item loop's second
-            # setattr/insert pass naturally overwrote the first, so this
-            # bulk path preserves that same last-write-wins behavior.
+            # alert_id twice in one batch; last-write-wins, matching what a
+            # second, later message for the same alert_id would do anyway.
             by_aid = {}
             for alert_dict, tp, offset in valid_items:
                 by_aid[alert_dict["alert_id"]] = (alert_dict, tp, offset)
             deduped = list(by_aid.values())
 
-            try:
-                _bulk_upsert(db, [d for d, _, _ in deduped])
-                for _, tp, offset in valid_items:
-                    offsets_map[tp] = max(offsets_map.get(tp, -1), offset + 1)
-            except Exception as bulk_err:
-                logger.warning(
-                    "Bulk upsert failed (%s); falling back to per-item processing for this batch", bulk_err
-                )
-                db.rollback()
-                for alert_dict, tp, offset in deduped:
-                    try:
-                        with db.begin_nested():
-                            existing = db.query(Alert).filter(Alert.alert_id == alert_dict["alert_id"]).first()
-                            if existing:
-                                for k, v in alert_dict.items():
-                                    setattr(existing, k, v)
-                            else:
-                                db.add(Alert(**alert_dict))
-                            db.flush()
-                        offsets_map[tp] = max(offsets_map.get(tp, -1), offset + 1)
-                    except Exception as item_db_err:
-                        logger.error("Item DB write failed for alert %s: %s", alert_dict.get('alert_id'), item_db_err)
-                        _safe_dlq_send(dlq_producer, alert_dict.get('alert_id', ''), alert_dict, str(item_db_err))
-                        offsets_map[tp] = max(offsets_map.get(tp, -1), offset + 1)
+            # A whole-call failure (network error, auth rejection, 5xx) --
+            # NOT the same as an individual row being rejected below --
+            # propagates out to the except block: don't advance any
+            # offsets, let the whole batch retry next cycle, exactly like
+            # the old direct-DB-write path's "commit failed" case.
+            result = ingest_fn([d for d, _, _ in deduped])
+            failed_by_id = {f["alert_id"]: f.get("error", "ingest rejected") for f in result.get("failed", [])}
+            for alert_dict, tp, offset in deduped:
+                alert_id = alert_dict["alert_id"]
+                if alert_id in failed_by_id:
+                    # Permanently rejected at the API layer (e.g. a DB-level
+                    # constraint AlertPayload's own validation didn't catch)
+                    # -- DLQ it, but still advance past it; retrying the
+                    # same poison item forever would stall the partition.
+                    logger.error("Ingest rejected alert %s: %s", alert_id, failed_by_id[alert_id])
+                    _safe_dlq_send(dlq_producer, alert_id, alert_dict, failed_by_id[alert_id])
+                offsets_map[tp] = max(offsets_map.get(tp, -1), offset + 1)
 
-        db.commit()
         return offsets_map
     except Exception as batch_err:
-        # DB connection/commit error: rollback and DO NOT advance offsets so batch is safely retried
-        db.rollback()
-        logger.error("Batch DB commit failure (will retry on next cycle): %s", batch_err)
+        # Ingest API call failed outright: DO NOT advance offsets so the
+        # batch is safely retried next cycle.
+        logger.error("Ingest API call failed (will retry on next cycle): %s", batch_err)
         return {}
     finally:
-        db.close()
         batch_span.end()
 
 

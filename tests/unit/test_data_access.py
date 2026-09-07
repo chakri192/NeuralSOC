@@ -6,10 +6,10 @@ Streamlit component rendered. These tests exercise the fix directly:
 config loading is lazy and never raises past _init_state(), regardless
 of what's configured.
 """
-import os
 from unittest.mock import patch, MagicMock
 
 import pytest
+import requests
 
 from shared.data_access import DataStreamManager, ConfigError, _load_config
 
@@ -240,3 +240,75 @@ def test_status_reports_health_and_counts(monkeypatch):
         "alert_count": 2,
         "stats": {"total_alerts": 2},
     }
+
+
+class TestFetchAlerts:
+    """fetch_alerts()/fetch_stats() are the tenant-scoped (per-employee
+    JWT) alternative to DataStreamManager's single-TSOC_API_KEY polling
+    above -- used by terminal/tsoc_console.py and dashboard/session_data.py,
+    neither of which can share one process-wide, all-tenant credential.
+    Same mocking style as tests/unit/test_triage_store.py, which already
+    covers this exact HTTP-client shape.
+    """
+
+    def _mock_response(self, json_body, status_code=200):
+        resp = MagicMock()
+        resp.status_code = status_code
+        resp.json.return_value = json_body
+        if status_code >= 400:
+            resp.raise_for_status.side_effect = requests.HTTPError(response=resp)
+        else:
+            resp.raise_for_status.side_effect = None
+        return resp
+
+    def test_fetch_alerts_gets_the_right_url_headers_and_params(self, monkeypatch):
+        from shared import data_access
+
+        with patch(
+            "shared.data_access.requests.get",
+            return_value=self._mock_response([{"alert_id": "a1", "evidence": "{}"}]),
+        ) as mock_get:
+            result = data_access.fetch_alerts("my-jwt", limit=50)
+
+        mock_get.assert_called_once()
+        args, kwargs = mock_get.call_args
+        assert args[0] == f"{data_access._API_URL}/alerts"
+        assert kwargs["params"] == {"limit": 50}
+        assert kwargs["headers"] == {"Authorization": "Bearer my-jwt"}
+        assert result == [{"alert_id": "a1", "evidence": {}}]
+
+    def test_fetch_alerts_deserializes_string_evidence(self, monkeypatch):
+        from shared import data_access
+
+        with patch(
+            "shared.data_access.requests.get",
+            return_value=self._mock_response([{"alert_id": "a1", "evidence": '{"domain": "bad.example"}'}]),
+        ):
+            result = data_access.fetch_alerts("tok")
+        assert result[0]["evidence"] == {"domain": "bad.example"}
+
+    def test_fetch_alerts_raises_on_an_http_error(self, monkeypatch):
+        from shared import data_access
+
+        with patch("shared.data_access.requests.get", return_value=self._mock_response({"detail": "nope"}, status_code=401)):
+            with pytest.raises(requests.HTTPError):
+                data_access.fetch_alerts("tok")
+
+    def test_fetch_stats_gets_the_right_url_and_headers(self, monkeypatch):
+        from shared import data_access
+
+        stats = {"total_alerts": 3, "critical": 1, "high": 0, "medium": 1, "low": 1}
+        with patch("shared.data_access.requests.get", return_value=self._mock_response(stats)) as mock_get:
+            result = data_access.fetch_stats("my-jwt")
+
+        args, kwargs = mock_get.call_args
+        assert args[0] == f"{data_access._API_URL}/stats"
+        assert kwargs["headers"] == {"Authorization": "Bearer my-jwt"}
+        assert result == stats
+
+    def test_fetch_stats_raises_on_a_network_error(self, monkeypatch):
+        from shared import data_access
+
+        with patch("shared.data_access.requests.get", side_effect=requests.ConnectionError("unreachable")):
+            with pytest.raises(requests.ConnectionError):
+                data_access.fetch_stats("tok")

@@ -1,0 +1,41 @@
+# Public certificate authority for cert-manager, for the multi-tenant
+# SaaS deployment of this product (many client organizations reach one
+# shared, internet-facing API + dashboard over the public internet).
+#
+# k8s/cert-manager-internal-ca.yaml's self-signed internal CA was the
+# right choice for the earlier single-tenant model, where this platform
+# sat behind a client's own data diode and was never meant to be
+# internet-reachable -- see that file's own comments for why a public CA
+# was actively wrong there. That assumption no longer holds for a shared
+# SaaS: employees and tenant sensors now connect to a real, publicly
+# resolvable hostname over the open internet, and browsers/HTTP clients
+# won't trust a private CA they've never been told to. This ClusterIssuer
+# is what k8s/ingress.yaml's `cert-manager.io/cluster-issuer` annotation
+# now points at instead.
+#
+# Requires cert-manager installed (same as the internal-CA path) and, for
+# HTTP-01 validation to succeed, real DNS A/AAAA records pointing the
+# hostnames used in k8s/ingress.yaml at the ingress controller's public
+# load balancer -- this issuer cannot issue anything until that DNS is
+# live. Replace `admin@example.com` below with a real, monitored mailbox:
+# Let's Encrypt sends expiry/policy notices there.
+#
+# k8s/cert-manager-internal-ca.yaml's tsoc-internal-ca-issuer and
+# tsoc-redis-client-cert stay in place unchanged -- internal
+# service-to-service mTLS (this API's Redis client cert) is unrelated to
+# public-facing ingress TLS and has no reason to use a publicly-trusted
+# CA.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: admin@example.com
+    privateKeySecretRef:
+      name: letsencrypt-prod-account-key
+    solvers:
+    - http01:
+        ingress:
+          ingressClassName: nginx

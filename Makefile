@@ -36,11 +36,13 @@ pipeline:
 	export REDPANDA_BROKERS=127.0.0.1:9092 && PYTHONPATH="$(PWD)" $(PYTHON) inference/stream_processor_faust.py worker -l info
 
 kafka-sink:
-	@echo "[+] Starting Kafka-to-Postgres Sink..."
+	@echo "[+] Starting Kafka-to-API Sink..."
 	# Without this running, alerts flow through Kafka but are never
 	# persisted -- the API and dashboards will show zero alerts
 	# indefinitely with no error, since nothing else in the Quickstart
-	# flow calls this script.
+	# flow calls this script. Requires TSOC_SENSOR_TOKEN (see
+	# .env.example) -- this process authenticates to the API as one
+	# tenant's ingest sensor, not with TSOC_API_KEY.
 	PYTHONPATH="$(PWD)" $(PYTHON) api/kafka_sink.py
 
 simulate:

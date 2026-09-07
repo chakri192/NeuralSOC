@@ -1,0 +1,89 @@
+# Staging overlay -- meant to be applied against a separate staging
+# CLUSTER (its own kubeconfig context), not a second copy of these
+# resources sharing a cluster with the production overlay below under a
+# different namespace. Every same-namespace pod-selector rule in the
+# base (k8s/network-policies.yaml, k8s/cilium-identity-policy.yaml)
+# hardcodes `kubernetes.io/metadata.name: tsoc` as a literal string --
+# Kustomize's `namespace:` transformer only rewrites each resource's own
+# metadata.namespace, not string values nested inside a spec (a
+# namespaceSelector match value, an Ingress hostname, the
+# `serviceAccountBindings` map in opa-gatekeeper-policies.yaml), so
+# retargeting this base at a second namespace via that transformer would
+# silently desync those hardcoded rules from wherever the pods actually
+# land. Two clusters both running the base at namespace `tsoc` sidesteps
+# that, at the cost of a second kubeconfig context -- the safer trade
+# given how much of this manifest set assumes one fixed namespace name.
+#
+# This directory lives outside k8s/ (as k8s-overlays/, a sibling of k8s/)
+# rather than at k8s/overlays/ -- kustomize v5's cycle detection rejects
+# an overlay nested inside the same directory tree as the base it points
+# at ("candidate root ... contains visited root"), even though there's
+# no real circular resource reference here. Referencing k8s/ itself as
+# `resources: [../../k8s]` also needed no changes to k8s/kustomization.yaml
+# or any manifest file location -- k8s/'s own resources are already all
+# in-or-below itself, which is what kustomize's separate (and, unlike the
+# above, unavoidable) restriction requires of any kustomization.yaml.
+#
+# Replace the placeholder digests and hostname below with real values:
+# digests come from CI's `publish-images` job output (.github/workflows/
+# ci.yml), hostnames need real DNS records pointing at this cluster's
+# ingress controller before letsencrypt-prod (k8s/cert-manager-public-ca.yaml)
+# can issue anything for them.
+resources:
+  - ../../k8s
+
+images:
+  - name: your-registry.com/tsoc/api
+    newName: ghcr.io/chakri192/neuralsoc/tsoc-api
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000
+  - name: your-registry.com/tsoc/dashboard
+    newName: ghcr.io/chakri192/neuralsoc/tsoc-dashboard
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000
+
+patches:
+  # Lower floors than production's HPAs (k8s/hpa.yaml) -- staging doesn't
+  # need to absorb the same steady-state load, and running fewer replicas
+  # keeps its cost proportionate to being a pre-production environment.
+  # These patch minReplicas/maxReplicas rather than each Deployment's own
+  # spec.replicas, since the HPA controller owns that field once it's
+  # live and would fight a direct patch to it.
+  - target:
+      kind: HorizontalPodAutoscaler
+      name: tsoc-api-hpa
+    patch: |
+      - op: replace
+        path: /spec/minReplicas
+        value: 1
+      - op: replace
+        path: /spec/maxReplicas
+        value: 3
+  - target:
+      kind: HorizontalPodAutoscaler
+      name: tsoc-dashboard-hpa
+    patch: |
+      - op: replace
+        path: /spec/minReplicas
+        value: 1
+      - op: replace
+        path: /spec/maxReplicas
+        value: 2
+  - target:
+      kind: Ingress
+      name: tsoc-api-ingress
+    patch: |
+      - op: replace
+        path: /spec/rules/0/host
+        value: staging-api.tsoc.example.com
+      - op: replace
+        path: /spec/tls/0/hosts/0
+        value: staging-api.tsoc.example.com
+  - target:
+      kind: Ingress
+      name: tsoc-dashboard-ingress
+    patch: |
+      - op: replace
+        path: /spec/rules/0/host
+        value: staging-app.tsoc.example.com
+      - op: replace
+        path: /spec/tls/0/hosts/0
+        value: staging-app.tsoc.example.com

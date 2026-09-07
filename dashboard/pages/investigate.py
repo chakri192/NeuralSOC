@@ -7,16 +7,16 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+from dashboard import session_data
 from dashboard.components.empty_states import render_broker_unavailable
 from dashboard.components.ui import relative_time, render_evidence_columns, severity_badge
 from dashboard.theme import plotly_template
-from shared.data_access import stream_manager
 from shared.formatters import format_timestamp
 
 st.markdown("## Investigate")
 st.caption("Search recent telemetry (IP, domain, alert, or flow ID) within the bounded 1000-event memory buffer.")
 
-status = stream_manager.status()
+status = session_data.status()
 if not status["broker_healthy"]:
     render_broker_unavailable()
     st.stop()
@@ -27,7 +27,7 @@ if not search_term:
     st.info("Enter an IP, domain, alert ID, or flow ID above to search recent telemetry.")
     st.stop()
 
-alerts = stream_manager.get_alerts()
+alerts = session_data.get_alerts()
 df = pd.DataFrame(alerts)
 
 if df.empty:
@@ -51,7 +51,7 @@ c2.metric("First Seen in Window", relative_time(filtered.iloc[0]["timestamp"]), 
 
 # ---------- Cross-link to Command Center: this search may already be a live incident ----------
 
-incidents_by_id = {i["incident_id"]: i for i in stream_manager.get_incidents()}
+incidents_by_id = {i["incident_id"]: i for i in session_data.get_incidents()}
 related_source_ips = [ip for ip in filtered["source_ip"].dropna().unique() if ip]
 related_incidents = [
     incidents_by_id[f"INC-{ip.replace('.', '-')}"]

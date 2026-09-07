@@ -1,0 +1,16 @@
+# Per-Dockerfile ignore file (BuildKit convention: <Dockerfile>.dockerignore
+# takes precedence over the plain .dockerignore for that specific build) --
+# this image only ever COPYs dashboard/ and shared/, so nothing else
+# (api/, inference/, ingest/, terminal/, models/*.pt, and the full
+# requirements.txt) needs to be in this build's context at all. Deny-by-
+# default, matching the root .dockerignore's own convention.
+*
+
+!requirements-dashboard.txt
+!dashboard/
+!shared/
+
+**/__pycache__
+**/*.pyc
+**/*.bak
+**/.DS_Store

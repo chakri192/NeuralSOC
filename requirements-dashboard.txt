@@ -1,0 +1,27 @@
+# Dependencies for dashboard/app.py (the Streamlit web UI) ONLY --
+# Dockerfile.dashboard installs this instead of the full requirements.txt,
+# which pulls in torch, faust-streaming, kafka-python-ng, scikit-learn,
+# and scapy for the inference/ingest pipeline the dashboard never
+# imports. Building the dashboard image from the full requirements.txt
+# would ship several GB of unused native-code dependencies into a
+# container that only ever calls `requests` against the API.
+#
+# Every pin below must match requirements.txt's own version for that
+# same package -- these are deliberately the same dependency, installed
+# twice, not two independently-resolved versions of it. If you bump one
+# file's pin, bump the other's too.
+numpy==1.26.4
+pandas==2.2.3
+streamlit==1.55.0
+pillow==12.3.0
+pyarrow==23.0.1
+altair==5.5.0
+plotly==5.24.1
+requests==2.34.2
+python-dateutil==2.9.0.post0
+click==8.3.3
+idna==3.19
+certifi==2026.7.22
+opentelemetry-api==1.44.0
+opentelemetry-sdk==1.44.0
+opentelemetry-exporter-otlp-proto-http==1.44.0

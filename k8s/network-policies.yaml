@@ -72,6 +72,29 @@ spec:
     ports:
     - protocol: TCP
       port: 8000
+  # The dashboard and kafka-sink both call this API from inside the same
+  # namespace now (the dashboard for every read/login/triage call;
+  # kafka-sink for POST /api/v1/ingest/alerts, since it stopped writing
+  # to Postgres directly) -- this completes the "allow ingress to api
+  # pods only from dashboard and ingress controllers" intent that used
+  # to be a dangling, unimplemented comment at the bottom of this file
+  # with no dashboard workload to actually apply it to yet.
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: tsoc
+      podSelector:
+        matchLabels:
+          app: tsoc-dashboard
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: tsoc
+      podSelector:
+        matchLabels:
+          app: tsoc-kafka-sink
+    ports:
+    - protocol: TCP
+      port: 8000
   # Kubelet liveness/readiness probe ingress is defined only in
   # cilium-identity-policy.yaml's tsoc-api-policy (fromEntities:
   # [host, remote-node]) -- see the note on default-deny-all above for why
@@ -230,5 +253,69 @@ spec:
     ports:
     - protocol: TCP
       port: 5432
-
-# Policy: allow ingress to api pods only from dashboard and ingress controllers
+  # kafka-sink stopped writing to Postgres directly once it moved to
+  # calling POST /api/v1/ingest/alerts over HTTP instead (see
+  # api/kafka_sink.py's _ingest_via_api) -- the postgres egress rule
+  # above is now unused by this pod but left in place since Alembic
+  # migrations and any future direct-DB tooling may still run from here;
+  # this rule is the one kafka-sink actually depends on today.
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: tsoc
+      podSelector:
+        matchLabels:
+          app: tsoc-api
+    ports:
+    - protocol: TCP
+      port: 8000
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: dashboard-allow
+  namespace: tsoc
+spec:
+  podSelector:
+    matchLabels:
+      app: tsoc-dashboard
+  policyTypes: [Ingress, Egress]
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-nginx
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: 8501
+  # Kubelet liveness/readiness/startup probe ingress (Streamlit's
+  # /_stcore/health) is defined only in cilium-identity-policy.yaml's
+  # tsoc-dashboard-policy (fromEntities: [host, remote-node]) -- see the
+  # note on default-deny-all above for why a CIDR-based version of this
+  # same rule doesn't belong here too.
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: tsoc
+      podSelector:
+        matchLabels:
+          app: tsoc-api
+    ports:
+    - protocol: TCP
+      port: 8000
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53

@@ -112,6 +112,22 @@ spec:
         - ports:
             - port: "8000"
               protocol: TCP
+    # tsoc-dashboard (every read/login/triage call) and tsoc-kafka-sink
+    # (POST /api/v1/ingest/alerts, since it stopped writing to Postgres
+    # directly) both call this API from inside the same namespace now --
+    # mirrors network-policies.yaml's api-allow ingress rule of the same
+    # name/intent.
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: tsoc
+            app: tsoc-dashboard
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: tsoc
+            app: tsoc-kafka-sink
+      toPorts:
+        - ports:
+            - port: "8000"
+              protocol: TCP
   egress:
     # DNS resolution
     - toEndpoints:
@@ -193,7 +209,10 @@ spec:
         - ports:
             - port: "9092"
               protocol: TCP
-    # PostgreSQL storage sink
+    # PostgreSQL storage sink -- unused by kafka-sink itself since it
+    # moved to calling the ingest API over HTTP (see api/kafka_sink.py's
+    # _ingest_via_api), left in place for the same reason noted in
+    # network-policies.yaml's kafka-sink-policy.
     - toEndpoints:
         - matchLabels:
             k8s:io.kubernetes.pod.namespace: db-namespace
@@ -201,4 +220,68 @@ spec:
       toPorts:
         - ports:
             - port: "5432"
+              protocol: TCP
+    # tsoc-api, for POST /api/v1/ingest/alerts -- the rule kafka-sink
+    # actually depends on today.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: tsoc
+            app: tsoc-api
+      toPorts:
+        - ports:
+            - port: "8000"
+              protocol: TCP
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: tsoc-dashboard-policy
+  namespace: tsoc
+spec:
+  endpointSelector:
+    matchLabels:
+      app: tsoc-dashboard
+      k8s:io.kubernetes.pod.namespace: tsoc
+  ingress:
+    # Ingress NGINX with namespace and pod identity verification
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: ingress-nginx
+            app.kubernetes.io/name: ingress-nginx
+      toPorts:
+        - ports:
+            - port: "8501"
+              protocol: TCP
+    # Allow Kubelet health/readiness/startup probes (Streamlit's
+    # /_stcore/health) from host and remote nodes
+    - fromEntities:
+        - host
+        - remote-node
+      toPorts:
+        - ports:
+            - port: "8501"
+              protocol: TCP
+  egress:
+    # DNS resolution
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+          rules:
+            dns:
+              - matchPattern: "*"
+    # tsoc-api, for every read/login/triage call the dashboard makes
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: tsoc
+            app: tsoc-api
+      toPorts:
+        - ports:
+            - port: "8000"
               protocol: TCP

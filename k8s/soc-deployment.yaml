@@ -43,6 +43,16 @@ metadata:
 automountServiceAccountToken: false
 ---
 apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tsoc-dashboard-sa
+  annotations:
+    spiffe.io/spiffe-id: "spiffe://tsoc.local/ns/tsoc/sa/tsoc-dashboard-sa"
+    cilium.io/identity-based-policy: "enabled"
+  namespace: tsoc
+automountServiceAccountToken: false
+---
+apiVersion: v1
 kind: Service
 metadata:
   name: tsoc-stream-processor
@@ -151,7 +161,13 @@ spec:
         # cluster's own require-signed-images Kyverno policy, which
         # enforces imagePullPolicy: Always on every pod in this namespace.
         imagePullPolicy: Always
-        image: your-registry.com/tsoc/stream-processor@sha256:9f32e2f4ec908b6531b278fa2ae3fe694ad4a2d4f874a3f56248c4ff85f5aa24
+        # Same image as tsoc-api/tsoc-kafka-sink below, not a separate
+        # tsoc/stream-processor image -- there has never been a build
+        # pipeline in this repo that produces two distinct images from
+        # one Dockerfile; all three workloads share the one built by
+        # .github/workflows/ci.yml's publish-images job, differentiated
+        # only by `command:`.
+        image: your-registry.com/tsoc/api@sha256:9f32e2f4ec908b6531b278fa2ae3fe694ad4a2d4f874a3f56248c4ff85f5aa24
         name: faust-worker
         volumeMounts:
         - name: tmp
@@ -271,6 +287,15 @@ spec:
               # which is a CreateContainerConfigError at pod creation.
               key: api_key
               name: tsoc-secrets
+        - name: TSOC_JWT_SECRET
+          # Backs every per-employee login session (api/routes/auth.py) --
+          # previously had no k8s wiring at all, so only the static
+          # TSOC_API_KEY path was actually usable in this cluster; real
+          # per-employee accounts need this to be set.
+          valueFrom:
+            secretKeyRef:
+              name: tsoc-secrets
+              key: jwt_secret
         - name: DATABASE_URL
           valueFrom:
             secretKeyRef:
@@ -388,17 +413,23 @@ spec:
         env:
         - name: REDPANDA_BROKERS
           value: soc-redpanda-cluster.prod.svc.cluster.local:9092
-        - name: DATABASE_URL
-          valueFrom:
-            secretKeyRef:
-              name: tsoc-secrets
-              key: DATABASE_URL
         - name: ALERTS_TOPIC
           value: security_alerts
         - name: ALERTS_DLQ_TOPIC
           value: security_alerts_dlq
         - name: DLQ_FILE_PATH
           value: /tmp/dlq/alerts.jsonl
+        # No DATABASE_URL here -- this process no longer holds a direct
+        # database connection. It authenticates to tsoc-api as one
+        # tenant's ingest sensor (api/routes/ingest.py) and lets that
+        # service own the actual Postgres write.
+        - name: INGEST_API_URL
+          value: http://tsoc-api-service/api/v1
+        - name: TSOC_SENSOR_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: tsoc-secrets
+              key: sensor_token
         ports:
         - containerPort: 9101
           name: metrics
@@ -460,3 +491,106 @@ spec:
   ports:
   - port: 9101
     name: metrics
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tsoc-dashboard
+  annotations:
+    spiffe.io/spiffe-id: "spiffe://tsoc.local/ns/tsoc/sa/tsoc-dashboard-sa"
+    cilium.io/identity-based-policy: "enabled"
+  namespace: tsoc
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: tsoc-dashboard
+  template:
+    metadata:
+      labels:
+        app: tsoc-dashboard
+    spec:
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - name: tmp
+        emptyDir:
+          sizeLimit: 200Mi
+      # Streamlit writes its config/cache under $HOME/.streamlit by default,
+      # which is unwritable with readOnlyRootFilesystem: true unless
+      # redirected -- see STREAMLIT_CONFIG_DIR/XDG_CACHE_HOME below.
+      - name: streamlit-config
+        emptyDir:
+          sizeLimit: 50Mi
+      containers:
+      - name: dashboard
+        image: your-registry.com/tsoc/dashboard@sha256:0000000000000000000000000000000000000000000000000000000000000
+        imagePullPolicy: Always
+        env:
+        - name: API_URL
+          value: "http://tsoc-api-service/api/v1"
+        - name: TSOC_API_KEY
+          # KNOWN GAP, not fixed by this manifest: shared/data_access.py's
+          # module-level `stream_manager` singleton -- still used by every
+          # dashboard page except the login form and triage actions in
+          # command_center.py -- authenticates with this one static,
+          # all-tenant-scoped key rather than the logged-in employee's own
+          # per-tenant JWT (st.session_state["access_token"]). Until that
+          # singleton is refactored into a per-session, JWT-scoped client,
+          # every logged-in employee's main dashboard pages see every
+          # tenant's alerts/incidents/stats, not just their own. Wiring
+          # this key in is what makes today's code run at all; it does not
+          # fix the underlying cross-tenant leak.
+          valueFrom:
+            secretKeyRef:
+              name: tsoc-secrets
+              key: api_key
+        - name: STREAMLIT_CONFIG_DIR
+          value: /tmp/.streamlit
+        - name: XDG_CACHE_HOME
+          value: /tmp/.cache
+        - name: HOME
+          value: /tmp
+        ports:
+        - name: http
+          containerPort: 8501
+          protocol: TCP
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: streamlit-config
+          mountPath: /tmp/.streamlit
+        resources:
+          limits:
+            cpu: 500m
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 256Mi
+        startupProbe:
+          httpGet:
+            path: /_stcore/health
+            port: 8501
+          failureThreshold: 6
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /_stcore/health
+            port: 8501
+          initialDelaySeconds: 30
+          periodSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /_stcore/health
+            port: 8501
+          initialDelaySeconds: 15
+          periodSeconds: 10
+        securityContext:
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
+      serviceAccountName: tsoc-dashboard-sa

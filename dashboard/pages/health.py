@@ -6,16 +6,16 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".
 
 import streamlit as st
 
+from dashboard import session_data
 from dashboard.components.empty_states import render_broker_unavailable
 from dashboard.components.ui import kpi_card, kpi_row
-from shared.data_access import stream_manager
 
 st.markdown("## Platform Health")
 with st.container(key="refresh_corner"):
     if st.button("", icon=":material/refresh:", help="Refresh"):
         st.rerun()
 
-status = stream_manager.status()
+status = session_data.status()
 if not status["broker_healthy"]:
     render_broker_unavailable()
     st.stop()

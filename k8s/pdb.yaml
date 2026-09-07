@@ -36,3 +36,14 @@ spec:
   selector:
     matchLabels:
       app: tsoc-kafka-sink
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pdb-dashboard
+  namespace: tsoc
+spec:
+  maxUnavailable: 1  # allowed but requires minAvailable: 2 guard
+  selector:
+    matchLabels:
+      app: tsoc-dashboard

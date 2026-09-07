@@ -9,9 +9,11 @@ import ipaddress
 import logging
 import os
 import secrets
+import ssl
 import urllib.parse
 from typing import Optional
 
+import redis
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import PyJWTError as JWTError
@@ -192,6 +194,130 @@ except BaseException as ex:
     limiter = Limiter(key_func=get_remote_address, swallow_errors=False)
 
 
+# --- Shared Redis client (JWT revocation, login lockout) -------------------
+# A real redis.Redis client, not the storage_uri string slowapi's Limiter
+# builds above -- api/routes/auth.py needs plain GET/SET/EXPIRE, which the
+# `limits` library's storage backend doesn't expose. Mirrors
+# inference/correlation.py's IncidentCorrelator.__init__ exactly (same
+# REDIS_HOST/PORT/PASSWORD/SSL/cert env vars, same mutual-TLS handling) --
+# a third near-duplicate of this connection logic, kept because unifying
+# it with either existing copy is a bigger refactor than this feature
+# needs, not because a third copy is anyone's target state.
+_redis_client: Optional["redis.Redis"] = None
+
+
+def get_redis_client() -> "redis.Redis":
+    global _redis_client
+    if _redis_client is not None:
+        return _redis_client
+
+    pool_kwargs = dict(
+        host=REDIS_HOST,
+        port=int(REDIS_PORT),
+        password=REDIS_PASSWORD,
+        db=0,
+        decode_responses=True,
+        socket_timeout=2.0,
+        socket_connect_timeout=2.0,
+        max_connections=20,
+        retry_on_timeout=True,
+        health_check_interval=30,
+    )
+    if REDIS_SSL:
+        pool_kwargs["connection_class"] = redis.SSLConnection
+        pool_kwargs["ssl_cert_reqs"] = "required"
+        redis_ca_cert = os.getenv("REDIS_CA_CERT_PATH")
+        if redis_ca_cert and os.path.exists(redis_ca_cert):
+            pool_kwargs["ssl_ca_certs"] = redis_ca_cert
+        else:
+            try:
+                import certifi
+                pool_kwargs["ssl_ca_certs"] = certifi.where()
+            except ImportError:
+                paths = ssl.get_default_verify_paths()
+                if paths.cafile:
+                    pool_kwargs["ssl_ca_certs"] = paths.cafile
+                elif paths.capath:
+                    pool_kwargs["ssl_ca_path"] = paths.capath
+
+        client_cert = os.getenv("REDIS_CLIENT_CERT_PATH")
+        client_key = os.getenv("REDIS_CLIENT_KEY_PATH")
+        if client_cert and client_key and os.path.exists(client_cert) and os.path.exists(client_key):
+            pool_kwargs["ssl_certfile"] = client_cert
+            pool_kwargs["ssl_keyfile"] = client_key
+
+    _redis_client = redis.Redis(connection_pool=redis.ConnectionPool(**pool_kwargs))
+    return _redis_client
+
+
+_JTI_DENYLIST_PREFIX = "tsoc:revoked_jti:"
+_LOGIN_FAIL_PREFIX = "tsoc:login_fail:"
+LOGIN_LOCKOUT_MAX_ATTEMPTS = 5
+LOGIN_LOCKOUT_WINDOW_SEC = 900  # 15 minutes
+
+
+def revoke_jti(jti: str, ttl_seconds: int) -> None:
+    """Denylists one specific token (logout, or a reset/invite link that's
+    just been consumed) until it would have expired anyway -- past that,
+    the JWT's own exp claim makes the denylist entry redundant, so there's
+    no need to keep it (or grow the key set) forever."""
+    if ttl_seconds <= 0:
+        return
+    try:
+        get_redis_client().set(f"{_JTI_DENYLIST_PREFIX}{jti}", "1", ex=ttl_seconds)
+    except redis.RedisError as ex:
+        logger.error("Failed to record token revocation for jti=%s: %s", jti, ex)
+
+
+def is_token_revoked(jti: str) -> bool:
+    """Fails OPEN (treats Redis-unreachable as 'not revoked') rather than
+    closed: unlike the rate limiter above (whose whole job IS blocking
+    traffic, so failing closed on it is the safe default), this is a
+    defense-in-depth check layered on top of a JWT's own signature and
+    expiry, which remain valid without Redis at all. Failing closed here
+    would mean a transient Redis outage locks every authenticated caller
+    out of the entire API, for a feature (immediate revocation of one
+    already-issued token) that matters far less than baseline
+    availability."""
+    if not jti:
+        return False
+    try:
+        return get_redis_client().exists(f"{_JTI_DENYLIST_PREFIX}{jti}") > 0
+    except redis.RedisError as ex:
+        logger.error("Token revocation check failed open (Redis unreachable): %s", ex)
+        return False
+
+
+def record_failed_login(email: str) -> None:
+    try:
+        client = get_redis_client()
+        key = f"{_LOGIN_FAIL_PREFIX}{email.lower()}"
+        count = client.incr(key)
+        if count == 1:
+            client.expire(key, LOGIN_LOCKOUT_WINDOW_SEC)
+    except redis.RedisError as ex:
+        logger.error("Failed to record login failure for %s: %s", email, ex)
+
+
+def clear_failed_logins(email: str) -> None:
+    try:
+        get_redis_client().delete(f"{_LOGIN_FAIL_PREFIX}{email.lower()}")
+    except redis.RedisError as ex:
+        logger.error("Failed to clear login failures for %s: %s", email, ex)
+
+
+def is_locked_out(email: str) -> bool:
+    """Same fail-open reasoning as is_token_revoked: a Redis outage should
+    degrade brute-force protection, not take down the entire login
+    endpoint for every legitimate user at once."""
+    try:
+        count = get_redis_client().get(f"{_LOGIN_FAIL_PREFIX}{email.lower()}")
+        return count is not None and int(count) >= LOGIN_LOCKOUT_MAX_ATTEMPTS
+    except redis.RedisError as ex:
+        logger.error("Login lockout check failed open (Redis unreachable): %s", ex)
+        return False
+
+
 # --- Authentication ----------------------------------------------------------
 API_KEY = os.getenv("TSOC_API_KEY")
 if not API_KEY:
@@ -249,6 +375,12 @@ def _authenticate(token: str) -> dict:
             detail="Invalid or missing API Key / Authorization Token",
             headers={"WWW-Authenticate": "Bearer"}
         )
+    if is_token_revoked(payload.get("jti")):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has been revoked",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
     return payload
 
 
@@ -283,6 +415,25 @@ def require_scope(required_scope: str):
         return principal
 
     return _dependency
+
+
+def scope_to_tenant(query, principal: dict, model):
+    """Filters a query to the caller's own tenant, sourced from the JWT's
+    tenant_id claim -- never a request parameter, which would let a
+    caller simply ask for someone else's tenant.
+
+    The static service key (TSOC_API_KEY) has no tenant_id at all
+    (`{"sub": "service-key", "scopes": ["*"]}`) -- it's the same
+    trusted-internal-caller credential that predates tenants entirely,
+    so it deliberately sees every tenant's data unfiltered, the same way
+    it already holds every scope. A real per-employee JWT (minted by
+    api/routes/auth.py's login) always carries a tenant_id and is always
+    scoped down to it.
+    """
+    tenant_id = principal.get("tenant_id")
+    if tenant_id is None:
+        return query
+    return query.filter(model.tenant_id == tenant_id)
 
 
 def get_authenticated_db(

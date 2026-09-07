@@ -179,26 +179,47 @@ apply `network-policies.yaml` + `cilium-identity-policy.yaml` → `helm
 install kyverno` → apply `kyverno-verify.yaml` → the connectivity/
 admission tests described above.
 
-## Internal TLS (no public domain required)
+## TLS: internal service mTLS vs. public ingress
 
-`k8s/ingress.yaml` previously pointed at `letsencrypt-prod` for
-`api.tsoc.local` — a hostname that was never going to pass ACME
-validation, since it isn't a real, publicly-resolvable domain. Rather
-than requiring one, `k8s/cert-manager-internal-ca.yaml` sets up a
-cluster-local CA (a one-time self-signed bootstrap issuer signs a root
-CA certificate; a second `ClusterIssuer` of kind `ca` issues real
-workload certificates from that root), and the ingress now references
-that issuer instead. This is the architecturally correct choice here,
-not a fallback: this platform sits behind a data diode and is never
-meant to be internet-facing, so a publicly-trusted certificate is the
-wrong tool regardless of whether a public domain is available.
+This product changed shape from a single-tenant, on-prem appliance
+(deployed behind a client's own data diode, never internet-facing) to a
+multi-tenant SaaS (one shared API and dashboard, reached by many client
+organizations' employees and sensors over the public internet). Two
+different CAs now exist for two different jobs, and it matters not to
+mix them up:
+
+- `k8s/cert-manager-internal-ca.yaml`'s cluster-local CA (a one-time
+  self-signed bootstrap issuer signs a root CA certificate; a second
+  `ClusterIssuer` of kind `ca` issues real workload certificates from
+  that root) is for **internal, service-to-service** TLS only —
+  currently `tsoc-redis-client-cert`, this API's client certificate for
+  mutual TLS to Redis. Nothing outside the cluster ever needs to trust
+  this CA, so a publicly-trusted certificate would be the wrong tool for
+  this job regardless of domain ownership.
+- `k8s/cert-manager-public-ca.yaml`'s `letsencrypt-prod` `ClusterIssuer`
+  is for **public-facing** ingress — `k8s/ingress.yaml`'s
+  `tsoc-api-ingress` and `tsoc-dashboard-ingress` both reference it now.
+  Unlike the appliance model, real employees' browsers and real tenant
+  sensors connect over the open internet and need a certificate their
+  own trust stores already recognize; a private CA can't provide that.
+  This issuer only works once `api.tsoc.local`/`app.tsoc.local` are
+  replaced with real, DNS-resolvable hostnames pointed at the ingress
+  controller's public load balancer — ACME HTTP-01 validation fails
+  against a placeholder or unresolvable domain, exactly as it did the
+  one time `letsencrypt-prod` was pointed at `api.tsoc.local` in the
+  earlier, still-internal-only version of this file.
 
 Verified against a real cert-manager installation (Helm chart, a fresh
-`kind` cluster): the bootstrap issuer, root CA certificate, and workload
-issuer all reached `Ready`, and a real `Certificate` requested for
-`api.tsoc.local` was issued — `kubectl get secret ... | openssl x509
--noout -issuer -ext subjectAltName` shows `issuer=CN=tsoc-internal-ca`
-and `DNS:api.tsoc.local`, a genuine, cluster-trusted X.509 certificate.
+`kind` cluster): the internal bootstrap issuer, root CA certificate, and
+workload issuer all reached `Ready`, and a real `Certificate` requested
+for `api.tsoc.local` under that internal issuer was issued —
+`kubectl get secret ... | openssl x509 -noout -issuer -ext subjectAltName`
+showed `issuer=CN=tsoc-internal-ca` and `DNS:api.tsoc.local`, a genuine,
+cluster-trusted X.509 certificate. `letsencrypt-prod` itself is not
+independently verifiable in this sandbox (it needs a real, publicly
+delegated domain and a reachable ingress controller) — the config is
+externally consistent with cert-manager's documented ACME HTTP-01 solver
+shape, but treat it as unverified until exercised against a real domain.
 
 ## Boot-time configuration checks
 
@@ -216,6 +237,40 @@ degrading silently:
   raises at import on `disable`/`allow`/`prefer` instead of silently
   allowing an unencrypted or unverified connection.
 
+## Secrets provisioning
+
+[k8s/secrets.yaml.example](k8s/secrets.yaml.example) is a template only
+-- `k8s/secrets.yaml` (gitignored) is never meant to hold real values in
+git history, not even encrypted-at-rest in a private repo. Recommended
+path, lowest-friction to bootstrap since it needs no pre-existing Vault:
+[Sealed Secrets](https://github.com/bitnami-labs/sealed-secrets).
+
+1. Install the controller once per cluster: `helm install sealed-secrets
+   sealed-secrets/sealed-secrets -n kube-system`. It generates its own
+   asymmetric keypair on first install and never exposes the private
+   half outside the cluster -- only it can decrypt what `kubeseal` below
+   encrypts.
+2. Populate a real, local `k8s/secrets.yaml` from the example (never
+   committed).
+3. `kubeseal --format yaml < k8s/secrets.yaml > k8s/sealed-secrets.yaml`
+   -- this calls the live controller's public key over the cluster API,
+   so it must run against the target cluster (or with `--cert` pointed
+   at a fetched copy of that public key for offline sealing). The
+   output is ciphertext a `SealedSecret` custom resource wraps; this
+   file is safe to commit and is what actually gets checked in and
+   applied (`kubectl apply -f k8s/sealed-secrets.yaml`), not
+   `k8s/secrets.yaml` itself.
+4. The controller watches for `SealedSecret` resources and decrypts each
+   into the plain `Secret` (`tsoc-secrets`) every workload in this repo
+   already reads from -- no application code or manifest changes needed
+   beyond this substitution.
+
+This hasn't been exercised against a real cluster in this repo (no live
+cluster available in this environment, and `kubeseal` needs one to
+encrypt against) -- treat the command sequence above as the documented
+procedure, not something independently verified here the way the
+NetworkPolicy/Kyverno sections above were.
+
 ## Secret rotation
 
 - `TSOC_JWT_SECRET` and `REDIS_PASSWORD`: rotate every 90 days via Vault
@@ -223,24 +278,67 @@ degrading silently:
 - DLQ overflow: if a local-disk DLQ fallback exceeds its configured max
   size, alert on-call and rotate manually.
 
-## Dashboard and terminal console access control
+## Access control
 
-Neither [dashboard/app.py](dashboard/app.py) nor
-[terminal/tsoc_console.py](terminal/tsoc_console.py) has an Ingress or
-any other perimeter in this repo, so without an app-level gate anyone
-who can reach the Streamlit port or run the console binary is in. Both
-share one login gate (constant-time password compare via
-`secrets.compare_digest`, resolved through
-[shared/auth.py](shared/auth.py) so the two interfaces can't drift onto
-different credentials) that is mandatory, not opt-in: set
-`DASHBOARD_PASSWORD` for a persistent password, or leave it unset and it
-defaults to `user`/`user` -- a printed console warning names that
-default explicitly every time it's in use, so it's never silently relied
-on. Set a real `DASHBOARD_PASSWORD` before either interface is reachable
-by anyone other than the person running it locally. This is a single
-shared password, not per-user auth -- if either is ever exposed to more
-than a small trusted team, put a real auth layer (SSO via the Ingress,
-e.g. oauth2-proxy) in front of it instead.
+[dashboard/app.py](dashboard/app.py) and
+[terminal/tsoc_console.py](terminal/tsoc_console.py) both require a real
+per-employee account -- email + argon2-hashed password, issued a scoped,
+expiring JWT by [api/routes/auth.py](api/routes/auth.py)'s `/auth/login`.
+`api/deps.py`'s `require_scope`/`scope_to_tenant` enforce that JWT's
+`tenant_id` on every request that carries it through to the API, and
+every caller of the API now does carry it through:
+[terminal/tsoc_console.py](terminal/tsoc_console.py),
+[dashboard/pages/command_center.py](dashboard/pages/command_center.py)'s
+triage actions, and (as of
+[dashboard/session_data.py](dashboard/session_data.py)) the dashboard's
+own read pages (alerts, incidents, stats, network, health) all read and
+write using the logged-in employee's own per-tenant JWT
+(`st.session_state["access_token"]`), not a shared credential. Login is
+rate-limited and lockout-protected (5 failed attempts / 15 min), and
+logout revokes the specific token via a Redis-backed denylist rather
+than only relying on its natural expiry.
+
+Those same four dashboard pages previously read through
+[shared/data_access.py](shared/data_access.py)'s module-level
+`stream_manager` singleton instead -- a process-wide client
+authenticated with one static, all-tenant `TSOC_API_KEY`, so every
+logged-in employee saw every tenant's alerts/incidents/stats regardless
+of which tenant they actually belonged to, a real cross-tenant data
+leak. `dashboard/session_data.py` replaced that singleton with a
+per-session client (`st.cache_data`-cached per-token, so different
+employees' cached reads never mix) for exactly those four pages;
+`stream_manager` itself still exists and is still correct for
+[dashboard/cli_dashboard.py](dashboard/cli_dashboard.py)'s
+single-operator terminal tool, which was never part of this leak in the
+first place (there's only ever one credential and one operator using
+it). Regression-tested directly in
+`tests/unit/test_session_data.py::test_different_tokens_never_see_each_others_cached_data`,
+and verified end-to-end against a running dashboard (login state seeded
+via `dashboard/_seed_dev.py`): all four pages render correctly from a
+session's own token, and a triage action attributes correctly to that
+session's analyst.
+
+There is no in-app account-creation UI beyond
+`POST /api/v1/auth/signup` (a brand-new tenant's first admin -- the only
+path around the auth system's own chicken-and-egg problem, since
+`/auth/login` needs an existing user and the invite endpoint needs an
+existing admin) and `POST /auth/tenants/{id}/users/invite` (admin-only,
+for every account after that).
+
+[dashboard/cli_dashboard.py](dashboard/cli_dashboard.py) is the
+exception: a read-only ops view (no triage actions, no tenant data
+isolation) still gated behind a single shared credential
+(`secrets.compare_digest`, resolved through
+[shared/auth.py](shared/auth.py)) rather than a per-employee account.
+That gate is mandatory, not opt-in: set `DASHBOARD_PASSWORD` for a
+persistent password, or leave it unset and it defaults to `user`/`user`
+-- a printed console warning names that default explicitly every time
+it's in use, so it's never silently relied on. Set a real
+`DASHBOARD_PASSWORD` before this interface is reachable by anyone other
+than the person running it locally; if it's ever exposed to more than a
+small trusted ops team, put a real auth layer (SSO via an Ingress, e.g.
+oauth2-proxy) in front of it instead, the same way any other
+internal-only tool would be.
 
 ## Genuinely out of scope here
 

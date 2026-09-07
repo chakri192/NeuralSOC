@@ -10,6 +10,7 @@ os.environ.setdefault("DATABASE_URL", "sqlite:///./_test_api.db")
 os.environ.setdefault("REDIS_SSL", "false")
 os.environ.setdefault("REDIS_PASSWORD", "test-only-redis-password-do-not-use-in-prod")
 os.environ.setdefault("ENABLE_DOCS", "false")
+os.environ.setdefault("TSOC_SENSOR_TOKEN", "test-only-sensor-token-do-not-use-in-prod")
 
 import pytest  # noqa: E402
 

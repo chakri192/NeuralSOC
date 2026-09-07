@@ -1,102 +1,93 @@
 """terminal/tsoc_console.py has no live PTY available in CI, so
-Textual's own App.run_test() (Pilot) headless harness -- the same
-technique that originally found the severity-coloring bug from reading
-the source alone was never going to catch -- is the real verification
-surface here. Tests wrap the async Pilot session in asyncio.run(...)
-inside a plain `def test_...`, matching this repo's existing convention
-(tests/test_pipeline.py) rather than adding a pytest-asyncio dependency
-nothing else here uses.
+Textual's own App.run_test() (Pilot) headless harness is the real
+verification surface here (same technique that originally found the
+severity-coloring bug from reading the source alone). Mocks the HTTP
+boundary (terminal.tsoc_console.requests / fetch_alerts, and
+shared.triage_store's functions) rather than a live API -- the server
+side of each of those is already covered by tests/unit/test_ingest_routes.py,
+tests/unit/test_triage_routes.py, and tests/unit/test_triage_store.py.
 """
 import asyncio
-import importlib
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
-import pytest
+import requests
 
-import shared.triage_store as triage_store
 import terminal.tsoc_console as console
-from shared.data_access import DataStreamManager
+
+_SAMPLE_ALERTS = [
+    {
+        "alert_id": "a1",
+        "source_ip": "10.0.0.5",
+        "destination_ip": "8.8.8.8",
+        "severity": "critical",
+        "threat_class": "DGA",
+        "confidence_score": 0.9,
+        "timestamp": "2026-09-07T00:00:00Z",
+    },
+]
 
 
-@pytest.fixture(autouse=True)
-def _isolated_triage_db(tmp_path, monkeypatch):
-    db_path = str(tmp_path / "triage.db")
-    monkeypatch.setenv("TRIAGE_DB_PATH", db_path)
-    importlib.reload(triage_store)
-    yield
-    importlib.reload(triage_store)
+def _login_response(status_code=200, token="fake-jwt"):
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.json.return_value = {"access_token": token}
+    return resp
 
 
-@pytest.fixture(autouse=True)
-def _isolated_stream_manager(monkeypatch):
-    """DataStreamManager is a process-wide singleton (see
-    tests/unit/test_data_access.py) -- give the console its own fresh,
-    unconfigured instance per test rather than sharing the real one."""
-    DataStreamManager._instance = None
-    mgr = DataStreamManager()
-    monkeypatch.setattr(console, "stream_manager", mgr)
-    yield mgr
-    DataStreamManager._instance = None
-
-
-@pytest.fixture(autouse=True)
-def _fixed_password(monkeypatch):
-    monkeypatch.setattr(console, "_DASHBOARD_PASSWORD", "test-password")
-
-
-def _seed(mgr, alerts):
-    mgr.alerts = alerts
-    mgr.broker_healthy = True
-    mgr.is_running = True
-
-
-async def _login(pilot, password="test-password"):
-    pw = pilot.app.screen.query_one("#password-input")
-    pw.focus()
+async def _login(pilot, email="analyst@acme.example.com", password="pw"):
+    screen = pilot.app.screen
+    screen.query_one("#email-input").focus()
+    for ch in email:
+        await pilot.press(ch)
+    await pilot.press("enter")  # moves focus to the password field
     for ch in password:
         await pilot.press(ch)
-    await pilot.press("enter")
+    await pilot.press("enter")  # submits
     await pilot.pause()
 
 
 def test_login_rejects_wrong_password():
     async def _run():
-        app = console.TSOCConsole()
-        async with app.run_test() as pilot:
-            await pilot.pause()
-            await _login(pilot, password="wrong")
-            assert isinstance(app.screen, console.LoginScreen)
-            error = app.screen.query_one("#login-error")
-            assert "Incorrect password" in str(error.render())
+        with patch("terminal.tsoc_console.requests.post", return_value=_login_response(status_code=401)):
+            app = console.TSOCConsole()
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await _login(pilot, password="wrong")
+                assert isinstance(app.screen, console.LoginScreen)
+                error = app.screen.query_one("#login-error")
+                assert "Incorrect" in str(error.render())
 
     asyncio.run(_run())
 
 
-def test_login_accepts_correct_password():
+def test_login_accepts_correct_credentials():
     async def _run():
-        app = console.TSOCConsole()
-        async with app.run_test() as pilot:
-            await pilot.pause()
-            await _login(pilot)
-            assert isinstance(app.screen, console.MainScreen)
+        with patch("terminal.tsoc_console.requests.post", return_value=_login_response()):
+            app = console.TSOCConsole()
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                with patch("terminal.tsoc_console.fetch_alerts", return_value=[]), \
+                     patch("terminal.tsoc_console.triage_store.get_all_statuses", return_value={}):
+                    await _login(pilot)
+                    assert isinstance(app.screen, console.MainScreen)
 
     asyncio.run(_run())
 
 
-def test_severity_color_uses_real_theme_hex_not_a_style_name(_isolated_stream_manager):
-    """Regression test for the original bug: 'critical'/'high'/etc. are
-    not real Rich style names and were silently dropped -- the fix must
-    emit dashboard.theme.SEVERITY_COLORS' actual hex values instead."""
-    _seed(_isolated_stream_manager, [
-        {"alert_id": "a1", "source_ip": "10.0.0.5", "severity": "critical", "threat_class": "DGA"},
-    ])
-
-    async def _run():
-        app = console.TSOCConsole()
-        async with app.run_test() as pilot:
-            await pilot.pause()
+async def _boot_to_main_screen(pilot, alerts=_SAMPLE_ALERTS, statuses=None):
+    with patch("terminal.tsoc_console.requests.post", return_value=_login_response()):
+        with patch("terminal.tsoc_console.fetch_alerts", return_value=alerts), \
+             patch("terminal.tsoc_console.triage_store.get_all_statuses", return_value=statuses or {}):
             await _login(pilot)
             await pilot.pause(0.1)
+
+
+def test_severity_color_uses_real_theme_hex_not_a_style_name():
+    async def _run():
+        app = console.TSOCConsole()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await _boot_to_main_screen(pilot)
             table = app.screen.query_one("#queue")
             row = table.get_row_at(0)
             assert row[0] == f"[{console.SEVERITY_COLORS['critical']}]CRITICAL[/]"
@@ -104,100 +95,124 @@ def test_severity_color_uses_real_theme_hex_not_a_style_name(_isolated_stream_ma
     asyncio.run(_run())
 
 
-def test_health_indicator_reflects_broker_status(_isolated_stream_manager):
-    _seed(_isolated_stream_manager, [{"alert_id": "a1", "source_ip": "10.0.0.5", "severity": "low"}])
-    _isolated_stream_manager.broker_healthy = False
-
+def test_health_indicator_reflects_a_fetch_failure():
     async def _run():
         app = console.TSOCConsole()
         async with app.run_test() as pilot:
             await pilot.pause()
-            await _login(pilot)
-            await pilot.pause(0.1)
+            await _boot_to_main_screen(pilot)
+            assert "SENSOR: HEALTHY" in app.sub_title
+
+            with patch("terminal.tsoc_console.fetch_alerts", side_effect=requests.ConnectionError("down")):
+                app.screen.update_queue(force=True)
             assert "SENSOR: DOWN" in app.sub_title
 
     asyncio.run(_run())
 
 
-def test_cursor_preserved_across_refresh_by_incident_id(_isolated_stream_manager):
-    """Regression test: the old code captured cursor_row before clear()
-    and never restored it, so every refresh silently reset the selection
-    to row 0. Selecting the row that does NOT sort to the top makes that
-    bug reproducible."""
-    _seed(_isolated_stream_manager, [
-        {"alert_id": "a1", "source_ip": "10.0.0.1", "severity": "critical"},
-        {"alert_id": "a2", "source_ip": "10.0.0.2", "severity": "low"},
-    ])
+def test_cursor_preserved_across_refresh_by_incident_id():
+    """Regression test: the old bug reset the cursor to row 0 on every
+    refresh. Selecting the row that does NOT sort to the top (the
+    low-severity one) makes that bug reproducible."""
+    alerts = [
+        {"alert_id": "a1", "source_ip": "10.0.0.1", "destination_ip": "1.1.1.1", "severity": "critical",
+         "threat_class": "DGA", "confidence_score": 0.9, "timestamp": "2026-09-07T00:00:00Z"},
+        {"alert_id": "a2", "source_ip": "10.0.0.2", "destination_ip": "2.2.2.2", "severity": "low",
+         "threat_class": "Beaconing", "confidence_score": 0.3, "timestamp": "2026-09-07T00:00:01Z"},
+    ]
 
     async def _run():
         app = console.TSOCConsole()
         async with app.run_test() as pilot:
             await pilot.pause()
-            await _login(pilot)
-            await pilot.pause(0.1)
+            await _boot_to_main_screen(pilot, alerts=alerts)
             table = app.screen.query_one("#queue")
             table.move_cursor(row=1)
-            await pilot.press("enter")
-            await pilot.pause()
+            with patch("terminal.tsoc_console.fetch_alerts", return_value=alerts), \
+                 patch("terminal.tsoc_console.triage_store.get_status", return_value={"status": "open"}):
+                await pilot.press("enter")
+                await pilot.pause()
             assert app.screen._selected_incident_id == "INC-10-0-0-2"
 
-            app.screen.update_queue(force=True)
-            await pilot.pause()
+            with patch("terminal.tsoc_console.fetch_alerts", return_value=alerts), \
+                 patch("terminal.tsoc_console.triage_store.get_all_statuses", return_value={}):
+                app.screen.update_queue(force=True)
             assert table.cursor_row == 1
             assert table.cursor_row == table.get_row_index("INC-10-0-0-2")
 
     asyncio.run(_run())
 
 
-def test_acknowledge_persists_via_shared_triage_store(_isolated_stream_manager):
-    _seed(_isolated_stream_manager, [{"alert_id": "a1", "source_ip": "10.0.0.5", "severity": "high"}])
-
+def test_acknowledge_calls_triage_store_with_token_and_incident_id_not_a_free_text_actor():
     async def _run():
         app = console.TSOCConsole()
         async with app.run_test() as pilot:
             await pilot.pause()
-            await _login(pilot)
-            await pilot.pause(0.1)
+            await _boot_to_main_screen(pilot)
             table = app.screen.query_one("#queue")
             table.move_cursor(row=0)
-            await pilot.press("enter")
-            await pilot.pause()
-            await pilot.press("a")
-            await pilot.pause()
+            with patch("terminal.tsoc_console.fetch_alerts", return_value=_SAMPLE_ALERTS), \
+                 patch("terminal.tsoc_console.triage_store.get_status", return_value={"status": "open"}):
+                await pilot.press("enter")
+                await pilot.pause()
+
+            with patch("terminal.tsoc_console.triage_store.set_status") as mock_set_status, \
+                 patch("terminal.tsoc_console.triage_store.get_all_statuses", return_value={}), \
+                 patch("terminal.tsoc_console.fetch_alerts", return_value=_SAMPLE_ALERTS):
+                await pilot.press("a")
+                await pilot.pause()
+
+            mock_set_status.assert_called_once_with("fake-jwt", "INC-10-0-0-5", console.triage_store.ACKNOWLEDGED)
 
     asyncio.run(_run())
-    assert triage_store.get_status("INC-10-0-0-5")["status"] == triage_store.ACKNOWLEDGED
 
 
-def test_false_positive_and_confirm_also_persist(_isolated_stream_manager):
-    _seed(_isolated_stream_manager, [{"alert_id": "a1", "source_ip": "10.0.0.5", "severity": "high"}])
+def test_row_selection_deserializes_string_evidence_from_the_real_api_wire_format():
+    """Regression test: api/schemas.py's AlertResponse sends `evidence` as
+    a JSON string (matching api/models.py's underlying Text column), not
+    a parsed object. Before shared/data_access.py's fetch_alerts() gained
+    the same deserialization DataStreamManager.get_alerts() already had,
+    this console's detail pane silently rendered "No raw metadata facts
+    extracted" / "no ML models triggered" for every single incident,
+    since shared.formatters.categorize_evidence() rejects a bare string
+    and returns three empty dicts. Only the HTTP layer
+    (shared.data_access.requests.get) is mocked here, not fetch_alerts
+    itself, so the real deserialization actually runs.
+    """
+    alert_with_string_evidence = dict(_SAMPLE_ALERTS[0], evidence='{"bytes_out": 48213, "ml_score": 0.9}')
+
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.json.return_value = [alert_with_string_evidence]
+    resp.raise_for_status.side_effect = None
 
     async def _run():
         app = console.TSOCConsole()
         async with app.run_test() as pilot:
             await pilot.pause()
-            await _login(pilot)
-            await pilot.pause(0.1)
+            await _boot_to_main_screen(pilot, alerts=[alert_with_string_evidence])
             table = app.screen.query_one("#queue")
             table.move_cursor(row=0)
-            await pilot.press("enter")
-            await pilot.pause()
-            await pilot.press("f")
-            await pilot.pause()
+            with patch("shared.data_access.requests.get", return_value=resp), \
+                 patch("terminal.tsoc_console.triage_store.get_status", return_value={"status": "open"}):
+                await pilot.press("enter")
+                await pilot.pause()
+
+            detail_text = str(app.screen.query_one("#detail-pane").render())
+            assert "Bytes Out: 48213" in detail_text
+            assert "Ml Score: 0.9" in detail_text
+            assert "No raw metadata facts extracted" not in detail_text
+            assert "no ML models triggered" not in detail_text
 
     asyncio.run(_run())
-    assert triage_store.get_status("INC-10-0-0-5")["status"] == triage_store.FALSE_POSITIVE
 
 
-def test_triage_action_without_selection_warns_instead_of_erroring(_isolated_stream_manager):
-    _seed(_isolated_stream_manager, [{"alert_id": "a1", "source_ip": "10.0.0.5", "severity": "high"}])
-
+def test_triage_action_without_selection_warns_instead_of_erroring():
     async def _run():
         app = console.TSOCConsole()
         async with app.run_test() as pilot:
             await pilot.pause()
-            await _login(pilot)
-            await pilot.pause(0.1)
+            await _boot_to_main_screen(pilot)
             with patch.object(console.MainScreen, "notify") as mock_notify:
                 await pilot.press("c")  # nothing selected yet
                 await pilot.pause()
@@ -208,18 +223,19 @@ def test_triage_action_without_selection_warns_instead_of_erroring(_isolated_str
     asyncio.run(_run())
 
 
-def test_filter_narrows_the_queue_by_substring(_isolated_stream_manager):
-    _seed(_isolated_stream_manager, [
-        {"alert_id": "a1", "source_ip": "10.0.0.1", "severity": "low", "threat_class": "Beaconing"},
-        {"alert_id": "a2", "source_ip": "10.0.0.2", "severity": "critical", "threat_class": "DGA"},
-    ])
+def test_filter_narrows_the_queue_by_substring():
+    alerts = [
+        {"alert_id": "a1", "source_ip": "10.0.0.1", "destination_ip": "1.1.1.1", "severity": "low",
+         "threat_class": "Beaconing", "confidence_score": 0.3, "timestamp": "2026-09-07T00:00:00Z"},
+        {"alert_id": "a2", "source_ip": "10.0.0.2", "destination_ip": "2.2.2.2", "severity": "critical",
+         "threat_class": "DGA", "confidence_score": 0.9, "timestamp": "2026-09-07T00:00:01Z"},
+    ]
 
     async def _run():
         app = console.TSOCConsole()
         async with app.run_test() as pilot:
             await pilot.pause()
-            await _login(pilot)
-            await pilot.pause(0.1)
+            await _boot_to_main_screen(pilot, alerts=alerts)
             table = app.screen.query_one("#queue")
             assert table.row_count == 2
 
@@ -227,9 +243,11 @@ def test_filter_narrows_the_queue_by_substring(_isolated_stream_manager):
             await pilot.pause()
             filt = app.screen.query_one("#filter-input")
             filt.focus()
-            for ch in "dga":
-                await pilot.press(ch)
-            await pilot.pause()
+            with patch("terminal.tsoc_console.fetch_alerts", return_value=alerts), \
+                 patch("terminal.tsoc_console.triage_store.get_all_statuses", return_value={}):
+                for ch in "dga":
+                    await pilot.press(ch)
+                await pilot.pause()
             assert table.row_count == 1
 
     asyncio.run(_run())

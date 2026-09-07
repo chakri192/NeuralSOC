@@ -15,24 +15,24 @@ import pandas as pd
 import streamlit as st
 
 import shared.triage_store as triage_store
+from dashboard import session_data
 from dashboard.components.empty_states import render_broker_unavailable, render_no_alerts
 from dashboard.components.ui import kpi_card, kpi_row, relative_time, render_evidence_columns, severity_badge, status_badge
 from dashboard.theme import SEVERITY_ORDER, STATUS_LABELS
-from shared.data_access import stream_manager
 from shared.formatters import format_timestamp
 
-status = stream_manager.status()
+status = session_data.status()
 if not status["broker_healthy"]:
     render_broker_unavailable()
     st.stop()
 
-incidents = stream_manager.get_incidents()
+incidents = session_data.get_incidents()
 if not incidents:
     render_no_alerts()
     st.stop()
 
 df = pd.DataFrame(incidents)
-triage = triage_store.get_all_statuses()
+triage = triage_store.get_all_statuses(st.session_state["access_token"])
 df["triage_status"] = df["incident_id"].map(lambda i: triage.get(i, {}).get("status", triage_store.OPEN))
 
 st.markdown("## Operations Overview")
@@ -164,7 +164,7 @@ with tab_summary:
     st.markdown(incident["evidence_summary"])
 
 with tab_evidence:
-    alerts = stream_manager.get_alerts()
+    alerts = session_data.get_alerts()
     related_ids = set(incident.get("related_alert_ids", []))
     rel_alerts = [a for a in alerts if a["alert_id"] in related_ids]
 
@@ -185,12 +185,14 @@ with tab_attack:
 with tab_actions:
     st.info("Automated containment actions are disabled (read-only data diode). These actions record analyst triage state only.")
     note = st.text_input("Note (optional)", value=current_triage.get("note", ""), key=f"note_{incident['incident_id']}")
-    actor = st.session_state.get("analyst_name", "Analyst") or "Analyst"
 
     a1, a2, a3 = st.columns(3)
 
     def _set(new_status: str, label: str):
-        triage_store.set_status(incident["incident_id"], new_status, actor=actor, note=note)
+        # actor is no longer a parameter here -- the API derives it from
+        # this session's own JWT (st.session_state["access_token"]),
+        # not a client-supplied string nothing used to verify.
+        triage_store.set_status(st.session_state["access_token"], incident["incident_id"], new_status, note=note)
         st.toast(f"{label}: {incident['incident_id']}", icon=":material/check_circle:")
         st.rerun()
 

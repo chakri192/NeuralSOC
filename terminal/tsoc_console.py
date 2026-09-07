@@ -1,16 +1,24 @@
 """Terminal console for T-SOC: a keyboard-driven incident queue for an
 analyst who lives in a terminal rather than a browser. Shares its
-backend (shared/data_access.py), its triage persistence
-(shared/triage_store.py), its login credential (shared/auth.py), and
-its color palette (dashboard/theme.py) with the web dashboard, so
-acknowledging an incident here shows up there and vice versa.
+backend (the same FastAPI /api/v1/alerts, /api/v1/triage endpoints the
+web dashboard calls), its login (api/routes/auth.py's /auth/login --
+the same per-employee account, not a separate shared password), and its
+color palette (dashboard/theme.py) with the web dashboard, so
+acknowledging an incident here shows up there and vice versa, scoped to
+whichever tenant the logged-in analyst belongs to.
+
+Reads alerts via shared/data_access.py's fetch_alerts(), not
+DataStreamManager -- that class is a process-wide singleton keyed to a
+single static service key (fine for dashboard/cli_dashboard.py's
+single-operator terminal tool), which can't hold a distinct token per
+logged-in analyst.
 """
 import os
-import secrets
 import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import requests
 from rich.markup import escape
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -20,11 +28,11 @@ from textual.widgets import DataTable, Footer, Header, Input, Static
 
 import shared.triage_store as triage_store
 from dashboard.theme import PALETTE, SEVERITY_COLORS, STATUS_COLORS
-from shared.auth import resolve_dashboard_password
-from shared.data_access import stream_manager
+from shared.data_access import fetch_alerts, synthesize_incidents
 from shared.formatters import categorize_evidence, format_timestamp
 
-_DASHBOARD_PASSWORD = resolve_dashboard_password(warn=True)
+_API_URL = os.getenv("API_URL", "http://127.0.0.1:8000/api/v1")
+_REQUEST_TIMEOUT_SEC = 5
 
 _STATUS_LABELS = {
     triage_store.OPEN: "OPEN",
@@ -35,9 +43,10 @@ _STATUS_LABELS = {
 
 
 class LoginScreen(Screen):
-    """Gates the console behind the same shared credential as the web
-    dashboard -- one password for the whole product, not one per
-    interface (see shared/auth.py)."""
+    """Gates the console behind the same per-employee account as the web
+    dashboard (api/routes/auth.py's /auth/login) -- one identity system
+    for the whole product, not a separate shared password for this
+    interface."""
 
     CSS = f"""
     LoginScreen {{
@@ -65,17 +74,37 @@ class LoginScreen(Screen):
     def compose(self) -> ComposeResult:
         with Vertical(id="login-box"):
             yield Static("T-SOC Console", id="login-title")
+            yield Input(placeholder="Email", id="email-input")
             yield Input(placeholder="Password", password=True, id="password-input")
             yield Static("", id="login-error")
 
     def on_mount(self) -> None:
-        self.query_one("#password-input", Input).focus()
+        self.query_one("#email-input", Input).focus()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        if secrets.compare_digest(event.value, _DASHBOARD_PASSWORD):
-            self.app.push_screen(MainScreen())
+        if event.input.id == "email-input":
+            self.query_one("#password-input", Input).focus()
+            return
+        self._attempt_login()
+
+    def _attempt_login(self) -> None:
+        email = self.query_one("#email-input", Input).value.strip()
+        password = self.query_one("#password-input", Input).value
+        error = self.query_one("#login-error", Static)
+        try:
+            resp = requests.post(
+                f"{_API_URL}/auth/login", json={"email": email, "password": password}, timeout=_REQUEST_TIMEOUT_SEC
+            )
+        except requests.RequestException:
+            error.update("Could not reach the T-SOC API.")
+            return
+        if resp.status_code == 200:
+            token = resp.json()["access_token"]
+            self.app.push_screen(MainScreen(token=token, analyst_email=email))
+        elif resp.status_code == 429:
+            error.update("Too many failed attempts. Try again later.")
         else:
-            self.query_one("#login-error", Static).update("Incorrect password.")
+            error.update("Incorrect email or password.")
             self.query_one("#password-input", Input).value = ""
 
 
@@ -115,9 +144,12 @@ class MainScreen(Screen):
     }}
     """
 
-    def __init__(self) -> None:
+    def __init__(self, token: str, analyst_email: str) -> None:
         super().__init__()
+        self._token = token
+        self._analyst_email = analyst_email
         self.live_mode = True
+        self._healthy = True
         self._selected_incident_id = None
         self._filter_text = ""
 
@@ -130,11 +162,10 @@ class MainScreen(Screen):
         yield Footer()
 
     def on_mount(self) -> None:
-        self.app.title = "T-SOC Console"
+        self.app.title = f"T-SOC Console -- {self._analyst_email}"
         queue = self.query_one("#queue", DataTable)
         queue.cursor_type = "row"
         queue.add_columns("SEV", "RISK", "THREAT", "TARGET", "STATUS")
-        stream_manager.start_listeners()
         self.update_queue(force=True)
         self.update_timer = self.set_interval(2.0, self.update_queue)
 
@@ -168,9 +199,6 @@ class MainScreen(Screen):
         if event.input.id == "filter-input":
             self.query_one("#queue", DataTable).focus()
 
-    def _current_actor(self) -> str:
-        return os.getenv("USER") or os.getenv("USERNAME") or "analyst"
-
     def action_acknowledge(self) -> None:
         self._apply_triage(triage_store.ACKNOWLEDGED, "Acknowledged")
 
@@ -184,21 +212,33 @@ class MainScreen(Screen):
         if not self._selected_incident_id:
             self.notify("Select an incident first.", severity="warning")
             return
-        triage_store.set_status(self._selected_incident_id, status, actor=self._current_actor())
+        try:
+            triage_store.set_status(self._token, self._selected_incident_id, status)
+        except requests.RequestException as ex:
+            self.notify(f"Failed to update triage: {ex}", severity="error")
+            return
         self.notify(f"{label}: {self._selected_incident_id}")
         self.update_queue(force=True)
 
     def _refresh_subtitle(self) -> None:
-        healthy = stream_manager.status().get("broker_healthy", False)
         mode = "LIVE" if self.live_mode else "PAUSED"
-        sensor = "HEALTHY" if healthy else "DOWN"
+        sensor = "HEALTHY" if self._healthy else "DOWN"
         self.app.sub_title = f"[{mode}] | DIODE: ONE-WAY | SENSOR: {sensor}"
 
     def update_queue(self, force: bool = False) -> None:
         if not self.live_mode and not force:
             return
-        incidents = stream_manager.get_incidents()
-        statuses = triage_store.get_all_statuses()
+        try:
+            alerts = fetch_alerts(self._token)
+            statuses = triage_store.get_all_statuses(self._token)
+            self._healthy = True
+        except requests.RequestException as ex:
+            self._healthy = False
+            self._refresh_subtitle()
+            self.notify(f"Refresh failed: {ex}", severity="error")
+            return
+
+        incidents = synthesize_incidents(alerts)
         queue = self.query_one("#queue", DataTable)
         queue.clear()
         incidents.sort(key=lambda x: x.get("risk_score", 0), reverse=True)
@@ -236,8 +276,14 @@ class MainScreen(Screen):
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         incident_id = event.row_key.value
         self._selected_incident_id = incident_id
-        incidents = stream_manager.get_incidents()
-        all_alerts = stream_manager.get_alerts()
+        try:
+            alerts = fetch_alerts(self._token)
+            triage = triage_store.get_status(self._token, incident_id)
+        except requests.RequestException as ex:
+            self.notify(f"Failed to load incident detail: {ex}", severity="error")
+            return
+
+        incidents = synthesize_incidents(alerts)
         inc = next((i for i in incidents if i.get("incident_id") == incident_id), None)
         if not inc:
             return
@@ -246,7 +292,7 @@ class MainScreen(Screen):
         tactics = escape(", ".join(inc.get("mitre_tactics", [])))
         ts = format_timestamp(inc.get("created_timestamp", ""))
         related_ids = inc.get("related_alert_ids", [])
-        related_alerts = [a for a in all_alerts if a.get("alert_id") in related_ids]
+        related_alerts = [a for a in alerts if a.get("alert_id") in related_ids]
 
         observed_lines = []
         inferred_lines = []
@@ -265,7 +311,6 @@ class MainScreen(Screen):
         observed_text = "\n".join(dict.fromkeys(observed_lines)) or "- No raw metadata facts extracted."
         inferred_text = "\n".join(dict.fromkeys(inferred_lines)) or "- Rule-based heuristic, no ML models triggered."
 
-        triage = triage_store.get_status(incident_id)
         status_label = _STATUS_LABELS.get(triage["status"], triage["status"].upper())
 
         content = f"""

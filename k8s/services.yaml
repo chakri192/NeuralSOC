@@ -32,3 +32,19 @@ spec:
     - protocol: TCP
       port: 6066
       targetPort: 6066
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tsoc-dashboard-service
+  namespace: tsoc
+  labels:
+    app: tsoc-dashboard
+spec:
+  selector:
+    app: tsoc-dashboard
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: 8501

@@ -122,9 +122,22 @@ jobs:
         # change instead of a one-time read-through. No live cluster
         # needed; -ignore-missing-schemas skips CRDs with no public schema
         # (Cilium CNP, Kyverno ClusterPolicy, ServiceMonitor).
+        #
+        # Validates `kustomize build` output rather than a flat `k8s/*.yaml`
+        # glob -- k8s/kustomization.yaml itself (and k8s/base/, once
+        # anything lives there) has no apiVersion/kind and would fail a
+        # flat glob's per-file check despite being valid Kustomize config,
+        # not a manifest. Building through Kustomize first also means this
+        # check validates the exact same rendered output an operator would
+        # actually apply, including the staging/production overlays
+        # (k8s-overlays/), not just the un-overlaid base.
         run: |
           curl -sSfL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz | tar xz -C /usr/local/bin kubeconform
-          kubeconform -summary -ignore-missing-schemas k8s/*.yaml
+          curl -sSfL https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.5.0/kustomize_v5.5.0_linux_amd64.tar.gz | tar xz -C /usr/local/bin kustomize
+          for target in k8s k8s-overlays/staging k8s-overlays/production; do
+            echo "== $target =="
+            kustomize build "$target" | kubeconform -summary -ignore-missing-schemas
+          done
 
       - name: Build container
         run: docker build -t tsoc:ci .
@@ -158,6 +171,80 @@ jobs:
             coverage.xml
             sbom.cyclonedx.json
             models/*.cosign.bundle
+
+  # Every job above builds a LOCAL, never-published image (`docker build
+  # -t tsoc:ci .`) -- nothing anywhere actually pushed one, so
+  # k8s/soc-deployment.yaml's image refs were placeholder digests
+  # (your-registry.com/tsoc/...) with nothing real behind them. Runs
+  # only on a real push to main (not every PR, which would publish an
+  # image for code that was never actually merged) and only after
+  # security-code-scan passes, so a failing lint/test/Trivy/cosign gate
+  # blocks publishing, not just merging. GHCR (not a third-party
+  # registry) since this repo is already on GitHub -- no new account or
+  # secret to provision, GITHUB_TOKEN is enough to push here.
+  publish-images:
+    runs-on: ubuntu-latest
+    needs: [security-code-scan]
+    if: github.event_name == 'push'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        # BuildKit -- required for the per-Dockerfile
+        # Dockerfile.dashboard.dockerignore convention Dockerfile.dashboard
+        # relies on (plain `docker build` without Buildx ignores it and
+        # falls back to the repo-root .dockerignore instead).
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute lowercase image path
+        # GHCR requires an all-lowercase repository path; github.repository
+        # preserves the real case (chakri192/NeuralSOC).
+        run: echo "IMAGE_BASE=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
+
+      - name: Build and push the backend image (api/inference/kafka-sink)
+        id: backend
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE_BASE }}/tsoc-api:${{ github.sha }}
+            ${{ env.IMAGE_BASE }}/tsoc-api:latest
+
+      - name: Build and push the dashboard image
+        id: dashboard
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.dashboard
+          push: true
+          tags: |
+            ${{ env.IMAGE_BASE }}/tsoc-dashboard:${{ github.sha }}
+            ${{ env.IMAGE_BASE }}/tsoc-dashboard:latest
+
+      - name: Print the real, digest-pinned image refs
+        # k8s/'s Kyverno policy (kyverno-verify.yaml) requires every image
+        # to be digest-pinned, not just tagged -- these are the real refs
+        # a deploy step should write into the manifests (e.g. via
+        # `kustomize edit set image`, see k8s/overlays/) in place of the
+        # placeholder your-registry.com/tsoc/... digests. No deploy step
+        # consumes this automatically yet -- there's no live cluster in
+        # this repo to deploy to -- so it's recorded here for now.
+        run: |
+          echo "Backend image:   ${{ env.IMAGE_BASE }}/tsoc-api@${{ steps.backend.outputs.digest }}"
+          echo "Dashboard image: ${{ env.IMAGE_BASE }}/tsoc-dashboard@${{ steps.dashboard.outputs.digest }}"
 
   # Every test above -- unit, integration, load -- calls process_traffic.fun()
   # directly with a fake async generator, or mocks Redis/Kafka entirely. None
@@ -224,7 +311,7 @@ jobs:
       - name: Create Kafka topics
         run: scripts/create_topics.sh
 
-      - name: Start the real pipeline (API, Faust worker, kafka_sink)
+      - name: Start the real pipeline (API, bootstrap a tenant, Faust worker, kafka_sink)
         run: |
           export DATABASE_URL="sqlite:///$(pwd)/tsoc_ci_smoke.db"
           export REDIS_SSL=true
@@ -253,19 +340,45 @@ jobs:
           export PYTHONPATH="$(pwd)"
           mkdir -p /tmp/faust-ci-data logs
 
+          # API first -- kafka_sink now authenticates to it as a tenant's
+          # ingest sensor (api/routes/ingest.py) rather than writing to
+          # the database directly, so it needs a real sensor token minted
+          # against a running API before it can even start.
           nohup python -m uvicorn api.main:app --host 127.0.0.1 --port 8000 > logs/ci_api.log 2>&1 &
+          for i in $(seq 1 20); do
+            api_ok=$(curl -sf http://localhost:8000/healthz > /dev/null && echo yes || echo no)
+            [ "$api_ok" = "yes" ] && echo "API healthy" && break
+            sleep 2
+            if [ "$i" = "20" ]; then echo "API did not become healthy in time"; cat logs/ci_api.log; exit 1; fi
+          done
+
+          # Bootstrap a tenant + admin + ingest sensor token -- the only
+          # path around the auth system's own chicken-and-egg problem
+          # (see scripts/bootstrap_tenant.py's own docstring: /auth/login
+          # needs an existing user, invite needs an existing admin).
+          python scripts/bootstrap_tenant.py \
+            --api-url http://localhost:8000/api/v1 \
+            --tenant-name "CI Smoke Test" \
+            --email "ci-smoke@tsoc.internal" \
+            --password "$(openssl rand -hex 16)" \
+            > logs/ci_bootstrap.log 2>&1
+          sensor_token=$(grep -oP 'TSOC_SENSOR_TOKEN=\K.*' logs/ci_bootstrap.log)
+          if [ -z "$sensor_token" ]; then
+            echo "FAIL: could not bootstrap a tenant/sensor token"; cat logs/ci_bootstrap.log; exit 1
+          fi
+          echo "TSOC_SENSOR_TOKEN=$sensor_token" >> "$GITHUB_ENV"
+          export TSOC_SENSOR_TOKEN="$sensor_token"
+
           nohup python inference/stream_processor_faust.py worker -l info > logs/ci_faust.log 2>&1 &
           nohup python api/kafka_sink.py > logs/ci_kafka_sink.log 2>&1 &
 
           for i in $(seq 1 20); do
-            api_ok=$(curl -sf http://localhost:8000/healthz > /dev/null && echo yes || echo no)
             faust_ok=$(curl -sf http://localhost:6066/healthz > /dev/null && echo yes || echo no)
-            [ "$api_ok" = "yes" ] && [ "$faust_ok" = "yes" ] && echo "API and Faust worker both healthy" && exit 0
+            [ "$faust_ok" = "yes" ] && echo "Faust worker healthy" && exit 0
             sleep 2
           done
-          echo "Pipeline did not become healthy in time"
-          echo "--- API log ---"; cat logs/ci_api.log
-          echo "--- Faust log ---"; cat logs/ci_faust.log
+          echo "Faust worker did not become healthy in time"
+          cat logs/ci_faust.log
           exit 1
         # TSOC_API_KEY / TSOC_JWT_SECRET / REDIS_PASSWORD need no explicit
         # env: mapping here -- values appended to $GITHUB_ENV in the
@@ -442,7 +555,7 @@ jobs:
       - name: Create Kafka topics
         run: scripts/create_topics.sh
 
-      - name: Start the real pipeline (API, Faust worker, kafka_sink)
+      - name: Start the real pipeline (API, bootstrap a tenant, Faust worker, kafka_sink)
         run: |
           export DATABASE_URL="sqlite:///$(pwd)/tsoc_chaos.db"
           export REDIS_SSL=true
@@ -456,21 +569,48 @@ jobs:
           export PYTHONPATH="$(pwd)"
           mkdir -p /tmp/faust-chaos-data logs
 
+          # API first -- kafka_sink now authenticates to it as a tenant's
+          # ingest sensor (api/routes/ingest.py) rather than writing to
+          # the database directly, so it needs a real sensor token minted
+          # against a running API before it can even start.
           nohup python -m uvicorn api.main:app --host 127.0.0.1 --port 8000 > logs/chaos_api.log 2>&1 &
           echo $! > /tmp/chaos_api.pid
+          for i in $(seq 1 20); do
+            api_ok=$(curl -sf http://localhost:8000/healthz > /dev/null && echo yes || echo no)
+            [ "$api_ok" = "yes" ] && echo "API healthy" && break
+            sleep 2
+            if [ "$i" = "20" ]; then echo "API did not become healthy in time"; cat logs/chaos_api.log; exit 1; fi
+          done
+
+          # Bootstrap a tenant + admin + ingest sensor token -- the only
+          # path around the auth system's own chicken-and-egg problem
+          # (see scripts/bootstrap_tenant.py's own docstring: /auth/login
+          # needs an existing user, invite needs an existing admin).
+          python scripts/bootstrap_tenant.py \
+            --api-url http://localhost:8000/api/v1 \
+            --tenant-name "CI Chaos Test" \
+            --email "ci-chaos@tsoc.internal" \
+            --password "$(openssl rand -hex 16)" \
+            > logs/chaos_bootstrap.log 2>&1
+          sensor_token=$(grep -oP 'TSOC_SENSOR_TOKEN=\K.*' logs/chaos_bootstrap.log)
+          if [ -z "$sensor_token" ]; then
+            echo "FAIL: could not bootstrap a tenant/sensor token"; cat logs/chaos_bootstrap.log; exit 1
+          fi
+          echo "TSOC_SENSOR_TOKEN=$sensor_token" >> "$GITHUB_ENV"
+          export TSOC_SENSOR_TOKEN="$sensor_token"
+
           nohup python inference/stream_processor_faust.py worker -l info > logs/chaos_faust.log 2>&1 &
           echo $! > /tmp/chaos_faust.pid
           nohup python api/kafka_sink.py > logs/chaos_kafka_sink.log 2>&1 &
           echo $! > /tmp/chaos_kafka_sink.pid
 
           for i in $(seq 1 20); do
-            api_ok=$(curl -sf http://localhost:8000/healthz > /dev/null && echo yes || echo no)
             faust_ok=$(curl -sf http://localhost:6066/healthz > /dev/null && echo yes || echo no)
-            [ "$api_ok" = "yes" ] && [ "$faust_ok" = "yes" ] && echo "API and Faust worker both healthy" && exit 0
+            [ "$faust_ok" = "yes" ] && echo "Faust worker healthy" && exit 0
             sleep 2
           done
-          echo "Pipeline did not become healthy in time"
-          cat logs/chaos_api.log logs/chaos_faust.log
+          echo "Faust worker did not become healthy in time"
+          cat logs/chaos_faust.log
           exit 1
 
       - name: Baseline -- feed traffic and confirm alerts flow normally

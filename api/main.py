@@ -14,7 +14,7 @@ from slowapi.errors import RateLimitExceeded
 
 from api.database import Base, engine
 from api import models
-from api.deps import limiter, get_authenticated_db, verify_auth, require_scope
+from api.deps import limiter, get_authenticated_db, verify_auth, require_scope, scope_to_tenant
 
 # Root logger carries the structured formatter, so every module's own
 # `logging.getLogger(__name__)` (api.deps, inference.*, etc.) inherits it
@@ -161,9 +161,12 @@ def healthz():
 def get_stats(
     request: Request,
     db=Depends(get_authenticated_db),
-    _scope: dict = Depends(require_scope("stats:read")),
+    principal: dict = Depends(require_scope("stats:read")),
 ):
-    counts = db.query(models.Alert.severity, func.count(models.Alert.id)).group_by(models.Alert.severity).all()
+    query = scope_to_tenant(
+        db.query(models.Alert.severity, func.count(models.Alert.id)), principal, models.Alert
+    )
+    counts = query.group_by(models.Alert.severity).all()
     severity_map = {str(sev).lower() if sev else "unknown": cnt for sev, cnt in counts}
     total = sum(severity_map.values())
     return {
@@ -175,7 +178,13 @@ def get_stats(
     }
 
 
-# Alert routes live in api/routes/alerts.py, sharing this module's limiter
-# and auth dependency via api.deps (see that file's docstring for why).
+# Alert/auth/ingest routes live in api/routes/, sharing this module's
+# limiter and auth dependency via api.deps (see that file's docstring for why).
 from api.routes.alerts import router as alerts_router  # noqa: E402
+from api.routes.auth import router as auth_router  # noqa: E402
+from api.routes.ingest import router as ingest_router  # noqa: E402
+from api.routes.triage import router as triage_router  # noqa: E402
 app.include_router(alerts_router)
+app.include_router(auth_router)
+app.include_router(ingest_router)
+app.include_router(triage_router)

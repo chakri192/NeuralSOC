@@ -1,4 +1,5 @@
 import os
+import secrets
 from datetime import datetime, timedelta, timezone
 import jwt
 from typing import List, Optional
@@ -22,14 +23,41 @@ if JWT_SECRET and len(JWT_SECRET.encode("utf-8")) < 32:
         "openssl rand -hex 32"
     )
 
-def create_token(scopes: List[str], subject: Optional[str] = None) -> str:
+
+def create_token(
+    scopes: List[str],
+    subject: Optional[str] = None,
+    tenant_id: Optional[int] = None,
+    user_id: Optional[int] = None,
+    purpose: Optional[str] = None,
+    expiry_minutes: Optional[int] = None,
+) -> str:
+    """tenant_id/user_id are embedded for real per-employee sessions (the
+    static service key path never sets them). purpose/expiry_minutes are
+    for single-purpose, short-lived tokens that are NOT session
+    credentials -- a password-reset or invite link, which must not be
+    usable as a general-purpose API token just because it's a valid JWT
+    (api/routes/auth.py checks payload["purpose"] before honoring one).
+    jti lets api/deps.py's revocation denylist revoke one specific token
+    (logout, or a reset/invite link consumed once) without needing to
+    rotate TSOC_JWT_SECRET and invalidate every other session fleet-wide.
+    """
+    now = datetime.now(timezone.utc)
     payload = {
         "sub": subject or "tsoc-service",
         "scopes": scopes,
-        "iat": datetime.now(timezone.utc),
-        "exp": datetime.now(timezone.utc) + timedelta(minutes=JWT_EXPIRY_MIN),
+        "iat": now,
+        "exp": now + timedelta(minutes=expiry_minutes if expiry_minutes is not None else JWT_EXPIRY_MIN),
+        "jti": secrets.token_hex(16),
     }
+    if tenant_id is not None:
+        payload["tenant_id"] = tenant_id
+    if user_id is not None:
+        payload["user_id"] = user_id
+    if purpose is not None:
+        payload["purpose"] = purpose
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
 
 def verify_token(token: str) -> dict:
     """Decode and verify a JWT. Raises JWTError (bad signature/expired/
