@@ -1,3 +1,4 @@
+import html
 import sys
 import os
 
@@ -66,7 +67,8 @@ if related_incidents:
         with row_l:
             threat = inc["threat_classes"][0] if inc["threat_classes"] else "Unclassified"
             st.markdown(
-                f'{severity_badge(inc["severity"])} <span class="tsoc-mono">{inc["incident_id"]}</span> · {threat}',
+                f'{severity_badge(inc["severity"])} <span class="tsoc-mono">{html.escape(inc["incident_id"])}</span> '
+                f'· {html.escape(threat)}',
                 unsafe_allow_html=True,
             )
         with row_r:
@@ -92,7 +94,8 @@ for _idx, row in filtered.iterrows():
         with header_l:
             st.markdown(
                 f'{severity_badge(row.get("severity"))} '
-                f'<span class="tsoc-mono">{row.get("source_ip", "?")} → {row.get("destination_ip", "?")}</span>',
+                f'<span class="tsoc-mono">{html.escape(str(row.get("source_ip", "?")))} → '
+                f'{html.escape(str(row.get("destination_ip", "?")))}</span>',
                 unsafe_allow_html=True,
             )
         with header_r:

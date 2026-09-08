@@ -143,7 +143,7 @@ header_l, header_r = st.columns([4, 1])
 with header_l:
     st.markdown(f"### {incident['threat_classes'][0] if incident['threat_classes'] else 'Unclassified Threat'}")
     st.markdown(
-        f'<span class="tsoc-mono">{incident["incident_id"]}</span> &nbsp;·&nbsp; '
+        f'<span class="tsoc-mono">{html.escape(incident["incident_id"])}</span> &nbsp;·&nbsp; '
         f'{severity_badge(incident["severity"])} &nbsp; {status_badge(current_triage["status"])}',
         unsafe_allow_html=True,
     )

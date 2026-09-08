@@ -255,7 +255,7 @@ class MainScreen(Screen):
                 continue
 
             sev_color = SEVERITY_COLORS.get(sev, SEVERITY_COLORS["low"])
-            sev_styled = f"[{sev_color}]{sev.upper()}[/]"
+            sev_styled = f"[{sev_color}]{escape(sev.upper())}[/]"
             risk = f"{inc.get('risk_score', 0):.0f}"
             threat_disp = escape(threat)
             target_disp = target[:12] + "..." if len(target) > 15 else target
@@ -314,9 +314,9 @@ class MainScreen(Screen):
         status_label = _STATUS_LABELS.get(triage["status"], triage["status"].upper())
 
         content = f"""
-[b]Incident:[/] {incident_id}
+[b]Incident:[/] {escape(str(incident_id))}
 [b]Status:[/] {status_label}
-[b]Severity:[/] {inc.get('severity', 'low').upper()}
+[b]Severity:[/] {escape(str(inc.get('severity', 'low')).upper())}
 [b]Risk Score:[/] {inc.get('risk_score', 0):.1f}
 [b]First seen:[/] {ts}
 
