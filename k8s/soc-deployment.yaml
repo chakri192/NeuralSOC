@@ -528,22 +528,17 @@ spec:
         env:
         - name: API_URL
           value: "http://tsoc-api-service/api/v1"
-        - name: TSOC_API_KEY
-          # KNOWN GAP, not fixed by this manifest: shared/data_access.py's
-          # module-level `stream_manager` singleton -- still used by every
-          # dashboard page except the login form and triage actions in
-          # command_center.py -- authenticates with this one static,
-          # all-tenant-scoped key rather than the logged-in employee's own
-          # per-tenant JWT (st.session_state["access_token"]). Until that
-          # singleton is refactored into a per-session, JWT-scoped client,
-          # every logged-in employee's main dashboard pages see every
-          # tenant's alerts/incidents/stats, not just their own. Wiring
-          # this key in is what makes today's code run at all; it does not
-          # fix the underlying cross-tenant leak.
-          valueFrom:
-            secretKeyRef:
-              name: tsoc-secrets
-              key: api_key
+        # No TSOC_API_KEY here on purpose: this container only ever runs
+        # dashboard/app.py (the web dashboard), which now reads and writes
+        # exclusively through dashboard/session_data.py -- a per-session
+        # client scoped to the logged-in employee's own JWT
+        # (st.session_state["access_token"]), not the static, all-tenant
+        # service key. Wiring that key in here would just be an unused
+        # credential sitting in this pod's environment, widening blast
+        # radius if the container were ever compromised for no operational
+        # benefit (dashboard/cli_dashboard.py, the one surface that still
+        # needs it, is a separate local tool never deployed via this
+        # manifest).
         - name: STREAMLIT_CONFIG_DIR
           value: /tmp/.streamlit
         - name: XDG_CACHE_HOME
