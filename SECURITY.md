@@ -297,7 +297,7 @@ NetworkPolicy/Kyverno sections above were.
 ## Secret rotation
 
 - `TSOC_JWT_SECRET` and `REDIS_PASSWORD`: rotate every 90 days via Vault
-  (see [README](README.md#security-hardening-post-audit-remediation)).
+  (see [README's Security section](README.md#security)).
 - DLQ overflow: if a local-disk DLQ fallback exceeds its configured max
   size, alert on-call and rotate manually.
 
