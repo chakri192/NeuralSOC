@@ -12,7 +12,7 @@
 # file's pin, bump the other's too.
 numpy==1.26.4
 pandas==2.2.3
-streamlit==1.55.0
+streamlit==1.63.0
 pillow==12.3.0
 pyarrow==23.0.1
 altair==5.5.0
