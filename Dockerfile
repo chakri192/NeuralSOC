@@ -29,6 +29,15 @@ RUN useradd --create-home --no-log-init --uid 1000 soc_user
 WORKDIR /app
 COPY --from=builder /root/.local /home/soc_user/.local
 ENV PATH=/home/soc_user/.local/bin:$PATH
+# Pins the --user install's real location independently of $HOME -- see
+# Dockerfile.dashboard's identical line for why: Python re-derives its
+# "user site-packages" path from $HOME at every interpreter startup, not
+# from where the packages actually live, so a future HOME override on
+# any workload built from this image (e.g. to satisfy
+# readOnlyRootFilesystem, the way k8s/soc-deployment.yaml's dashboard
+# container already needed) would otherwise silently break every
+# --user-installed import.
+ENV PYTHONPATH=/home/soc_user/.local/lib/python3.12/site-packages
 COPY --chown=soc_user:soc_user . .
 USER soc_user
 ENV PYTHONUNBUFFERED=1

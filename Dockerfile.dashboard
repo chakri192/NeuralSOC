@@ -22,10 +22,42 @@ RUN useradd --create-home --no-log-init --uid 1000 soc_user
 WORKDIR /app
 COPY --from=builder /root/.local /home/soc_user/.local
 ENV PATH=/home/soc_user/.local/bin:$PATH
+# Pip's --user install above resolves its target directory from $HOME
+# at install time (root's, hence /root/.local, copied above to
+# soc_user's real home) -- but Python re-derives the *same* "user site-
+# packages" path from $HOME again at every interpreter startup
+# (site.getusersitepackages() = $HOME/.local/lib/pythonX.Y/site-packages),
+# not from where the packages actually live on disk. k8s/soc-deployment.yaml
+# overrides HOME=/tmp for this container (Streamlit's own config/cache
+# dirs need a writable path under readOnlyRootFilesystem), which silently
+# repoints that lookup at /tmp/.local -- empty -- so `streamlit` fails
+# with `ModuleNotFoundError: No module named 'streamlit'` despite the
+# package being right here. Pinning PYTHONPATH explicitly decouples
+# "where packages live" from "what HOME happens to be set to".
+ENV PYTHONPATH=/home/soc_user/.local/lib/python3.12/site-packages
 COPY --chown=soc_user:soc_user dashboard/ dashboard/
 COPY --chown=soc_user:soc_user shared/ shared/
 USER soc_user
 ENV PYTHONUNBUFFERED=1
+ENV STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+# Root cause of a real, reproduced startup hang under k8s: with
+# --server.address=0.0.0.0 and --server.headless=true (both set below),
+# Streamlit's own bootstrap._print_url() calls net_util.get_external_ip()
+# to populate the console banner's "External URL" line, which does a
+# blocking `requests.get("http://checkip.amazonaws.com", timeout=5)`.
+# On an open network that resolves or fails in well under a second; on
+# this namespace's default-deny egress (k8s/network-policies.yaml) DNS
+# still resolves (kube-dns is explicitly allowed) but the outbound TCP
+# SYN to the real IP is silently dropped rather than refused, and that
+# silent-drop case empirically took far longer than the nominal 5s
+# `requests` timeout to actually give up -- long enough that the
+# startupProbe's failure window (k8s/soc-deployment.yaml) always won
+# the race, so the pod crash-looped indefinitely and never reached
+# _stcore/health. logger.hideWelcomeMessage (documented in Streamlit's
+# own config.py as being for exactly this -- "hosted environments where
+# these messages may be misleading or inactionable") skips the call
+# outright rather than just hiding its output.
+ENV STREAMLIT_LOGGER_HIDE_WELCOME_MESSAGE=true
 EXPOSE 8501
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:8501/_stcore/health || exit 1
