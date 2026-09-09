@@ -202,8 +202,10 @@ Let it run for one or two cycles and stop it (`Ctrl+C`) once validation accuracy
 
 ## Security
 
-- JWT auth (PyJWT, HS256) with scoped tokens, plus a static service key for internal callers.
-- Rate limiting (slowapi) backed by Redis.
+- JWT auth (PyJWT, HS256) with scoped, tenant-aware tokens, plus a static service key for internal callers.
+- Optional TOTP MFA for admin accounts (`scripts/enroll_admin_mfa.py` to enroll — see [SECURITY.md](SECURITY.md) for what's wired into each client).
+- An audit log of every login, invite, sensor-token creation, and triage change, per tenant (`GET /api/v1/audit`, admin-only).
+- Rate limiting (slowapi) backed by Redis, keyed per-tenant on the routes where that matters (alerts/stats/triage), per-IP elsewhere.
 - Kafka payloads validated against a strict schema before touching the database — no mass-assignment path from an untrusted message to the ORM.
 - Model files are integrity-checked (SHA-256) before load and keylessly signed/verified via Sigstore in CI.
 - Dependency vulnerabilities are scanned continuously via Dependabot (`pip` + `github-actions`).

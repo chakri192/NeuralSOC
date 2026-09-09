@@ -14,7 +14,7 @@ from slowapi.errors import RateLimitExceeded
 
 from api.database import Base, engine
 from api import models
-from api.deps import limiter, get_authenticated_db, verify_auth, require_scope, scope_to_tenant
+from api.deps import limiter, get_authenticated_db, get_tenant_aware_key, verify_auth, require_scope, scope_to_tenant
 
 # Root logger carries the structured formatter, so every module's own
 # `logging.getLogger(__name__)` (api.deps, inference.*, etc.) inherits it
@@ -157,7 +157,7 @@ def healthz():
 
 
 @app.get("/api/v1/stats")
-@limiter.limit("100/minute")
+@limiter.limit("100/minute", key_func=get_tenant_aware_key)
 def get_stats(
     request: Request,
     db=Depends(get_authenticated_db),
@@ -181,10 +181,12 @@ def get_stats(
 # Alert/auth/ingest routes live in api/routes/, sharing this module's
 # limiter and auth dependency via api.deps (see that file's docstring for why).
 from api.routes.alerts import router as alerts_router  # noqa: E402
+from api.routes.audit import router as audit_router  # noqa: E402
 from api.routes.auth import router as auth_router  # noqa: E402
 from api.routes.ingest import router as ingest_router  # noqa: E402
 from api.routes.triage import router as triage_router  # noqa: E402
 app.include_router(alerts_router)
+app.include_router(audit_router)
 app.include_router(auth_router)
 app.include_router(ingest_router)
 app.include_router(triage_router)

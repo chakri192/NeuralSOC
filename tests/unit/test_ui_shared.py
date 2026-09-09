@@ -1,3 +1,4 @@
+from dashboard.components.ui import mono, safe_html
 from shared.formatters import format_timestamp, format_mitre, categorize_evidence, escape_markdown
 
 def test_format_timestamp_valid():
@@ -55,3 +56,23 @@ def test_escape_markdown_is_visually_inert_for_ordinary_values():
     # -- only demonstrating that escaping doesn't mangle common content.
     assert escape_markdown("10.0.0.1") == r"10\.0\.0\.1"
     assert escape_markdown(500) == "500"
+
+
+def test_mono_html_escapes_an_injected_tag():
+    # dashboard/pages/command_center.py's TSOC-2026-02 stored-XSS finding:
+    # source_ip flows unvalidated into incident_id, then into mono() calls
+    # rendered with unsafe_allow_html=True. The escaping must happen
+    # inside mono() itself, not depend on the caller remembering it.
+    payload = '<img src=x onerror=alert(1)>'
+    rendered = mono(payload)
+    assert "<img" not in rendered
+    assert rendered == '<span class="tsoc-mono">&lt;img src=x onerror=alert(1)&gt;</span>'
+
+
+def test_mono_wraps_ordinary_values_visually_unchanged():
+    assert mono("INC-10-0-0-5") == '<span class="tsoc-mono">INC-10-0-0-5</span>'
+
+
+def test_safe_html_escapes_an_injected_tag():
+    payload = '<script>alert(1)</script>'
+    assert "<script" not in safe_html(payload)

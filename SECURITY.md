@@ -19,6 +19,29 @@ Machine Learning models in Python represent a significant attack surface (e.g., 
 ## 4. Subprocess Execution Guardrails
 The platform does not rely on active response scripts. There is exactly one subprocess call (`tail -F` in ingestion), which uses safe argument vectors (`['tail', '-F', file_path]`) explicitly preventing shell interpolation or command injection (CWE-78).
 
+## 5. Multi-Tenant Deployment Topology
+Section 1's data-diode model has a direct consequence for how this
+product deploys across multiple tenants: raw traffic never leaves a
+tenant's own premises, so the ingestion pipeline (Faust stream
+processor + `api/kafka_sink.py`) runs **per tenant, at their site**, not
+as one shared instance multiplexing every tenant's traffic. Only the
+API and dashboard (`tsoc-api`, `tsoc-dashboard`) are the shared,
+multi-tenant SaaS control plane — see `k8s/soc-deployment.yaml`'s own
+top-of-file comment for exactly which workloads belong to which half.
+Each tenant's on-prem pipeline authenticates to the shared API with its
+own `TSOC_SENSOR_TOKEN` (`api/routes/ingest.py`), which is also the
+tenant-isolation boundary itself: a compromised or malicious tenant
+pipeline can only ever write data tagged as that tenant (see the
+`api/routes/ingest.py`-`docstring` and its regression tests for the
+cross-tenant hijack this was previously vulnerable to).
+
+`k8s/soc-deployment.yaml` currently packages both halves as one
+manifest set, correct for local development, a demo, or a single
+self-hosted customer. Splitting it into a control-plane manifest set
+and a per-tenant collector manifest set is the natural next step once a
+second real tenant needs onboarding, not something forced now with no
+second tenant to actually deploy for.
+
 ---
 
 # Security posture
@@ -339,6 +362,53 @@ than the person running it locally; if it's ever exposed to more than a
 small trusted ops team, put a real auth layer (SSO via an Ingress, e.g.
 oauth2-proxy) in front of it instead, the same way any other
 internal-only tool would be.
+
+## Ops hardening: audit log, admin MFA, per-tenant rate limiting
+
+Three pieces of Phase 6 ops hardening, all shipped:
+
+- **Audit log** ([api/audit.py](api/audit.py), `GET /api/v1/audit` in
+  [api/routes/audit.py](api/routes/audit.py)): who did what, when, per
+  tenant. `record_audit_event()` is called from every route that
+  changes state or represents an auth event -- login (success, failure,
+  lockout, MFA challenge/failure), signup, invite, password reset,
+  sensor-token creation, and triage updates. Best-effort by design: a
+  write failure is logged and swallowed, never breaking the action it
+  describes. Reading it requires `users:manage` (the same scope as
+  inviting/deactivating teammates) and is tenant-scoped like every other
+  route.
+- **Per-tenant rate limiting** (`api/deps.py`'s `get_tenant_aware_key`):
+  the alerts/stats/triage routes key their rate limit on the caller's
+  `tenant_id` (decoded from their JWT) instead of source IP, so one
+  noisy or abusive tenant's employees can't exhaust a budget shared with
+  every other tenant whose employees happen to request from the same IP
+  range (a corporate NAT gateway, a shared VPN egress). `/auth/*` and
+  `/ingest/alerts` stay IP-keyed -- identity isn't established yet at
+  login, and a sensor token isn't a JWT to decode a tenant_id from
+  without a DB lookup on every rate-limit check.
+- **Optional TOTP MFA for admin accounts** (`api/routes/auth.py`'s
+  `mfa_*` endpoints): scoped to `users:manage` like invite/sensor-token
+  creation, so only admin accounts can enroll -- they're the highest-
+  value target, since they can invite or deactivate other users. Enroll
+  generates a secret but doesn't activate it; confirm requires proving a
+  real code from the authenticator app first. Once enabled, `/auth/login`
+  returns a short-lived challenge (`mfa_required: true`, `mfa_token`)
+  instead of a session, and `POST /auth/mfa/verify` exchanges that plus
+  a current code for the real token. Disabling MFA requires a current
+  code too, not just the session token, so a hijacked session alone
+  can't turn off the control that matters most for that account.
+
+  [dashboard/app.py](dashboard/app.py)'s login form handles the
+  challenge (a second "enter your code" step). No enrollment UI exists
+  in either client yet -- `dashboard/pages/admin.py` (a general
+  security-settings panel) was never built, so `scripts/enroll_admin_mfa.py`
+  is the only way to turn MFA on today, mirroring
+  `scripts/bootstrap_tenant.py`'s role for tenant creation.
+  [terminal/tsoc_console.py](terminal/tsoc_console.py) has no
+  code-entry screen for the challenge at all -- an MFA-enabled admin
+  logging in there gets a clear "sign in via the web dashboard instead"
+  message rather than a crash, but can't actually complete login from
+  the terminal.
 
 ## Genuinely out of scope here
 

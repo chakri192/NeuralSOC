@@ -197,16 +197,26 @@ class TestIngestAlerts:
         assert stored.tenant_id != tenant_a
 
     def test_a_tenant_bs_sensor_cannot_hijack_tenant_as_existing_alert_via_an_alert_id_collision(self):
-        """Regression test: alert_id only has a global UNIQUE constraint
-        (api/models.py), not a (tenant_id, alert_id) one. Before
-        bulk_upsert_alerts()/the per-item fallback scoped their "does this
-        alert already exist" lookup to the caller's own tenant_id, tenant
-        B's sensor sending an alert_id that already belonged to tenant A
-        would be treated as an UPDATE and silently reassign that alert's
-        tenant_id to B -- overwriting tenant A's data and evicting the
-        alert from tenant A's view entirely, exactly the kind of
-        cross-tenant write this whole module's docstring says a
-        compromised sensor must never be able to do.
+        """Regression test, now covering two layers of the same fix.
+
+        api/models.py's alerts.alert_id originally carried a *global*
+        UNIQUE constraint. Before bulk_upsert_alerts()/the per-item
+        fallback scoped their "does this alert already exist" lookup to
+        the caller's own tenant_id, tenant B's sensor sending an
+        alert_id that already belonged to tenant A was treated as an
+        UPDATE and silently reassigned that alert's tenant_id to B --
+        overwriting tenant A's data and evicting the alert from tenant
+        A's view entirely.
+
+        The application-layer fix alone (with the old global constraint
+        still in place) turned that into a *rejection*: tenant B's write
+        would fail the underlying INSERT and get DLQ'd, since the table
+        still couldn't hold two rows with the same alert_id at all. A
+        follow-up migration (28d9095cde3b) replaced that global
+        constraint with a composite (tenant_id, alert_id) one -- the
+        correct end state, verified below: tenant B's alert_id="ALERT-1"
+        is now neither a hijack nor a rejection, just its own
+        completely independent row, coexisting with tenant A's.
         """
         tenant_a = _seed_tenant_and_admin(tenant_slug="acme", email="admin@acme.example.com")
         tenant_b = _seed_tenant_and_admin(tenant_slug="globex", email="admin@globex.example.com")
@@ -220,23 +230,43 @@ class TestIngestAlerts:
 
             token_b = _login(client, "admin@globex.example.com")
             created_b = _create_sensor_token(client, token_b, tenant_b)
-            colliding_alert = {**_SAMPLE_ALERT, "severity": "low", "threat_class": "Hijacked"}
+            colliding_alert = {**_SAMPLE_ALERT, "severity": "low", "threat_class": "Not A Hijack"}
             r2 = client.post(
                 "/api/v1/ingest/alerts", json=[colliding_alert], headers={"Authorization": f"Bearer {created_b['token']}"}
             )
 
-        # Tenant B's colliding write must be rejected, not silently applied.
-        assert r2.json()["accepted"] == 0
-        assert len(r2.json()["failed"]) == 1
-        assert r2.json()["failed"][0]["alert_id"] == "ALERT-1"
+        # Tenant B's write succeeds -- it's a new row for tenant B, not a
+        # collision, thanks to the composite constraint.
+        assert r2.json() == {"accepted": 1, "failed": []}
 
         db = SessionLocal()
         rows = db.query(Alert).filter(Alert.alert_id == "ALERT-1").all()
         db.close()
-        assert len(rows) == 1  # still exactly one row -- no duplicate, no silent overwrite
-        assert rows[0].tenant_id == tenant_a
-        assert rows[0].severity == "critical"  # tenant A's original value, untouched
-        assert rows[0].threat_class == "DGA"
+        assert len(rows) == 2  # one row per tenant, same alert_id, no conflict
+        by_tenant = {r.tenant_id: r for r in rows}
+        assert by_tenant[tenant_a].severity == "critical"  # tenant A's original value, untouched
+        assert by_tenant[tenant_a].threat_class == "DGA"
+        assert by_tenant[tenant_b].severity == "low"  # tenant B's own, independent row
+        assert by_tenant[tenant_b].threat_class == "Not A Hijack"
+
+    def test_a_tenant_cannot_overwrite_its_own_alert_with_a_different_alert_ids_row(self):
+        """The composite constraint narrows uniqueness to (tenant_id,
+        alert_id) -- it must not also narrow it to nothing. The same
+        tenant re-sending the same alert_id is still an upsert, not a
+        new row every time."""
+        tenant_id = _seed_tenant_and_admin()
+        with TestClient(app) as client:
+            admin_token = _login(client, "admin@acme.example.com")
+            created = _create_sensor_token(client, admin_token, tenant_id)
+            headers = {"Authorization": f"Bearer {created['token']}"}
+            client.post("/api/v1/ingest/alerts", json=[_SAMPLE_ALERT], headers=headers)
+            client.post("/api/v1/ingest/alerts", json=[{**_SAMPLE_ALERT, "severity": "low"}], headers=headers)
+
+        db = SessionLocal()
+        rows = db.query(Alert).filter(Alert.alert_id == "ALERT-1", Alert.tenant_id == tenant_id).all()
+        db.close()
+        assert len(rows) == 1
+        assert rows[0].severity == "low"
 
     def test_ingest_upserts_an_existing_alert_by_alert_id(self):
         tenant_id = _seed_tenant_and_admin()

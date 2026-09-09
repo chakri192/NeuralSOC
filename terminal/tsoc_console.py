@@ -99,8 +99,16 @@ class LoginScreen(Screen):
             error.update("Could not reach the T-SOC API.")
             return
         if resp.status_code == 200:
-            token = resp.json()["access_token"]
-            self.app.push_screen(MainScreen(token=token, analyst_email=email))
+            body = resp.json()
+            if body.get("mfa_required"):
+                # api/routes/auth.py's login() returns a challenge, not a
+                # session, once MFA is enabled for this account -- this
+                # console has no code prompt to complete it with yet
+                # (dashboard/app.py does). Fail loudly and clearly rather
+                # than crash on the missing access_token below.
+                error.update("MFA is enabled for this account. Sign in via the web dashboard instead.")
+                return
+            self.app.push_screen(MainScreen(token=body["access_token"], analyst_email=email))
         elif resp.status_code == 429:
             error.update("Too many failed attempts. Try again later.")
         else:

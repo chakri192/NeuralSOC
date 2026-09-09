@@ -16,7 +16,9 @@ import logging
 import re
 import secrets
 from datetime import datetime, timezone
+from typing import Optional
 
+import pyotp
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -24,10 +26,12 @@ from jwt import PyJWTError as JWTError
 from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
 
+from api.audit import record_audit_event
 from api.auth import create_token, verify_token
 from api.database import get_db
 from api.deps import (
     clear_failed_logins,
+    get_remote_address,
     is_locked_out,
     is_token_revoked,
     limiter,
@@ -44,6 +48,7 @@ _hasher = PasswordHasher()
 
 _RESET_TOKEN_EXPIRY_MIN = 60
 _INVITE_TOKEN_EXPIRY_MIN = 60 * 24 * 7  # 7 days
+_MFA_PENDING_EXPIRY_MIN = 5
 _MIN_PASSWORD_LENGTH = 8
 _SLUG_SANITIZE_RE = re.compile(r"[^a-z0-9]+")
 
@@ -101,8 +106,41 @@ class TokenResponse(BaseModel):
     tenant_id: int
 
 
+class LoginResponse(BaseModel):
+    """login()'s actual response shape -- either a real session
+    (access_token/tenant_id set, mfa_required False) or, for an admin
+    with MFA enabled, a challenge to complete via POST /auth/mfa/verify
+    (mfa_required True, mfa_token set, no access_token yet). A caller
+    that only reads access_token from a successful login already breaks
+    cleanly against the challenge case: the field is simply absent."""
+
+    access_token: Optional[str] = None
+    token_type: str = "bearer"
+    tenant_id: Optional[int] = None
+    mfa_required: bool = False
+    mfa_token: Optional[str] = None
+
+
 class LogoutRequest(BaseModel):
     token: str
+
+
+class MfaEnrollResponse(BaseModel):
+    secret: str
+    otpauth_uri: str
+
+
+class MfaConfirmBody(BaseModel):
+    code: str
+
+
+class MfaDisableBody(BaseModel):
+    code: str
+
+
+class MfaVerifyBody(BaseModel):
+    mfa_token: str
+    code: str
 
 
 class PasswordResetRequestBody(BaseModel):
@@ -190,18 +228,24 @@ def signup(request: Request, body: SignupRequest, db: Session = Depends(get_db))
     db.commit()
     db.refresh(user)
 
+    record_audit_event(
+        db, "signup", tenant_id=tenant.id, actor_user_id=user.id, actor_label=user.email,
+        target=tenant.slug, ip_address=get_remote_address(request),
+    )
     return TokenResponse(access_token=_issue_session_token(user), tenant_id=tenant.id)
 
 
-@router.post("/login", response_model=TokenResponse)
+@router.post("/login", response_model=LoginResponse)
 @limiter.limit("10/minute")
 def login(request: Request, body: LoginRequest, db: Session = Depends(get_db)):
     # Same 401 regardless of "no such user" vs "wrong password" --
     # distinguishing the two would let an attacker enumerate valid
     # emails for free.
     invalid_credentials = HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
+    client_ip = get_remote_address(request)
 
     if is_locked_out(body.email):
+        record_audit_event(db, "login.locked_out", actor_label=body.email, ip_address=client_ip)
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many failed attempts. Try again later.",
@@ -210,19 +254,172 @@ def login(request: Request, body: LoginRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == body.email, User.is_active.is_(True)).first()
     if not user:
         record_failed_login(body.email)
+        record_audit_event(db, "login.failure", actor_label=body.email, ip_address=client_ip)
         raise invalid_credentials
 
     try:
         _hasher.verify(user.password_hash, body.password)
     except VerifyMismatchError:
         record_failed_login(body.email)
+        record_audit_event(
+            db, "login.failure", tenant_id=user.tenant_id, actor_user_id=user.id,
+            actor_label=user.email, ip_address=client_ip,
+        )
         raise invalid_credentials
 
     clear_failed_logins(body.email)
+
+    if user.mfa_enabled:
+        # Password alone proves identity but not possession of the
+        # enrolled authenticator -- no session token yet, and
+        # last_login_at/the login.success audit entry both wait for
+        # POST /auth/mfa/verify to actually complete the login.
+        mfa_token = create_token(
+            scopes=[], subject=str(user.id), user_id=user.id, tenant_id=user.tenant_id,
+            purpose="mfa_pending", expiry_minutes=_MFA_PENDING_EXPIRY_MIN,
+        )
+        record_audit_event(
+            db, "login.mfa_challenge", tenant_id=user.tenant_id, actor_user_id=user.id,
+            actor_label=user.email, ip_address=client_ip,
+        )
+        return LoginResponse(mfa_required=True, mfa_token=mfa_token)
+
     user.last_login_at = datetime.now(timezone.utc)
     db.commit()
 
+    record_audit_event(
+        db, "login.success", tenant_id=user.tenant_id, actor_user_id=user.id,
+        actor_label=user.email, ip_address=client_ip,
+    )
+    return LoginResponse(access_token=_issue_session_token(user), tenant_id=user.tenant_id)
+
+
+@router.post("/mfa/verify", response_model=TokenResponse)
+@limiter.limit("10/minute")
+def verify_mfa(request: Request, body: MfaVerifyBody, db: Session = Depends(get_db)):
+    """Second step of login for an MFA-enabled admin: exchanges the
+    short-lived mfa_pending token from login() plus a current TOTP code
+    for a real session token. Same 401 for every failure mode (expired
+    challenge, wrong code, disabled account) -- no reason to help an
+    attacker holding a stolen mfa_pending token distinguish them."""
+    invalid = HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired MFA challenge")
+    try:
+        payload = verify_token(body.mfa_token)
+    except (JWTError, RuntimeError):
+        raise invalid
+    if payload.get("purpose") != "mfa_pending":
+        raise invalid
+    if is_token_revoked(payload.get("jti")):
+        raise invalid
+
+    user = db.query(User).filter(User.id == payload.get("user_id"), User.is_active.is_(True)).first()
+    if not user or not user.mfa_enabled or not user.totp_secret:
+        raise invalid
+
+    client_ip = get_remote_address(request)
+    if not pyotp.totp.TOTP(user.totp_secret).verify(body.code, valid_window=1):
+        record_audit_event(
+            db, "mfa.verify_failed", tenant_id=user.tenant_id, actor_user_id=user.id,
+            actor_label=user.email, ip_address=client_ip,
+        )
+        raise invalid
+
+    # Single-use: consume the mfa_pending token so it can't be replayed
+    # for a second session even though it's short-lived, mirroring the
+    # password-reset token's own consume-on-use pattern.
+    jti = payload.get("jti")
+    exp = payload.get("exp")
+    if jti and exp:
+        revoke_jti(jti, int(exp - datetime.now(timezone.utc).timestamp()))
+
+    user.last_login_at = datetime.now(timezone.utc)
+    db.commit()
+
+    record_audit_event(
+        db, "login.success", tenant_id=user.tenant_id, actor_user_id=user.id,
+        actor_label=user.email, detail="mfa", ip_address=client_ip,
+    )
     return TokenResponse(access_token=_issue_session_token(user), tenant_id=user.tenant_id)
+
+
+@router.post("/mfa/enroll", response_model=MfaEnrollResponse)
+def enroll_mfa(
+    request: Request,
+    db: Session = Depends(get_db),
+    principal: dict = Depends(require_scope("users:manage")),
+):
+    """users:manage-gated -- the same scope invite_user/create_sensor_token
+    require, which only ADMIN holds (ROLE_SCOPES). MFA is scoped to admin
+    accounts specifically: they're the higher-value target, since they
+    can invite/deactivate other users.
+
+    Generates a new secret and stores it un-confirmed (mfa_enabled stays
+    False) -- POST /auth/mfa/confirm with a real code from the
+    authenticator app is what actually turns MFA on. Calling this again
+    before confirming just replaces the pending secret, so scanning the
+    wrong QR code isn't a dead end.
+    """
+    user = db.query(User).filter(User.id == principal.get("user_id")).first()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    secret = pyotp.random_base32()
+    user.totp_secret = secret
+    db.commit()
+
+    uri = pyotp.totp.TOTP(secret).provisioning_uri(name=user.email, issuer_name="T-SOC")
+    record_audit_event(
+        db, "mfa.enroll_started", tenant_id=user.tenant_id, actor_user_id=user.id,
+        actor_label=user.email, ip_address=get_remote_address(request),
+    )
+    return MfaEnrollResponse(secret=secret, otpauth_uri=uri)
+
+
+@router.post("/mfa/confirm", status_code=status.HTTP_204_NO_CONTENT)
+def confirm_mfa(
+    request: Request,
+    body: MfaConfirmBody,
+    db: Session = Depends(get_db),
+    principal: dict = Depends(require_scope("users:manage")),
+):
+    user = db.query(User).filter(User.id == principal.get("user_id")).first()
+    if not user or not user.totp_secret:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No pending MFA enrollment")
+    if not pyotp.totp.TOTP(user.totp_secret).verify(body.code, valid_window=1):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid code")
+
+    user.mfa_enabled = True
+    db.commit()
+    record_audit_event(
+        db, "mfa.enabled", tenant_id=user.tenant_id, actor_user_id=user.id,
+        actor_label=user.email, ip_address=get_remote_address(request),
+    )
+
+
+@router.post("/mfa/disable", status_code=status.HTTP_204_NO_CONTENT)
+def disable_mfa(
+    request: Request,
+    body: MfaDisableBody,
+    db: Session = Depends(get_db),
+    principal: dict = Depends(require_scope("users:manage")),
+):
+    """Requires a current TOTP code, not just the caller's session token
+    -- a stolen/hijacked session alone must not be enough to turn off
+    the very control that's supposed to matter most for an admin
+    account."""
+    user = db.query(User).filter(User.id == principal.get("user_id")).first()
+    if not user or not user.mfa_enabled:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="MFA is not enabled")
+    if not pyotp.totp.TOTP(user.totp_secret).verify(body.code, valid_window=1):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid code")
+
+    user.mfa_enabled = False
+    user.totp_secret = None
+    db.commit()
+    record_audit_event(
+        db, "mfa.disabled", tenant_id=user.tenant_id, actor_user_id=user.id,
+        actor_label=user.email, ip_address=get_remote_address(request),
+    )
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
@@ -241,7 +438,7 @@ def logout(body: LogoutRequest):
 
 
 @router.post("/password-reset/request", status_code=status.HTTP_202_ACCEPTED)
-def request_password_reset(body: PasswordResetRequestBody, db: Session = Depends(get_db)):
+def request_password_reset(request: Request, body: PasswordResetRequestBody, db: Session = Depends(get_db)):
     # Always the same response whether or not the email matched a real
     # account -- otherwise this endpoint becomes a user-enumeration oracle.
     user = db.query(User).filter(User.email == body.email, User.is_active.is_(True)).first()
@@ -254,11 +451,15 @@ def request_password_reset(body: PasswordResetRequestBody, db: Session = Depends
             expiry_minutes=_RESET_TOKEN_EXPIRY_MIN,
         )
         _deliver_email(user.email, "Reset your T-SOC password", f"https://app.tsoc.example/reset-password?token={token}")
+        record_audit_event(
+            db, "password_reset.requested", tenant_id=user.tenant_id, actor_user_id=user.id,
+            actor_label=user.email, ip_address=get_remote_address(request),
+        )
     return {"detail": "If that email exists, a reset link has been sent."}
 
 
 @router.post("/password-reset/confirm", status_code=status.HTTP_204_NO_CONTENT)
-def confirm_password_reset(body: PasswordResetConfirmBody, db: Session = Depends(get_db)):
+def confirm_password_reset(request: Request, body: PasswordResetConfirmBody, db: Session = Depends(get_db)):
     invalid_token = HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired reset token")
     try:
         payload = verify_token(body.token)
@@ -282,6 +483,7 @@ def confirm_password_reset(body: PasswordResetConfirmBody, db: Session = Depends
     # Accepting an invite via this same flow (see invite_user's comment)
     # activates the account; a no-op for an already-active user resetting
     # their own password.
+    was_pending_invite = not user.is_active
     user.is_active = True
     db.commit()
 
@@ -292,9 +494,16 @@ def confirm_password_reset(body: PasswordResetConfirmBody, db: Session = Depends
     if jti and exp:
         revoke_jti(jti, int(exp - datetime.now(timezone.utc).timestamp()))
 
+    record_audit_event(
+        db, "invite.accepted" if was_pending_invite else "password_reset.confirmed",
+        tenant_id=user.tenant_id, actor_user_id=user.id, actor_label=user.email,
+        ip_address=get_remote_address(request),
+    )
+
 
 @router.post("/tenants/{tenant_id}/users/invite", status_code=status.HTTP_201_CREATED)
 def invite_user(
+    request: Request,
     tenant_id: int,
     body: InviteRequest,
     db: Session = Depends(get_db),
@@ -318,6 +527,11 @@ def invite_user(
     db.add(user)
     db.commit()
     db.refresh(user)
+
+    record_audit_event(
+        db, "user.invited", tenant_id=tenant_id, actor_user_id=principal.get("user_id"),
+        target=body.email, detail=f"role={body.role}", ip_address=get_remote_address(request),
+    )
 
     token = create_token(
         scopes=[],

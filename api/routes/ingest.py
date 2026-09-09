@@ -20,8 +20,9 @@ from pydantic import BaseModel
 from sqlalchemy import bindparam, insert, update
 from sqlalchemy.orm import Session
 
+from api.audit import record_audit_event
 from api.database import get_db
-from api.deps import limiter, require_scope
+from api.deps import get_remote_address, limiter, require_scope
 from api.models import Alert, SensorToken
 from api.schemas import AlertPayload
 
@@ -146,6 +147,7 @@ class SensorTokenCreateRequest(BaseModel):
 
 @router.post("/tenants/{tenant_id}/sensor-tokens", status_code=status.HTTP_201_CREATED)
 def create_sensor_token(
+    request: Request,
     tenant_id: int,
     body: SensorTokenCreateRequest,
     db: Session = Depends(get_db),
@@ -162,6 +164,11 @@ def create_sensor_token(
     db.add(sensor)
     db.commit()
     db.refresh(sensor)
+
+    record_audit_event(
+        db, "sensor_token.created", tenant_id=tenant_id, actor_user_id=principal.get("user_id"),
+        target=body.name, ip_address=get_remote_address(request),
+    )
     # The only time the cleartext token is ever returned -- token_hash is
     # all that's stored, so a leaked database dump doesn't hand out live
     # ingest credentials the way storing the raw token would.

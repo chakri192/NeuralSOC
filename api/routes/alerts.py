@@ -5,14 +5,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.orm import Session
 
 from api import models
-from api.deps import get_authenticated_db, limiter, require_scope, scope_to_tenant
+from api.deps import get_authenticated_db, get_tenant_aware_key, limiter, require_scope, scope_to_tenant
 from api.schemas import AlertResponse
 
 router = APIRouter(prefix="/api/v1")
 
 
 @router.get("/alerts", response_model=List[AlertResponse])
-@limiter.limit("100/minute")
+@limiter.limit("100/minute", key_func=get_tenant_aware_key)
 def get_alerts(
     request: Request,
     cursor: int = Query(0, ge=0),
@@ -31,7 +31,7 @@ def get_alerts(
 
 
 @router.get("/alerts/{alert_id}", response_model=AlertResponse)
-@limiter.limit("100/minute")
+@limiter.limit("100/minute", key_func=get_tenant_aware_key)
 def get_alert_by_id(
     request: Request,
     alert_id: str,

@@ -5,7 +5,6 @@ Replaces the old 1_Overview.py (decorative charts) and 2_Incidents.py
 SOC tool this is modeled on (Splunk ES, Sentinel, Elastic Security) the
 queue *is* the app -- everything else is secondary.
 """
-import html
 import sys
 import os
 
@@ -17,9 +16,9 @@ import streamlit as st
 import shared.triage_store as triage_store
 from dashboard import session_data
 from dashboard.components.empty_states import render_broker_unavailable, render_no_alerts
-from dashboard.components.ui import kpi_card, kpi_row, relative_time, render_evidence_columns, severity_badge, status_badge
+from dashboard.components.ui import kpi_card, kpi_row, mono, relative_time, render_evidence_columns, severity_badge, status_badge
 from dashboard.theme import SEVERITY_ORDER, STATUS_LABELS
-from shared.formatters import format_timestamp
+from shared.formatters import escape_markdown, format_timestamp
 
 status = session_data.status()
 if not status["broker_healthy"]:
@@ -141,9 +140,10 @@ st.markdown("---")
 
 header_l, header_r = st.columns([4, 1])
 with header_l:
-    st.markdown(f"### {incident['threat_classes'][0] if incident['threat_classes'] else 'Unclassified Threat'}")
+    threat_headline = incident['threat_classes'][0] if incident['threat_classes'] else 'Unclassified Threat'
+    st.markdown(f"### {escape_markdown(threat_headline)}")
     st.markdown(
-        f'<span class="tsoc-mono">{html.escape(incident["incident_id"])}</span> &nbsp;·&nbsp; '
+        f'{mono(incident["incident_id"])} &nbsp;·&nbsp; '
         f'{severity_badge(incident["severity"])} &nbsp; {status_badge(current_triage["status"])}',
         unsafe_allow_html=True,
     )
@@ -156,12 +156,17 @@ kc1.metric("Risk Score (of 100)", f"{incident['risk_score']:.0f}")
 kc2.metric("First Seen", relative_time(incident["created_timestamp"]))
 kc3.metric("Signals", len(incident.get("related_alert_ids", [])))
 
-st.markdown(f'<span class="tsoc-mono">Affected: {html.escape(", ".join(incident["affected_entities"]))}</span>', unsafe_allow_html=True)
+st.markdown(mono(f'Affected: {", ".join(incident["affected_entities"])}'), unsafe_allow_html=True)
 
 tab_summary, tab_evidence, tab_attack, tab_actions = st.tabs(["Summary", "Evidence", "ATT&CK Mapping", "Analyst Actions"])
 
 with tab_summary:
-    st.markdown(incident["evidence_summary"])
+    # evidence_summary is server-synthesized (shared/data_access.py) but
+    # embeds the attacker-influenced source_ip verbatim inside its
+    # sentence -- escape_markdown before this plain (non-unsafe_allow_html)
+    # st.markdown() call so a crafted IP can't break out into a clickable
+    # link or a tracking-pixel image fetch the instant this tab opens.
+    st.markdown(escape_markdown(incident["evidence_summary"]))
 
 with tab_evidence:
     alerts = session_data.get_alerts()
@@ -172,8 +177,9 @@ with tab_evidence:
         st.info("Detailed signals have rotated out of the memory buffer.")
     else:
         for a in rel_alerts:
-            model_name = a.get("model_name") or "rule-based"
-            with st.expander(f"{format_timestamp(a['timestamp'])} · {a['threat_class']} ({model_name})"):
+            model_name = escape_markdown(a.get("model_name") or "rule-based")
+            threat = escape_markdown(a.get("threat_class", ""))
+            with st.expander(f"{format_timestamp(a['timestamp'])} · {threat} ({model_name})"):
                 render_evidence_columns(a.get("evidence", {}))
 
 with tab_attack:
@@ -193,7 +199,7 @@ with tab_actions:
         # this session's own JWT (st.session_state["access_token"]),
         # not a client-supplied string nothing used to verify.
         triage_store.set_status(st.session_state["access_token"], incident["incident_id"], new_status, note=note)
-        st.toast(f"{label}: {incident['incident_id']}", icon=":material/check_circle:")
+        st.toast(f"{label}: {escape_markdown(incident['incident_id'])}", icon=":material/check_circle:")
         st.rerun()
 
     if a1.button("Acknowledge", width="stretch"):

@@ -1,3 +1,33 @@
+# DEPLOYMENT TOPOLOGY -- this file bundles two different deployment
+# units that do NOT run in the same cluster in a real multi-tenant
+# rollout, even though they share one namespace/manifest set here:
+#
+#   1. Shared SaaS control plane: tsoc-api + tsoc-dashboard. One
+#      instance, serving every tenant's employees, in a cluster this
+#      product's operator runs centrally.
+#   2. Per-tenant ingestion pipeline: tsoc-stream-processor +
+#      tsoc-kafka-sink. This product's whole premise is unidirectional,
+#      on-prem network monitoring behind a data diode (see
+#      SECURITY.md's "Zero-Trust Ingestion & Data Diode Enforcement") --
+#      raw traffic never leaves a tenant's own premises. Each tenant
+#      therefore runs their OWN copy of this half of the pipeline, at
+#      their own site, authenticated to the shared control plane with
+#      their own TSOC_SENSOR_TOKEN (api/routes/ingest.py). Only
+#      processed alerts cross that boundary, over HTTPS, via
+#      api/kafka_sink.py's ingest-API client.
+#
+# What this means in practice: this manifest set, as a whole, is a
+# reference deployment for ONE tenant's on-prem pipeline PLUS the
+# central control plane in one cluster -- correct for local dev, a
+# demo, or a single self-hosted customer, but a real second tenant needs
+# their own tsoc-stream-processor/tsoc-kafka-sink applied at their own
+# site (their own TSOC_SENSOR_TOKEN, pointed at the shared tsoc-api via
+# INGEST_API_URL), not a second copy of this whole file in the same
+# cluster as the first tenant's pipeline. Splitting this file into a
+# control-plane manifest set and a per-tenant collector manifest set is
+# the natural next step once a second real tenant is being onboarded;
+# not done here since it's a packaging change with no functional
+# difference to a single-tenant deployment.
 apiVersion: v1
 kind: Namespace
 metadata:

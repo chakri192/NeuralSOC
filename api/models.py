@@ -53,22 +53,41 @@ class User(Base):
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     last_login_at = Column(DateTime(timezone=True), nullable=True)
+    # TOTP MFA (Phase 6 ops hardening, admin accounts only -- see
+    # api/routes/auth.py's mfa_* endpoints and ROLE_SCOPES's comment on
+    # why admin is the higher-value target). totp_secret is set (but
+    # mfa_enabled stays False) between /mfa/enroll and /mfa/confirm --
+    # a pending enrollment isn't live until the user proves they can
+    # actually generate a matching code. Stored as plain base32, the
+    # same way every mainstream TOTP implementation does: a TOTP secret
+    # is symmetric and must be read back in cleartext to compute the
+    # expected code, so encrypting it at rest only relocates the same
+    # key-management problem rather than solving it.
+    totp_secret = Column(String, nullable=True)
+    mfa_enabled = Column(Boolean, nullable=False, default=False)
 
     tenant = relationship("Tenant", back_populates="users")
 
 
 class Alert(Base):
+    """alert_id is unique per tenant, not globally: the UNIQUE constraint
+    below is (tenant_id, alert_id) together, enforced via __table_args__
+    rather than alert_id's own column definition. A bare global-unique
+    alert_id previously let one tenant's sensor silently reassign
+    another tenant's existing alert to itself by sending a colliding id
+    (fixed at the application layer in api/routes/ingest.py; this
+    composite constraint makes the same mistake unrepresentable at the
+    schema layer too)."""
+
     __tablename__ = "alerts"
+    __table_args__ = (UniqueConstraint("tenant_id", "alert_id", name="uq_alerts_tenant_alert_id"),)
 
     id = Column(Integer, primary_key=True, index=True)
-    # Nullable for now, deliberately: api/kafka_sink.py (the only writer)
-    # doesn't know about tenants yet -- that lands in the ingestion-isolation
-    # phase, which also tightens this to nullable=False once every writer
-    # is guaranteed to supply a real tenant_id. Until then, NULL means
-    # "ingested before tenant isolation existed" rather than a constraint
-    # violation that would break the pipeline today.
-    tenant_id = Column(Integer, ForeignKey("tenants.id", name="fk_alerts_tenant_id"), nullable=True, index=True)
-    alert_id = Column(String, unique=True, index=True, nullable=False)
+    # Every writer now goes through api/routes/ingest.py's
+    # bulk_upsert_alerts, which always stamps a real tenant_id before
+    # writing (the sensor token IS the tenant) -- not nullable.
+    tenant_id = Column(Integer, ForeignKey("tenants.id", name="fk_alerts_tenant_id"), nullable=False, index=True)
+    alert_id = Column(String, index=True, nullable=False)
     timestamp = Column(String, index=True, nullable=False)
     event_type = Column(String, nullable=False)
 
@@ -146,3 +165,29 @@ class SensorToken(Base):
     last_used_at = Column(DateTime(timezone=True), nullable=True)
 
     tenant = relationship("Tenant")
+
+
+class AuditLog(Base):
+    """Who did what, when, per tenant -- api/audit.py's record_audit_event()
+    is the only writer. tenant_id and actor_user_id are both nullable:
+    a failed login attempt for an email that doesn't match any user has
+    no tenant or user to attribute yet, and actor_label is captured
+    alongside actor_user_id (denormalized, not just a join) so the
+    record still reads sensibly if that user is later deleted. Never
+    holds secrets -- detail is short, human-readable context (a triage
+    status, an invited role), not request bodies or tokens."""
+
+    __tablename__ = "audit_log"
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
+    actor_user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    actor_label = Column(String, nullable=True)
+    action = Column(String, nullable=False, index=True)
+    target = Column(String, nullable=True)
+    detail = Column(Text, nullable=True)
+    ip_address = Column(String, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
+
+    tenant = relationship("Tenant")
+    actor = relationship("User")

@@ -74,6 +74,29 @@ def test_login_accepts_correct_credentials():
     asyncio.run(_run())
 
 
+def test_login_shows_a_clear_message_for_an_mfa_enabled_account_instead_of_crashing():
+    """api/routes/auth.py's login() returns {mfa_required: true, mfa_token:
+    ...} with no access_token once MFA is enabled -- this console has no
+    code-entry screen to complete that challenge with yet (unlike
+    dashboard/app.py). Regression guard for the KeyError that a bare
+    resp.json()["access_token"] would have raised here."""
+    mfa_resp = MagicMock()
+    mfa_resp.status_code = 200
+    mfa_resp.json.return_value = {"mfa_required": True, "mfa_token": "short-lived-token"}
+
+    async def _run():
+        with patch("terminal.tsoc_console.requests.post", return_value=mfa_resp):
+            app = console.TSOCConsole()
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await _login(pilot)
+                assert isinstance(app.screen, console.LoginScreen)
+                error = app.screen.query_one("#login-error")
+                assert "MFA" in str(error.render())
+
+    asyncio.run(_run())
+
+
 async def _boot_to_main_screen(pilot, alerts=_SAMPLE_ALERTS, statuses=None):
     with patch("terminal.tsoc_console.requests.post", return_value=_login_response()):
         with patch("terminal.tsoc_console.fetch_alerts", return_value=alerts), \

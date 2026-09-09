@@ -6,6 +6,25 @@ import dateutil.parser
 
 _MARKDOWN_SPECIAL_CHARS = re.compile(r'([\\`*_{}\[\]()#+\-.!|>~])')
 
+# api/schemas.py's AlertPayload accepts every one of these as a bare,
+# unvalidated `str` -- anyone who can cause traffic on a monitored
+# network (or hold a valid per-tenant sensor token) controls their
+# content. Any UI surface rendering one of these fields through a
+# markup-interpreting sink (Streamlit's unsafe_allow_html, Rich console
+# markup) must escape it first -- see escape_markdown() below for plain
+# Streamlit markdown, dashboard/components/ui.py's mono()/safe_html()
+# for unsafe_allow_html=True, and terminal/tsoc_console.py's use of
+# rich.markup.escape(). This list exists so a future call site can be
+# checked against it instead of guessing which fields are "probably
+# fine" -- two independent stored-injection bugs (one in the web
+# dashboard, one in the terminal console) were exactly this guess going
+# wrong.
+ATTACKER_INFLUENCED_ALERT_FIELDS = frozenset({
+    "source_ip", "destination_ip", "threat_class", "severity",
+    "model_name", "model_version", "mitre_tactic", "mitre_technique",
+    "flow_id", "span_id", "trace_id", "event_type", "schema_version",
+})
+
 
 def escape_markdown(value) -> str:
     """Escapes CommonMark/Streamlit markdown metacharacters in a value

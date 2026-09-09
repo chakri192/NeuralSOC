@@ -436,6 +436,43 @@ def scope_to_tenant(query, principal: dict, model):
     return query.filter(model.tenant_id == tenant_id)
 
 
+def get_tenant_aware_key(request: Request) -> str:
+    """Rate-limit key for tenant-authenticated routes (alerts/stats/
+    triage): the caller's tenant_id when their token decodes to one,
+    falling back to get_remote_address() otherwise. Passed as
+    @limiter.limit(..., key_func=get_tenant_aware_key) on those routes
+    specifically -- not a global change to `limiter`'s own key_func,
+    which stays IP-based for /auth/* (identity isn't established yet at
+    login) and /ingest/alerts (a sensor token isn't a JWT; resolving its
+    tenant_id here would mean a DB lookup on every single rate-limit
+    check, which the ingest endpoint's per-tenant composite-key data
+    isolation already makes unnecessary for this specific concern).
+
+    Without this, IP-based limiting alone lets one noisy or abusive
+    tenant's employees exhaust a rate-limit budget shared with every
+    other tenant whose employees happen to request from the same IP
+    range (a corporate NAT gateway, a shared VPN egress) -- tenant_id is
+    the boundary that actually matters here, not the network address.
+
+    Only verifies the token's signature/expiry to read its tenant_id
+    claim -- does not check the revocation denylist (is_token_revoked),
+    since a revoked-but-still-decodable token computing a rate-limit
+    bucket key grants no access on its own; the resulting request is
+    still rejected by the route's own require_scope/verify_auth
+    dependency exactly as before.
+    """
+    token = _extract_token(request, None)
+    if token:
+        try:
+            payload = verify_token(token)
+            tenant_id = payload.get("tenant_id")
+            if tenant_id is not None:
+                return f"tenant:{tenant_id}"
+        except (JWTError, RuntimeError):
+            pass
+    return get_remote_address(request)
+
+
 def get_authenticated_db(
     _principal: dict = Depends(verify_auth)
 ) -> Session:

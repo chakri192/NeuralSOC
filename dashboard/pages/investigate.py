@@ -1,4 +1,3 @@
-import html
 import sys
 import os
 
@@ -10,9 +9,9 @@ import streamlit as st
 
 from dashboard import session_data
 from dashboard.components.empty_states import render_broker_unavailable
-from dashboard.components.ui import relative_time, render_evidence_columns, severity_badge
+from dashboard.components.ui import mono, relative_time, render_evidence_columns, safe_html, severity_badge
 from dashboard.theme import plotly_template
-from shared.formatters import format_timestamp
+from shared.formatters import escape_markdown, format_timestamp
 
 st.markdown("## Investigate")
 st.caption("Search recent telemetry (IP, domain, alert, or flow ID) within the bounded 1000-event memory buffer.")
@@ -67,8 +66,8 @@ if related_incidents:
         with row_l:
             threat = inc["threat_classes"][0] if inc["threat_classes"] else "Unclassified"
             st.markdown(
-                f'{severity_badge(inc["severity"])} <span class="tsoc-mono">{html.escape(inc["incident_id"])}</span> '
-                f'· {html.escape(threat)}',
+                f'{severity_badge(inc["severity"])} {mono(inc["incident_id"])} '
+                f'· {safe_html(threat)}',
                 unsafe_allow_html=True,
             )
         with row_r:
@@ -88,14 +87,14 @@ st.plotly_chart(fig)
 
 st.markdown('<div class="tsoc-panel__title">Evidence Details</div>', unsafe_allow_html=True)
 for _idx, row in filtered.iterrows():
-    model_name = row.get("model_name") or "rule-based"
-    with st.expander(f"{format_timestamp(row['timestamp'])} · {row['threat_class']} · {model_name}"):
+    model_name = escape_markdown(row.get("model_name") or "rule-based")
+    threat = escape_markdown(row.get("threat_class", ""))
+    with st.expander(f"{format_timestamp(row['timestamp'])} · {threat} · {model_name}"):
         header_l, header_r = st.columns([3, 1])
         with header_l:
+            ip_pair = f'{row.get("source_ip", "?")} → {row.get("destination_ip", "?")}'
             st.markdown(
-                f'{severity_badge(row.get("severity"))} '
-                f'<span class="tsoc-mono">{html.escape(str(row.get("source_ip", "?")))} → '
-                f'{html.escape(str(row.get("destination_ip", "?")))}</span>',
+                f'{severity_badge(row.get("severity"))} {mono(ip_pair)}',
                 unsafe_allow_html=True,
             )
         with header_r:
@@ -103,5 +102,8 @@ for _idx, row in filtered.iterrows():
             if confidence is not None:
                 st.caption(f"Confidence: {confidence:.2f}")
         if row.get("mitre_tactic") or row.get("mitre_technique"):
-            st.caption(f"MITRE: {row.get('mitre_tactic', '—')} ({row.get('mitre_technique', '—')})")
+            st.caption(
+                f"MITRE: {escape_markdown(row.get('mitre_tactic', '—'))} "
+                f"({escape_markdown(row.get('mitre_technique', '—'))})"
+            )
         render_evidence_columns(row.get("evidence", {}))

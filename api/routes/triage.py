@@ -6,12 +6,13 @@ read/write is scoped to the caller's own tenant via scope_to_tenant().
 """
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from api.audit import record_audit_event
 from api.database import get_db
-from api.deps import require_scope, scope_to_tenant
+from api.deps import get_remote_address, get_tenant_aware_key, limiter, require_scope, scope_to_tenant
 from api.models import TRIAGE_OPEN, VALID_TRIAGE_STATUSES, IncidentTriage
 
 router = APIRouter(prefix="/api/v1/triage", tags=["triage"])
@@ -34,7 +35,10 @@ def _serialize(row: IncidentTriage) -> dict:
 
 
 @router.get("")
-def get_all_statuses(db: Session = Depends(get_db), principal: dict = Depends(require_scope("alerts:read"))):
+@limiter.limit("100/minute", key_func=get_tenant_aware_key)
+def get_all_statuses(
+    request: Request, db: Session = Depends(get_db), principal: dict = Depends(require_scope("alerts:read"))
+):
     """Bulk read for rendering a whole incident queue without one query
     per row -- same shape shared/triage_store.py's own get_all_statuses()
     returned, so dashboard/terminal call sites barely change."""
@@ -43,7 +47,9 @@ def get_all_statuses(db: Session = Depends(get_db), principal: dict = Depends(re
 
 
 @router.get("/{incident_id}")
+@limiter.limit("100/minute", key_func=get_tenant_aware_key)
 def get_status(
+    request: Request,
     incident_id: str,
     db: Session = Depends(get_db),
     principal: dict = Depends(require_scope("alerts:read")),
@@ -54,7 +60,9 @@ def get_status(
 
 
 @router.post("/{incident_id}")
+@limiter.limit("60/minute", key_func=get_tenant_aware_key)
 def set_status(
+    request: Request,
     incident_id: str,
     body: TriageUpdateRequest,
     db: Session = Depends(get_db),
@@ -89,4 +97,9 @@ def set_status(
         db.add(row)
     db.commit()
     db.refresh(row)
+
+    record_audit_event(
+        db, "triage.set_status", tenant_id=tenant_id, actor_user_id=user_id,
+        target=incident_id, detail=body.status, ip_address=get_remote_address(request),
+    )
     return _serialize(row)

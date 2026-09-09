@@ -57,6 +57,85 @@ pages = {
 nav = st.navigation(pages, position="sidebar" if _is_authenticated else "hidden")
 
 
+def _bind_enter_to_submit() -> None:
+    # Belt-and-suspenders for Enter-to-submit: Streamlit's own form
+    # handling normally does this, but it's shown to silently no-op
+    # in at least one real browser/autofill combination (Enter does
+    # nothing, no error, nothing in the console -- reported and
+    # reproduced). st.markdown(unsafe_allow_html=True) never executes
+    # injected <script> tags (WHATWG spec: scripts inserted via
+    # innerHTML don't run); components.html renders in a real iframe
+    # that does. window.parent.document reaches into the actual page
+    # since this component iframe is same-origin.
+    components.html(
+        """
+        <script>
+        (function () {
+            const doc = window.parent.document;
+            function bind() {
+                const inputs = doc.querySelectorAll('[data-testid="stTextInput"] input');
+                const btn = doc.querySelector('[data-testid="stBaseButton-primaryFormSubmit"]');
+                if (!btn || inputs.length === 0) { setTimeout(bind, 200); return; }
+                inputs.forEach(function (input) {
+                    if (input.dataset.tsocEnterBound) return;
+                    input.dataset.tsocEnterBound = "1";
+                    input.addEventListener('keydown', function (e) {
+                        if (e.key === 'Enter') {
+                            e.preventDefault();
+                            btn.click();
+                        }
+                    });
+                });
+            }
+            bind();
+        })();
+        </script>
+        """,
+        height=0,
+    )
+
+
+def _mfa_challenge_form(mid) -> None:
+    """Second step of login for an admin with MFA enabled -- password
+    already checked out (api/routes/auth.py's login() only returns
+    mfa_required once it has), this just needs a current code from the
+    authenticator app."""
+    with mid:
+        st.markdown(
+            '<div class="tsoc-login-card">'
+            f'<div class="tsoc-login-card__title">{svg("shield", 26)} T-SOC</div>'
+            '<div class="tsoc-login-card__subtitle">Enter your authenticator code</div>'
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        with st.form("mfa_form"):
+            code = st.text_input("6-digit code", max_chars=6, autocomplete="one-time-code")
+            submitted = st.form_submit_button("Verify", width="stretch", type="primary")
+        _bind_enter_to_submit()
+        if st.button("← Back to login", width="stretch"):
+            st.session_state.pop("_pending_mfa_token", None)
+            st.session_state.pop("_pending_mfa_email", None)
+            st.rerun()
+
+        if submitted:
+            try:
+                resp = requests.post(
+                    f"{_API_URL}/auth/mfa/verify",
+                    json={"mfa_token": st.session_state["_pending_mfa_token"], "code": code.strip()},
+                    timeout=5,
+                )
+            except requests.RequestException:
+                st.error("Could not reach the T-SOC API. Try again shortly.")
+            else:
+                if resp.status_code == 200:
+                    st.session_state["access_token"] = resp.json()["access_token"]
+                    st.session_state["analyst_name"] = st.session_state.pop("_pending_mfa_email", "")
+                    st.session_state.pop("_pending_mfa_token", None)
+                    st.rerun()
+                else:
+                    st.error("Incorrect or expired code.")
+
+
 def _authenticated() -> bool:
     """Mandatory app-level login gate: a real per-employee account
     (api/routes/auth.py's /auth/login), not a single password shared by
@@ -67,6 +146,11 @@ def _authenticated() -> bool:
         return True
 
     _, mid, _ = st.columns([1, 1.2, 1])
+
+    if st.session_state.get("_pending_mfa_token"):
+        _mfa_challenge_form(mid)
+        return False
+
     with mid:
         st.markdown(
             '<div class="tsoc-login-card">'
@@ -86,42 +170,7 @@ def _authenticated() -> bool:
             # password fields anyway.
             entered = st.text_input("Password", type="password", autocomplete="current-password")
             submitted = st.form_submit_button("Sign in", width="stretch", type="primary")
-
-        # Belt-and-suspenders for Enter-to-submit: Streamlit's own form
-        # handling normally does this, but it's shown to silently no-op
-        # in at least one real browser/autofill combination (Enter does
-        # nothing, no error, nothing in the console -- reported and
-        # reproduced). st.markdown(unsafe_allow_html=True) never executes
-        # injected <script> tags (WHATWG spec: scripts inserted via
-        # innerHTML don't run); components.html renders in a real iframe
-        # that does. window.parent.document reaches into the actual page
-        # since this component iframe is same-origin.
-        components.html(
-            """
-            <script>
-            (function () {
-                const doc = window.parent.document;
-                function bind() {
-                    const inputs = doc.querySelectorAll('[data-testid="stTextInput"] input');
-                    const btn = doc.querySelector('[data-testid="stBaseButton-primaryFormSubmit"]');
-                    if (!btn || inputs.length === 0) { setTimeout(bind, 200); return; }
-                    inputs.forEach(function (input) {
-                        if (input.dataset.tsocEnterBound) return;
-                        input.dataset.tsocEnterBound = "1";
-                        input.addEventListener('keydown', function (e) {
-                            if (e.key === 'Enter') {
-                                e.preventDefault();
-                                btn.click();
-                            }
-                        });
-                    });
-                }
-                bind();
-            })();
-            </script>
-            """,
-            height=0,
-        )
+        _bind_enter_to_submit()
 
         if submitted:
             try:
@@ -134,9 +183,15 @@ def _authenticated() -> bool:
                 st.error("Could not reach the T-SOC API. Try again shortly.")
             else:
                 if resp.status_code == 200:
-                    st.session_state["access_token"] = resp.json()["access_token"]
-                    st.session_state["analyst_name"] = email.strip()
-                    st.rerun()
+                    body = resp.json()
+                    if body.get("mfa_required"):
+                        st.session_state["_pending_mfa_token"] = body["mfa_token"]
+                        st.session_state["_pending_mfa_email"] = email.strip()
+                        st.rerun()
+                    else:
+                        st.session_state["access_token"] = body["access_token"]
+                        st.session_state["analyst_name"] = email.strip()
+                        st.rerun()
                 elif resp.status_code == 429:
                     st.error("Too many failed attempts. Try again later.")
                 else:

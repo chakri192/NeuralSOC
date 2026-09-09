@@ -83,6 +83,26 @@ def kpi_row(cards: list) -> None:
     st.markdown(f'<div class="tsoc-kpi-row">{"".join(cards)}</div>', unsafe_allow_html=True)
 
 
+def mono(value) -> str:
+    """Escaped, monospace-styled inline HTML fragment -- the one way any
+    page should embed a single attacker-influenced alert field (an
+    incident ID, an IP) inside markup rendered with
+    unsafe_allow_html=True. The escaping happens inside this function,
+    not at each call site, so a future page can't render one of these
+    fields unescaped just by forgetting an html.escape() call -- see
+    SECURITY.md's stored-XSS finding this replaced hand-rolled
+    f'<span class="tsoc-mono">{html.escape(...)}</span>' call sites
+    with."""
+    return f'<span class="tsoc-mono">{html.escape(str(value))}</span>'
+
+
+def safe_html(value) -> str:
+    """HTML-escaped text for embedding inside unsafe_allow_html=True
+    markup outside of a mono() span (e.g. a threat class name next to a
+    severity badge). Same rationale as mono() above."""
+    return html.escape(str(value))
+
+
 def _kv_rows_html(pairs: dict) -> str:
     rows = "".join(
         f'<div class="tsoc-kv__row"><span class="tsoc-kv__key">{html.escape(str(k))}</span>'

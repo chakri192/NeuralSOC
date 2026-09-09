@@ -1,8 +1,11 @@
 """api/models.py: the tenants/users foundation for the multi-tenant
-pivot. Alert.tenant_id is deliberately nullable for now (api/kafka_sink.py,
-the only writer, doesn't supply one yet -- see the model's own comment),
-while User.tenant_id is not, since every user is created by this codebase
-itself and always belongs to exactly one tenant from the start.
+pivot. Alert.tenant_id and User.tenant_id are both required -- every
+writer of either table (api/routes/ingest.py's bulk_upsert_alerts;
+api/routes/auth.py's signup/invite) always supplies a real tenant_id.
+Alert.alert_id is unique per tenant (a composite (tenant_id, alert_id)
+constraint), not globally -- see that column's own comment in
+api/models.py for the cross-tenant hijack bug this schema-level
+constraint backstops.
 """
 import subprocess
 import sys
@@ -96,23 +99,18 @@ def test_user_email_is_unique_across_tenants():
         db.close()
 
 
-def test_alert_tenant_id_is_nullable_for_now():
-    """Regression guard for the deliberate compatibility gap: an alert
-    inserted with no tenant_id (api/kafka_sink.py's current behavior)
-    must not be rejected by the schema -- that lands in a later phase
-    once every writer supplies one."""
+def test_alert_requires_a_tenant():
+    """Every writer of this table (api/routes/ingest.py's
+    bulk_upsert_alerts) always stamps a real tenant_id -- there is no
+    code path left that legitimately produces a NULL one, so the schema
+    now rejects it outright, same as User."""
     db = SessionLocal()
     try:
-        alert = Alert(
-            alert_id="ALERT-no-tenant",
-            timestamp="2026-09-07T00:00:00Z",
-            event_type="conn",
-        )
-        db.add(alert)
-        db.commit()
-        db.refresh(alert)
-        assert alert.tenant_id is None
+        db.add(Alert(alert_id="ALERT-no-tenant", timestamp="2026-09-07T00:00:00Z", event_type="conn"))
+        with pytest.raises(IntegrityError):
+            db.commit()
     finally:
+        db.rollback()
         db.close()
 
 
@@ -131,6 +129,37 @@ def test_alert_can_be_scoped_to_a_tenant():
         db.refresh(alert)
         assert alert.tenant.slug == "acme"
     finally:
+        db.close()
+
+
+def test_alert_id_is_unique_per_tenant_not_globally():
+    """Two different tenants may each have an alert with the same
+    alert_id -- the composite (tenant_id, alert_id) constraint scopes
+    uniqueness to one tenant, not the whole table."""
+    db = SessionLocal()
+    try:
+        tenant_a = _make_tenant(db, slug="acme")
+        tenant_b = _make_tenant(db, slug="globex")
+        db.add(Alert(tenant_id=tenant_a.id, alert_id="ALERT-shared", timestamp="2026-09-07T00:00:00Z", event_type="conn"))
+        db.add(Alert(tenant_id=tenant_b.id, alert_id="ALERT-shared", timestamp="2026-09-07T00:00:00Z", event_type="conn"))
+        db.commit()  # must not raise -- different tenants, same alert_id
+        rows = db.query(Alert).filter(Alert.alert_id == "ALERT-shared").all()
+        assert {r.tenant_id for r in rows} == {tenant_a.id, tenant_b.id}
+    finally:
+        db.close()
+
+
+def test_alert_id_still_unique_within_the_same_tenant():
+    db = SessionLocal()
+    try:
+        tenant = _make_tenant(db)
+        db.add(Alert(tenant_id=tenant.id, alert_id="ALERT-dupe", timestamp="2026-09-07T00:00:00Z", event_type="conn"))
+        db.commit()
+        db.add(Alert(tenant_id=tenant.id, alert_id="ALERT-dupe", timestamp="2026-09-07T00:00:01Z", event_type="conn"))
+        with pytest.raises(IntegrityError):
+            db.commit()
+    finally:
+        db.rollback()
         db.close()
 
 

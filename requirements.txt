@@ -76,6 +76,9 @@ alembic==1.19.2
 # as plaintext via secrets.compare_digest, which is fine for a static
 # shared secret but not how a per-user password should ever be stored).
 argon2-cffi==25.1.0
+# TOTP MFA for admin accounts (Phase 6 ops hardening). RFC 6238
+# implementation; no known CVEs at this pin per pip-audit.
+pyotp==2.10.0
 
 redis==5.0.3
 python-json-logger==2.0.7
