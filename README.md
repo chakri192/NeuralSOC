@@ -92,6 +92,7 @@ sequenceDiagram
 - `POST /auth/signup` is the only account-creation path that needs no existing account — it creates a brand-new tenant plus its first admin. Every account after that comes from an admin inviting a teammate (`POST /auth/tenants/{id}/users/invite`).
 - `scripts/bootstrap_tenant.py` wraps signup + minting a sensor token into one CLI call — the fastest way to stand up a tenant for local dev or a demo.
 - Three roles, each mapped to a fixed scope list (`api/models.py`'s `ROLE_SCOPES`): **analyst** and **lead** can read alerts/stats and write triage; **admin** can additionally invite/deactivate teammates, mint sensor tokens, enable MFA, and read the audit log.
+- Every one of those admin actions has a real UI: `dashboard/pages/admin.py` ("Team & Access" in the sidebar, admin-only) — invite/deactivate teammates, mint and view sensor tokens, enroll/disable your own MFA, and browse the audit log. No SSH or CLI access required to run this day to day.
 
 **Credentials, and what each one can do:**
 
@@ -105,7 +106,7 @@ sequenceDiagram
 
 **Hardening once real accounts exist:**
 
-- **Optional TOTP MFA for admin accounts** — `scripts/enroll_admin_mfa.py` walks through enroll → scan the QR / add the secret → confirm with a live code. The dashboard's login form handles the resulting two-step challenge; the terminal console shows a clear "use the dashboard instead" message rather than a confusing failure, since it has no code-entry screen yet.
+- **Optional TOTP MFA for admin accounts** — enroll from the dashboard's Admin page or via `scripts/enroll_admin_mfa.py`; both walk through enroll → scan the QR / add the secret → confirm with a live code. The dashboard's login form handles the resulting two-step challenge; the terminal console shows a clear "use the dashboard instead" message rather than a confusing failure, since it has no code-entry screen yet.
 - **Audit log** (`GET /api/v1/audit`, admin-only) — every login, invite, sensor-token creation, and triage change, per tenant, with actor, target, and timestamp.
 - **Per-tenant rate limiting** — the alerts/stats/triage routes key their rate limit on `tenant_id`, not source IP, so one noisy tenant's employees can't exhaust a budget shared with everyone else on the same IP range.
 - **Login protection** — 5 failed attempts locks an account out for 15 minutes; logout revokes that specific token via a Redis-backed denylist rather than waiting out its natural expiry.
@@ -260,8 +261,10 @@ Let it run for one or two cycles and stop it (`Ctrl+C`) once validation accuracy
 ## Security
 
 - JWT auth (PyJWT, HS256) with scoped, tenant-aware tokens, plus a static service key for internal callers.
-- Optional TOTP MFA for admin accounts (`scripts/enroll_admin_mfa.py` to enroll — see [SECURITY.md](SECURITY.md) for what's wired into each client).
-- An audit log of every login, invite, sensor-token creation, and triage change, per tenant (`GET /api/v1/audit`, admin-only).
+- Optional TOTP MFA for admin accounts, enrolled from the dashboard's Admin page or `scripts/enroll_admin_mfa.py` (see [SECURITY.md](SECURITY.md) for what's wired into each client).
+- Invite/deactivate teammates and mint sensor tokens from the dashboard's Admin page — no CLI or server access needed day to day.
+- Real transactional email for invite/password-reset links via any SMTP-speaking provider (`api/email.py`) — falls back to logging the link when unconfigured, so local dev never needs real credentials.
+- An audit log of every login, invite, sensor-token creation, and triage change, per tenant (`GET /api/v1/audit`, admin-only, also browsable from the dashboard).
 - Rate limiting (slowapi) backed by Redis, keyed per-tenant on the routes where that matters (alerts/stats/triage), per-IP elsewhere.
 - Kafka payloads validated against a strict schema before touching the database — no mass-assignment path from an untrusted message to the ORM.
 - Model files are integrity-checked (SHA-256) before load and keylessly signed/verified via Sigstore in CI.

@@ -6,7 +6,9 @@ inference.correlation) so lockout/revocation exercise real logic
 instead of the fail-open fallback that kicks in when Redis is
 genuinely unreachable.
 """
+import os
 import urllib.parse
+from unittest.mock import patch
 
 import fakeredis
 import pytest
@@ -99,6 +101,40 @@ def _create_user(email="analyst@example.com", password="correct-horse-battery", 
 
 def _extract_token(link: str) -> str:
     return urllib.parse.parse_qs(urllib.parse.urlparse(link).query)["token"][0]
+
+
+def _login(client, email, password="correct-horse-battery"):
+    return client.post("/api/v1/auth/login", json={"email": email, "password": password})
+
+
+class TestDeliverEmail:
+    """_deliver_email() itself, not through a full invite/reset route --
+    the fallback-to-stub and swallow-a-real-failure behavior that lets
+    every other test in this file keep mocking it wholesale via the
+    sent_emails fixture without needing real SMTP configured."""
+
+    def test_falls_back_to_logging_when_smtp_is_not_configured(self, monkeypatch, caplog):
+        monkeypatch.setattr("api.email.SMTP_HOST", None)
+        with patch("api.routes.auth.send_email") as mock_send:
+            auth_routes._deliver_email("a@x.com", "subject", "https://example.com/link")
+        mock_send.assert_not_called()
+        assert "STUB EMAIL" in caplog.text
+
+    def test_sends_for_real_when_smtp_is_configured(self, monkeypatch):
+        monkeypatch.setattr("api.email.SMTP_HOST", "smtp.example.com")
+        with patch("api.routes.auth.send_email") as mock_send:
+            auth_routes._deliver_email("a@x.com", "subject", "https://example.com/link")
+        mock_send.assert_called_once()
+        args = mock_send.call_args[0]
+        assert args[0] == "a@x.com"
+        assert args[1] == "subject"
+        assert "https://example.com/link" in args[2]
+
+    def test_a_real_send_failure_is_logged_and_swallowed_not_raised(self, monkeypatch, caplog):
+        monkeypatch.setattr("api.email.SMTP_HOST", "smtp.example.com")
+        with patch("api.routes.auth.send_email", side_effect=ConnectionRefusedError("no route to host")):
+            auth_routes._deliver_email("a@x.com", "subject", "https://example.com/link")  # must not raise
+        assert "Failed to send email" in caplog.text
 
 
 class TestSignup:
@@ -406,3 +442,115 @@ class TestInviteUser:
                 headers={"Authorization": f"Bearer {token}"},
             )
         assert r.status_code == 409
+
+
+class TestGetMe:
+    def test_returns_the_callers_own_profile(self):
+        _create_user(email="admin@example.com", role=ADMIN)
+        with TestClient(app) as client:
+            token = _login(client, "admin@example.com").json()["access_token"]
+            r = client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["email"] == "admin@example.com"
+        assert body["role"] == ADMIN
+        assert body["mfa_enabled"] is False
+        assert body["is_active"] is True
+
+    def test_the_static_service_key_has_no_profile_to_describe(self):
+        with TestClient(app) as client:
+            r = client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {os.environ['TSOC_API_KEY']}"})
+        assert r.status_code == 400
+
+
+class TestListUsers:
+    def test_requires_users_manage_scope(self):
+        _create_user(email="analyst@example.com", role=ANALYST)
+        with TestClient(app) as client:
+            token = _login(client, "analyst@example.com").json()["access_token"]
+            r = client.get("/api/v1/auth/tenants/1/users", headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 403
+
+    def test_lists_only_the_callers_own_tenant(self):
+        _, tenant_a = _create_user(email="admin@a.example.com", role=ADMIN, tenant_slug="tenant-a")
+        _create_user(email="teammate@a.example.com", role=ANALYST, tenant_slug="tenant-a")
+        _create_user(email="admin@b.example.com", role=ADMIN, tenant_slug="tenant-b")
+
+        with TestClient(app) as client:
+            token = _login(client, "admin@a.example.com").json()["access_token"]
+            r = client.get(f"/api/v1/auth/tenants/{tenant_a}/users", headers={"Authorization": f"Bearer {token}"})
+
+        assert r.status_code == 200
+        emails = {row["email"] for row in r.json()}
+        assert emails == {"admin@a.example.com", "teammate@a.example.com"}
+
+    def test_admin_cannot_list_a_different_tenants_users(self):
+        _, tenant_a = _create_user(email="admin@a.example.com", role=ADMIN, tenant_slug="tenant-a")
+        _, tenant_b = _create_user(email="admin@b.example.com", role=ADMIN, tenant_slug="tenant-b")
+        with TestClient(app) as client:
+            token = _login(client, "admin@a.example.com").json()["access_token"]
+            r = client.get(f"/api/v1/auth/tenants/{tenant_b}/users", headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 403
+
+
+class TestDeactivateUser:
+    def test_requires_users_manage_scope(self):
+        analyst_id, tenant_id = _create_user(email="analyst@example.com", role=ANALYST)
+        with TestClient(app) as client:
+            token = _login(client, "analyst@example.com").json()["access_token"]
+            r = client.post(
+                f"/api/v1/auth/tenants/{tenant_id}/users/{analyst_id}/deactivate",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        assert r.status_code == 403
+
+    def test_admin_can_deactivate_a_teammate(self):
+        admin_id, tenant_id = _create_user(email="admin@example.com", role=ADMIN)
+        teammate_id, _ = _create_user(email="teammate@example.com", role=ANALYST, tenant_slug="acme")
+        with TestClient(app) as client:
+            token = _login(client, "admin@example.com").json()["access_token"]
+            r = client.post(
+                f"/api/v1/auth/tenants/{tenant_id}/users/{teammate_id}/deactivate",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        assert r.status_code == 204
+
+        db = SessionLocal()
+        try:
+            teammate = db.query(User).filter(User.id == teammate_id).first()
+            assert teammate.is_active is False
+        finally:
+            db.close()
+
+    def test_a_deactivated_user_cannot_log_in_again(self):
+        admin_id, tenant_id = _create_user(email="admin@example.com", role=ADMIN)
+        teammate_id, _ = _create_user(email="teammate@example.com", role=ANALYST, tenant_slug="acme")
+        with TestClient(app) as client:
+            token = _login(client, "admin@example.com").json()["access_token"]
+            client.post(
+                f"/api/v1/auth/tenants/{tenant_id}/users/{teammate_id}/deactivate",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            blocked = _login(client, "teammate@example.com")
+        assert blocked.status_code == 401
+
+    def test_admin_cannot_deactivate_their_own_account(self):
+        admin_id, tenant_id = _create_user(email="admin@example.com", role=ADMIN)
+        with TestClient(app) as client:
+            token = _login(client, "admin@example.com").json()["access_token"]
+            r = client.post(
+                f"/api/v1/auth/tenants/{tenant_id}/users/{admin_id}/deactivate",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        assert r.status_code == 400
+
+    def test_admin_cannot_deactivate_a_user_in_a_different_tenant(self):
+        admin_id, tenant_a = _create_user(email="admin@a.example.com", role=ADMIN, tenant_slug="tenant-a")
+        other_id, tenant_b = _create_user(email="user@b.example.com", role=ANALYST, tenant_slug="tenant-b")
+        with TestClient(app) as client:
+            token = _login(client, "admin@a.example.com").json()["access_token"]
+            r = client.post(
+                f"/api/v1/auth/tenants/{tenant_b}/users/{other_id}/deactivate",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        assert r.status_code == 403

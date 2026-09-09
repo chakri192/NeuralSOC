@@ -399,16 +399,69 @@ Three pieces of Phase 6 ops hardening, all shipped:
   can't turn off the control that matters most for that account.
 
   [dashboard/app.py](dashboard/app.py)'s login form handles the
-  challenge (a second "enter your code" step). No enrollment UI exists
-  in either client yet -- `dashboard/pages/admin.py` (a general
-  security-settings panel) was never built, so `scripts/enroll_admin_mfa.py`
-  is the only way to turn MFA on today, mirroring
-  `scripts/bootstrap_tenant.py`'s role for tenant creation.
+  challenge (a second "enter your code" step), and
+  [dashboard/pages/admin.py](dashboard/pages/admin.py) (admin-only, see
+  below) has a real enroll/confirm/disable UI --
+  `scripts/enroll_admin_mfa.py` still works too, for anyone who prefers
+  a CLI or needs to enroll before the dashboard is reachable.
   [terminal/tsoc_console.py](terminal/tsoc_console.py) has no
   code-entry screen for the challenge at all -- an MFA-enabled admin
   logging in there gets a clear "sign in via the web dashboard instead"
   message rather than a crash, but can't actually complete login from
   the terminal.
+
+## Admin dashboard page
+
+[dashboard/pages/admin.py](dashboard/pages/admin.py) -- reachable only
+from `dashboard/app.py`'s nav for a `role=admin` session
+(`st.session_state["role"]`, set at login), though every API call it
+makes is independently enforced server-side (`require_scope("users:manage")`)
+regardless, so the nav gate is UX, not the actual security boundary.
+Four tabs, each a thin UI over endpoints that already existed or were
+added alongside this page:
+
+- **Team** -- the team list (`GET /auth/tenants/{id}/users`), an invite
+  form, and a deactivate action per teammate (not self -- `POST
+  /auth/tenants/{id}/users/{user_id}/deactivate` explicitly rejects
+  deactivating your own account). Deactivating blocks *future* logins
+  immediately; it does not revoke a session that account already holds,
+  which stays valid until its own natural expiry (`TSOC_JWT_EXPIRY_MIN`,
+  30 minutes by default) -- revoking a live session would need every
+  `jti` that account currently holds, which the server doesn't track.
+- **Sensor Tokens** -- lists existing tokens (name/active/created/last
+  used, never the token itself) and mints new ones, showing the
+  cleartext value exactly once with an explicit "copy it now" warning.
+- **Security** -- this account's own MFA enroll/confirm/disable, per
+  the section above.
+- **Audit Log** -- a read-only view of `GET /api/v1/audit` for this
+  tenant.
+
+Built entirely on Streamlit's own widgets (`st.dataframe`, `st.code`)
+rather than hand-rolled HTML via `unsafe_allow_html=True`, unlike
+`command_center.py`/`investigate.py` -- this page only ever renders
+admin-entered account/sensor metadata through widgets that already
+escape by default, so there's no `unsafe_allow_html` call in this file
+to get wrong the way TSOC-2026-02 did.
+
+Verified end-to-end against a real local stack (not mocked): a live API
+server on SQLite + a real local Redis, a real bootstrapped tenant, and
+the actual dashboard logged in for real -- invite, sensor-token
+creation, and the full MFA enroll → login-challenge → verify cycle (with
+genuinely computed TOTP codes) all confirmed working through the
+running UI, not just their underlying API tests.
+
+## Transactional email
+
+[api/email.py](api/email.py) sends invite/password-reset links over
+SMTP when `SMTP_HOST` is configured -- any provider that speaks SMTP
+works (SES, Postmark, SendGrid, Mailgun, or a company's own relay), so
+this isn't locked to one vendor's API. Unconfigured, `api/routes/auth.py`'s
+`_deliver_email()` falls back to logging the link at WARNING level, the
+original stub behavior -- local dev/test never needs real SMTP
+credentials. A real send failure is logged at ERROR and swallowed, not
+raised: every caller has already committed the signup/invite/reset
+request it's about by the time this runs, so failing the HTTP response
+would misreport an action that did happen.
 
 ## Genuinely out of scope here
 

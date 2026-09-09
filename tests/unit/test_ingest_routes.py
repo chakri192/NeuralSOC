@@ -318,3 +318,41 @@ class TestIngestAlerts:
         sensor = db.query(SensorToken).filter(SensorToken.id == created["id"]).first()
         db.close()
         assert sensor.last_used_at is not None
+
+
+class TestListSensorTokens:
+    def test_requires_users_manage_scope(self):
+        tenant_id = _seed_tenant_and_admin()
+        db = SessionLocal()
+        db.add(User(tenant_id=tenant_id, email="analyst@acme.example.com", password_hash=_hasher.hash("pw"), role="analyst"))
+        db.commit()
+        db.close()
+        with TestClient(app) as client:
+            token = _login(client, "analyst@acme.example.com")
+            r = client.get(f"/api/v1/ingest/tenants/{tenant_id}/sensor-tokens", headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 403
+
+    def test_lists_tokens_without_ever_exposing_the_cleartext_value(self):
+        tenant_id = _seed_tenant_and_admin()
+        with TestClient(app) as client:
+            admin_token = _login(client, "admin@acme.example.com")
+            created = _create_sensor_token(client, admin_token, tenant_id, name="Site sensor")
+            r = client.get(
+                f"/api/v1/ingest/tenants/{tenant_id}/sensor-tokens", headers={"Authorization": f"Bearer {admin_token}"}
+            )
+        assert r.status_code == 200
+        rows = r.json()
+        assert len(rows) == 1
+        assert rows[0]["name"] == "Site sensor"
+        assert rows[0]["is_active"] is True
+        assert "token" not in rows[0]
+        assert "token_hash" not in rows[0]
+        assert created["token"] not in str(rows)
+
+    def test_admin_cannot_list_a_different_tenants_sensor_tokens(self):
+        tenant_a = _seed_tenant_and_admin(tenant_slug="acme", email="admin@acme.example.com")
+        tenant_b = _seed_tenant_and_admin(tenant_slug="globex", email="admin@globex.example.com")
+        with TestClient(app) as client:
+            token_a = _login(client, "admin@acme.example.com")
+            r = client.get(f"/api/v1/ingest/tenants/{tenant_b}/sensor-tokens", headers={"Authorization": f"Bearer {token_a}"})
+        assert r.status_code == 403

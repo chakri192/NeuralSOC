@@ -4,19 +4,12 @@ Built on the JWT toolkit that already existed in api/auth.py
 (create_token/verify_token) and api/deps.py (require_scope) -- neither
 was ever wired up to a real login flow before this; the only reachable
 credential in production was the single static TSOC_API_KEY.
-
-Password-reset and invite emails are stubbed for now: instead of calling
-a transactional email provider (none is configured yet), the link is
-logged at WARNING level so it's visible in server logs during
-development/testing. Swap _deliver_email() for a real provider call once
-one is chosen -- every caller of it already only cares that the
-recipient "was notified," not how.
 """
 import logging
 import re
 import secrets
 from datetime import datetime, timezone
-from typing import Optional
+from typing import List, Optional
 
 import pyotp
 from argon2 import PasswordHasher
@@ -29,6 +22,7 @@ from sqlalchemy.orm import Session
 from api.audit import record_audit_event
 from api.auth import create_token, verify_token
 from api.database import get_db
+from api.email import email_configured, send_email
 from api.deps import (
     clear_failed_logins,
     get_remote_address,
@@ -54,11 +48,25 @@ _SLUG_SANITIZE_RE = re.compile(r"[^a-z0-9]+")
 
 
 def _deliver_email(to: str, subject: str, link: str) -> None:
-    """STUB: no transactional email provider is configured yet. Logs the
-    link instead of sending it -- replace with a real provider call
-    (SES/Postmark/SendGrid/etc.) when one is chosen; nothing else in this
-    file needs to change."""
-    logger.warning("STUB EMAIL to=%s subject=%r link=%s", to, subject, link)
+    """Sends via api/email.py's SMTP client when SMTP_HOST is configured.
+    Falls back to logging the link at WARNING level when it isn't -- the
+    original behavior, so local dev/test never needs real SMTP
+    credentials to keep working.
+
+    A real send failure is logged at ERROR and swallowed, not raised:
+    every caller of this has already committed the signup/invite/reset
+    request it's about by the time this runs, so failing the HTTP
+    response here would misreport an action that did happen. The
+    caller can't retroactively "undo" the invite just because the email
+    about it didn't go out.
+    """
+    if not email_configured():
+        logger.warning("STUB EMAIL (SMTP_HOST not configured) to=%s subject=%r link=%s", to, subject, link)
+        return
+    try:
+        send_email(to, subject, f"{subject}\n\n{link}\n\nIf you didn't request this, you can safely ignore this email.")
+    except Exception as ex:
+        logger.error("Failed to send email to=%s subject=%r: %s", to, subject, ex)
 
 
 def _validate_email(value: str) -> str:
@@ -104,25 +112,57 @@ class TokenResponse(BaseModel):
     # caller (a CLI script minting a sensor token right after signup,
     # say) doesn't need to decode the token just to learn its own id.
     tenant_id: int
+    # Same reasoning as tenant_id -- dashboard/app.py uses this to decide
+    # whether to show the admin page in nav, without decoding the JWT
+    # client-side just to read one claim.
+    role: str
 
 
 class LoginResponse(BaseModel):
     """login()'s actual response shape -- either a real session
-    (access_token/tenant_id set, mfa_required False) or, for an admin
-    with MFA enabled, a challenge to complete via POST /auth/mfa/verify
-    (mfa_required True, mfa_token set, no access_token yet). A caller
-    that only reads access_token from a successful login already breaks
-    cleanly against the challenge case: the field is simply absent."""
+    (access_token/tenant_id/role set, mfa_required False) or, for an
+    admin with MFA enabled, a challenge to complete via POST
+    /auth/mfa/verify (mfa_required True, mfa_token set, no access_token
+    yet). A caller that only reads access_token from a successful login
+    already breaks cleanly against the challenge case: the field is
+    simply absent."""
 
     access_token: Optional[str] = None
     token_type: str = "bearer"
     tenant_id: Optional[int] = None
+    role: Optional[str] = None
     mfa_required: bool = False
     mfa_token: Optional[str] = None
 
 
 class LogoutRequest(BaseModel):
     token: str
+
+
+class MeResponse(BaseModel):
+    id: int
+    email: str
+    role: str
+    tenant_id: int
+    mfa_enabled: bool
+    is_active: bool
+    created_at: str
+    last_login_at: Optional[str] = None
+
+
+class UserSummary(BaseModel):
+    """GET /auth/tenants/{id}/users's per-row shape -- deliberately not
+    MeResponse's superset: no mfa_enabled here. Whether a teammate has
+    MFA on is that teammate's own business to see (via GET /auth/me),
+    not something every admin browsing the team list needs surfaced
+    about everyone else."""
+
+    id: int
+    email: str
+    role: str
+    is_active: bool
+    created_at: str
+    last_login_at: Optional[str] = None
 
 
 class MfaEnrollResponse(BaseModel):
@@ -232,7 +272,7 @@ def signup(request: Request, body: SignupRequest, db: Session = Depends(get_db))
         db, "signup", tenant_id=tenant.id, actor_user_id=user.id, actor_label=user.email,
         target=tenant.slug, ip_address=get_remote_address(request),
     )
-    return TokenResponse(access_token=_issue_session_token(user), tenant_id=tenant.id)
+    return TokenResponse(access_token=_issue_session_token(user), tenant_id=tenant.id, role=user.role)
 
 
 @router.post("/login", response_model=LoginResponse)
@@ -291,7 +331,7 @@ def login(request: Request, body: LoginRequest, db: Session = Depends(get_db)):
         db, "login.success", tenant_id=user.tenant_id, actor_user_id=user.id,
         actor_label=user.email, ip_address=client_ip,
     )
-    return LoginResponse(access_token=_issue_session_token(user), tenant_id=user.tenant_id)
+    return LoginResponse(access_token=_issue_session_token(user), tenant_id=user.tenant_id, role=user.role)
 
 
 @router.post("/mfa/verify", response_model=TokenResponse)
@@ -339,7 +379,7 @@ def verify_mfa(request: Request, body: MfaVerifyBody, db: Session = Depends(get_
         db, "login.success", tenant_id=user.tenant_id, actor_user_id=user.id,
         actor_label=user.email, detail="mfa", ip_address=client_ip,
     )
-    return TokenResponse(access_token=_issue_session_token(user), tenant_id=user.tenant_id)
+    return TokenResponse(access_token=_issue_session_token(user), tenant_id=user.tenant_id, role=user.role)
 
 
 @router.post("/mfa/enroll", response_model=MfaEnrollResponse)
@@ -437,6 +477,33 @@ def logout(body: LogoutRequest):
         revoke_jti(jti, ttl)
 
 
+@router.get("/me", response_model=MeResponse)
+def get_me(db: Session = Depends(get_db), principal: dict = Depends(require_scope("alerts:read"))):
+    """The calling employee's own profile -- every role holds
+    alerts:read, so this is reachable by anyone with a real session
+    (not the static service key, which has no user_id to look up).
+    dashboard/pages/admin.py uses this to know the current session's
+    own mfa_enabled state without tracking it client-side, which would
+    drift the moment MFA is toggled from anywhere else (another tab,
+    scripts/enroll_admin_mfa.py)."""
+    user_id = principal.get("user_id")
+    if user_id is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No per-employee session to describe")
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    return MeResponse(
+        id=user.id,
+        email=user.email,
+        role=user.role,
+        tenant_id=user.tenant_id,
+        mfa_enabled=user.mfa_enabled,
+        is_active=user.is_active,
+        created_at=user.created_at.isoformat() if user.created_at else "",
+        last_login_at=user.last_login_at.isoformat() if user.last_login_at else None,
+    )
+
+
 @router.post("/password-reset/request", status_code=status.HTTP_202_ACCEPTED)
 def request_password_reset(request: Request, body: PasswordResetRequestBody, db: Session = Depends(get_db)):
     # Always the same response whether or not the email matched a real
@@ -509,12 +576,7 @@ def invite_user(
     db: Session = Depends(get_db),
     principal: dict = Depends(require_scope("users:manage")),
 ):
-    # require_scope only proves the caller holds users:manage somewhere --
-    # it doesn't by itself prove THIS tenant. An admin's token is scoped
-    # to their own tenant_id, so cross-tenant invites are rejected even
-    # though the scope check above passed.
-    if principal.get("tenant_id") != tenant_id and "*" not in principal.get("scopes", []):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot manage another tenant's users")
+    _require_own_tenant(principal, tenant_id)
 
     if db.query(User).filter(User.email == body.email).first():
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A user with that email already exists")
@@ -543,3 +605,67 @@ def invite_user(
     )
     _deliver_email(user.email, "You've been invited to T-SOC", f"https://app.tsoc.example/accept-invite?token={token}")
     return {"id": user.id, "email": user.email, "role": user.role}
+
+
+def _require_own_tenant(principal: dict, tenant_id: int) -> None:
+    """Same cross-tenant guard as invite_user/create_sensor_token,
+    factored out now that a third endpoint (list_users, below) needs
+    the identical check."""
+    if principal.get("tenant_id") != tenant_id and "*" not in principal.get("scopes", []):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot manage another tenant's users")
+
+
+@router.get("/tenants/{tenant_id}/users", response_model=List[UserSummary])
+def list_users(
+    tenant_id: int,
+    db: Session = Depends(get_db),
+    principal: dict = Depends(require_scope("users:manage")),
+):
+    _require_own_tenant(principal, tenant_id)
+    users = db.query(User).filter(User.tenant_id == tenant_id).order_by(User.created_at.asc()).all()
+    return [
+        UserSummary(
+            id=u.id,
+            email=u.email,
+            role=u.role,
+            is_active=u.is_active,
+            created_at=u.created_at.isoformat() if u.created_at else "",
+            last_login_at=u.last_login_at.isoformat() if u.last_login_at else None,
+        )
+        for u in users
+    ]
+
+
+@router.post("/tenants/{tenant_id}/users/{user_id}/deactivate", status_code=status.HTTP_204_NO_CONTENT)
+def deactivate_user(
+    request: Request,
+    tenant_id: int,
+    user_id: int,
+    db: Session = Depends(get_db),
+    principal: dict = Depends(require_scope("users:manage")),
+):
+    """Blocks future logins immediately (login() only matches
+    User.is_active.is_(True)). Does NOT revoke a session this user
+    already holds -- that JWT stays valid until its own natural expiry
+    (TSOC_JWT_EXPIRY_MIN, 30 minutes by default), since revoking it
+    would need every jti that user currently holds, which the server
+    doesn't track (only specific tokens are ever explicitly denylisted,
+    e.g. at logout). A departing employee is locked out of getting a
+    *new* session immediately; an already-open one runs out on its own
+    shortly after.
+    """
+    _require_own_tenant(principal, tenant_id)
+    if user_id == principal.get("user_id"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot deactivate your own account")
+
+    user = db.query(User).filter(User.id == user_id, User.tenant_id == tenant_id).first()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    user.is_active = False
+    db.commit()
+
+    record_audit_event(
+        db, "user.deactivated", tenant_id=tenant_id, actor_user_id=principal.get("user_id"),
+        target=user.email, ip_address=get_remote_address(request),
+    )

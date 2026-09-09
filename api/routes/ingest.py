@@ -173,3 +173,37 @@ def create_sensor_token(
     # all that's stored, so a leaked database dump doesn't hand out live
     # ingest credentials the way storing the raw token would.
     return {"id": sensor.id, "name": sensor.name, "token": token}
+
+
+class SensorTokenSummary(BaseModel):
+    """Deliberately no token/token_hash field -- listing existing
+    sensors must never be a way to recover or infer a live credential,
+    only to see what exists and whether it's still in use."""
+
+    id: int
+    name: str
+    is_active: bool
+    created_at: str
+    last_used_at: str = ""
+
+
+@router.get("/tenants/{tenant_id}/sensor-tokens", response_model=List[SensorTokenSummary])
+def list_sensor_tokens(
+    tenant_id: int,
+    db: Session = Depends(get_db),
+    principal: dict = Depends(require_scope("users:manage")),
+):
+    if principal.get("tenant_id") != tenant_id and "*" not in principal.get("scopes", []):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot manage another tenant's sensor tokens")
+
+    tokens = db.query(SensorToken).filter(SensorToken.tenant_id == tenant_id).order_by(SensorToken.created_at.asc()).all()
+    return [
+        SensorTokenSummary(
+            id=t.id,
+            name=t.name,
+            is_active=t.is_active,
+            created_at=t.created_at.isoformat() if t.created_at else "",
+            last_used_at=t.last_used_at.isoformat() if t.last_used_at else "",
+        )
+        for t in tokens
+    ]

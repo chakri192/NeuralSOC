@@ -44,6 +44,12 @@ if _is_authenticated:
 # left that raw, un-gated file list (dev scripts included) showing in the
 # sidebar during the login screen. position="hidden" suppresses the
 # sidebar links themselves until sign-in without reintroducing that.
+#
+# The Admin entry is built fresh on every run too, from
+# st.session_state["role"] (set at login, see _authenticated() and
+# _mfa_challenge_form() below) -- Streamlit re-executes this whole
+# script top to bottom on every interaction, so by the run right after a
+# successful login's own st.rerun(), that value is already there to read.
 pages = {
     "Command Center": [
         st.Page("pages/command_center.py", title="Incidents", icon=":material/warning:", default=True),
@@ -54,6 +60,8 @@ pages = {
         st.Page("pages/health.py", title="Health", icon=":material/monitor_heart:"),
     ],
 }
+if st.session_state.get("role") == "admin":
+    pages["Admin"] = [st.Page("pages/admin.py", title="Team & Access", icon=":material/admin_panel_settings:")]
 nav = st.navigation(pages, position="sidebar" if _is_authenticated else "hidden")
 
 
@@ -128,7 +136,10 @@ def _mfa_challenge_form(mid) -> None:
                 st.error("Could not reach the T-SOC API. Try again shortly.")
             else:
                 if resp.status_code == 200:
-                    st.session_state["access_token"] = resp.json()["access_token"]
+                    body = resp.json()
+                    st.session_state["access_token"] = body["access_token"]
+                    st.session_state["role"] = body["role"]
+                    st.session_state["tenant_id"] = body["tenant_id"]
                     st.session_state["analyst_name"] = st.session_state.pop("_pending_mfa_email", "")
                     st.session_state.pop("_pending_mfa_token", None)
                     st.rerun()
@@ -190,6 +201,8 @@ def _authenticated() -> bool:
                         st.rerun()
                     else:
                         st.session_state["access_token"] = body["access_token"]
+                        st.session_state["role"] = body["role"]
+                        st.session_state["tenant_id"] = body["tenant_id"]
                         st.session_state["analyst_name"] = email.strip()
                         st.rerun()
                 elif resp.status_code == 429:
@@ -225,6 +238,8 @@ with st.sidebar:
             pass  # best-effort revocation; the session is being cleared either way
         st.session_state.pop("access_token", None)
         st.session_state.pop("analyst_name", None)
+        st.session_state.pop("role", None)
+        st.session_state.pop("tenant_id", None)
         st.rerun()
     st.caption("ENV: DEMO · DIODE: ONE-WAY")
 
