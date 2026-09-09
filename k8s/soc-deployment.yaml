@@ -308,13 +308,13 @@ spec:
               name: tsoc-secrets
               key: pagerduty_routing_key
               optional: true
-        # api/email.py: without SMTP_HOST set, invite/password-reset
+        # api/mailer.py: without SMTP_HOST set, invite/password-reset
         # links are only ever logged, never actually emailed to real
         # employees. Empty string here (not omitted) so an operator
         # finds exactly these four fields to fill in, rather than
         # needing to know they're missing from the manifest entirely --
         # an empty SMTP_HOST is treated identically to an unset one
-        # (api/email.py's email_configured()), so this is a genuinely
+        # (api/mailer.py's email_configured()), so this is a genuinely
         # inert default, not a silent misconfiguration.
         - name: SMTP_HOST
           value: ""

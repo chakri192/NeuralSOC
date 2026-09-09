@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from api.audit import record_audit_event
 from api.auth import create_token, verify_token
 from api.database import get_db
-from api.email import email_configured, send_email
+from api.mailer import email_configured, send_email
 from api.deps import (
     clear_failed_logins,
     get_remote_address,
@@ -48,7 +48,7 @@ _SLUG_SANITIZE_RE = re.compile(r"[^a-z0-9]+")
 
 
 def _deliver_email(to: str, subject: str, link: str) -> None:
-    """Sends via api/email.py's SMTP client when SMTP_HOST is configured.
+    """Sends via api/mailer.py's SMTP client when SMTP_HOST is configured.
     Falls back to logging the link at WARNING level when it isn't -- the
     original behavior, so local dev/test never needs real SMTP
     credentials to keep working.

@@ -452,7 +452,7 @@ running UI, not just their underlying API tests.
 
 ## Transactional email
 
-[api/email.py](api/email.py) sends invite/password-reset links over
+[api/mailer.py](api/mailer.py) sends invite/password-reset links over
 SMTP when `SMTP_HOST` is configured -- any provider that speaks SMTP
 works (SES, Postmark, SendGrid, Mailgun, or a company's own relay), so
 this isn't locked to one vendor's API. Unconfigured, `api/routes/auth.py`'s

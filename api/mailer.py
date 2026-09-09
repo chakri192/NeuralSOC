@@ -1,6 +1,18 @@
 """Transactional email delivery for invite/password-reset links
 (api/routes/auth.py's only caller).
 
+Named mailer.py, not email.py: this file lives in api/, and several
+entry points here run as a direct script (`python3 api/kafka_sink.py`,
+per the Makefile) rather than as an imported package -- that puts api/
+itself on sys.path, so a module literally named api/email.py would
+shadow the stdlib email package for the whole process the moment
+anything (requests -> urllib3, smtplib itself) does `import email...`.
+Confirmed the hard way: CI's integration-smoke-test job failed with
+`ModuleNotFoundError: No module named 'email.utils'; 'email' is not a
+package`, raised from inside smtplib's own `import email.utils`,
+because api/email.py (this file, under its old name) had already been
+bound to sys.modules["email"] by an unrelated `import requests`.
+
 SMTP, not a vendor SDK: SES, Postmark, SendGrid, Mailgun, and a
 company's own internal relay all speak SMTP, so this works with
 whichever one an operator already has an account with, or none at all

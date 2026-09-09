@@ -114,14 +114,14 @@ class TestDeliverEmail:
     sent_emails fixture without needing real SMTP configured."""
 
     def test_falls_back_to_logging_when_smtp_is_not_configured(self, monkeypatch, caplog):
-        monkeypatch.setattr("api.email.SMTP_HOST", None)
+        monkeypatch.setattr("api.mailer.SMTP_HOST", None)
         with patch("api.routes.auth.send_email") as mock_send:
             auth_routes._deliver_email("a@x.com", "subject", "https://example.com/link")
         mock_send.assert_not_called()
         assert "STUB EMAIL" in caplog.text
 
     def test_sends_for_real_when_smtp_is_configured(self, monkeypatch):
-        monkeypatch.setattr("api.email.SMTP_HOST", "smtp.example.com")
+        monkeypatch.setattr("api.mailer.SMTP_HOST", "smtp.example.com")
         with patch("api.routes.auth.send_email") as mock_send:
             auth_routes._deliver_email("a@x.com", "subject", "https://example.com/link")
         mock_send.assert_called_once()
@@ -131,7 +131,7 @@ class TestDeliverEmail:
         assert "https://example.com/link" in args[2]
 
     def test_a_real_send_failure_is_logged_and_swallowed_not_raised(self, monkeypatch, caplog):
-        monkeypatch.setattr("api.email.SMTP_HOST", "smtp.example.com")
+        monkeypatch.setattr("api.mailer.SMTP_HOST", "smtp.example.com")
         with patch("api.routes.auth.send_email", side_effect=ConnectionRefusedError("no route to host")):
             auth_routes._deliver_email("a@x.com", "subject", "https://example.com/link")  # must not raise
         assert "Failed to send email" in caplog.text

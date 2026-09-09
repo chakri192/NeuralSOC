@@ -263,7 +263,7 @@ Let it run for one or two cycles and stop it (`Ctrl+C`) once validation accuracy
 - JWT auth (PyJWT, HS256) with scoped, tenant-aware tokens, plus a static service key for internal callers.
 - Optional TOTP MFA for admin accounts, enrolled from the dashboard's Admin page or `scripts/enroll_admin_mfa.py` (see [SECURITY.md](SECURITY.md) for what's wired into each client).
 - Invite/deactivate teammates and mint sensor tokens from the dashboard's Admin page — no CLI or server access needed day to day.
-- Real transactional email for invite/password-reset links via any SMTP-speaking provider (`api/email.py`) — falls back to logging the link when unconfigured, so local dev never needs real credentials.
+- Real transactional email for invite/password-reset links via any SMTP-speaking provider (`api/mailer.py`) — falls back to logging the link when unconfigured, so local dev never needs real credentials.
 - An audit log of every login, invite, sensor-token creation, and triage change, per tenant (`GET /api/v1/audit`, admin-only, also browsable from the dashboard).
 - Rate limiting (slowapi) backed by Redis, keyed per-tenant on the routes where that matters (alerts/stats/triage), per-IP elsewhere.
 - Kafka payloads validated against a strict schema before touching the database — no mass-assignment path from an untrusted message to the ORM.
