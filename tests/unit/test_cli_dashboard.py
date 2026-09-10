@@ -28,10 +28,12 @@ def _fixed_password(monkeypatch):
     monkeypatch.setattr(cli_dashboard, "resolve_dashboard_password", lambda warn=True: "test-password")
 
 
-def _seed(mgr, alerts, healthy=True):
+def _seed(mgr, alerts, healthy=True, stats=None):
     mgr.alerts = alerts
     mgr.broker_healthy = healthy
     mgr.is_running = True
+    if stats is not None:
+        mgr.stats = stats
 
 
 def _render_text(dash):
@@ -119,7 +121,41 @@ def test_markup_injection_in_ip_fields_renders_as_literal_text(_isolated_stream_
     assert "[blink]" in text
 
 
-def test_kpi_counts_reflect_current_alert_window_not_a_lifetime_total(_isolated_stream_manager):
+def test_kpi_counts_reflect_the_true_total_not_just_the_visible_window(_isolated_stream_manager):
+    """The KPI tiles used to be recomputed from stream_manager.get_alerts()
+    -- itself capped at 100 by the API's own server-side limit -- so
+    "Total Attacks Detected" could never read above 100 no matter how many
+    attacks had actually landed, and looked stuck/broken during a live
+    demo the moment total volume passed that cap. Fixed to read the real,
+    uncapped counts from stream_manager's own polled /stats snapshot
+    instead -- seeding a tiny 2-alert window alongside a much larger
+    stats total here proves the tiles track the latter, not the former."""
+    _seed(
+        _isolated_stream_manager,
+        [
+            {"alert_id": "a1", "source_ip": "10.0.0.1", "destination_ip": "1.1.1.1",
+             "severity": "critical", "threat_class": "DGA", "confidence_score": 0.9,
+             "timestamp": "2026-09-07T00:00:00Z"},
+            {"alert_id": "a2", "source_ip": "10.0.0.2", "destination_ip": "2.2.2.2",
+             "severity": "high", "threat_class": "Beaconing", "confidence_score": 0.6,
+             "timestamp": "2026-09-07T00:00:01Z"},
+        ],
+        stats={"total_alerts": 542, "critical": 51, "high": 300, "medium": 140, "low": 51},
+    )
+    dash = cli_dashboard.CLIDashboard()
+    text, _ = _render_text(dash)
+    assert "542" in text
+    assert "Total Attacks Detected" in text
+    assert "51" in text  # critical
+    assert "300" in text  # high
+    assert "140" in text  # medium
+
+
+def test_feed_table_still_shows_the_visible_alert_window(_isolated_stream_manager):
+    """The KPI tiles above read from the global /stats snapshot now, but
+    the actual feed table is still, correctly, just whatever alerts
+    stream_manager currently holds (itself capped at 100 by the API) --
+    there's no "global feed" to page through, only the latest window."""
     _seed(_isolated_stream_manager, [
         {"alert_id": "a1", "source_ip": "10.0.0.1", "destination_ip": "1.1.1.1",
          "severity": "critical", "threat_class": "DGA", "confidence_score": 0.9,
@@ -130,8 +166,8 @@ def test_kpi_counts_reflect_current_alert_window_not_a_lifetime_total(_isolated_
     ])
     dash = cli_dashboard.CLIDashboard()
     text, _ = _render_text(dash)
-    assert "2" in text  # 2 alerts in the window
-    assert "In Current Window" in text
+    assert "10.0.0.1" in text and "10.0.0.2" in text
+    assert "Threat Signatures (last 2)" in text
 
 
 def test_login_rejects_wrong_password_and_retries(monkeypatch):

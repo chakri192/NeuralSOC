@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import declarative_base, sessionmaker
 import os
 
@@ -43,6 +43,23 @@ engine = create_engine(
     SQLALCHEMY_DATABASE_URL,
     **engine_kwargs
 )
+
+if "sqlite" in SQLALCHEMY_DATABASE_URL:
+    # SQLite's default rollback-journal mode takes an exclusive lock on
+    # the whole file for the duration of any write, blocking every other
+    # connection's reads until it releases (up to connect_args["timeout"]
+    # above) -- with two or more long-lived clients polling the same
+    # file (e.g. the web dashboard and terminal/tsoc_console.py each
+    # running as their own process), one client's write visibly stalls
+    # every other client for seconds at a time. WAL mode lets readers
+    # proceed concurrently with a writer; only writer-vs-writer still
+    # serializes. Only reachable via the sqlite branch above, which
+    # nothing outside local dev/demo ever sets DATABASE_URL to -- real
+    # deployments use Postgres (see the postgresql branch), which has
+    # proper MVCC and never needed this.
+    @event.listens_for(engine, "connect")
+    def _enable_sqlite_wal(dbapi_connection, connection_record):
+        dbapi_connection.execute("PRAGMA journal_mode=WAL")
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()

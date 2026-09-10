@@ -24,6 +24,11 @@ demos/
 k8s/secrets.yaml
 test.db
 *.db
+# SQLite WAL-mode sidecar files (api/database.py enables journal_mode=WAL
+# for every sqlite:// DATABASE_URL) -- regenerated alongside the .db file
+# itself, *.db above doesn't match these since the suffix isn't .db.
+*.db-shm
+*.db-wal
 .env*
 *.bak
 .faust-data/

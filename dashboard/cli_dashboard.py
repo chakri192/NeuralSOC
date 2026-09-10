@@ -61,19 +61,32 @@ class CLIDashboard:
         self._started_at = time.monotonic()
 
     def _current_window(self):
-        """Recomputes severity/threat counts fresh from stream_manager's
-        current alert window on every frame. stream_manager already runs
-        its own background poll thread (refreshed every 2s) and is the
-        single source of truth every other UI in the product reads from
-        -- keeping a second, ever-growing local accumulator here would
-        just drift out of sync with what the dashboard/console show."""
+        """alerts is the visible feed sample -- capped at 100 by the API's
+        own server-side limit (Query(..., le=100)), same as every other UI
+        in the product. threat_counts (the sidebar breakdown) is drawn from
+        that same visible sample, since the API has no global threat-class
+        breakdown endpoint to draw a true total from.
+
+        severity_counts is NOT recomputed from that capped sample -- doing
+        so silently caps the KPI tiles at whatever's in the visible 100
+        rows too, which is exactly what previously made "In Current
+        Window" read as a stuck attack counter instead of a real, growing
+        total. stream_manager's poll loop already fetches the real,
+        uncapped /stats endpoint every 2s (shared/data_access.py); read
+        the true totals from there instead."""
         alerts = stream_manager.get_alerts()
-        severity_counts = Counter()
         threat_counts = Counter()
         for a in alerts:
-            severity_counts[str(a.get("severity", "low")).lower()] += 1
             threat_counts[a.get("threat_class", "Unknown")] += 1
-        return alerts, severity_counts, threat_counts
+        stats = stream_manager.status().get("stats") or {}
+        severity_counts = Counter({
+            "critical": stats.get("critical", 0),
+            "high": stats.get("high", 0),
+            "medium": stats.get("medium", 0),
+            "low": stats.get("low", 0),
+        })
+        total_alerts = stats.get("total_alerts", len(alerts))
+        return alerts, severity_counts, threat_counts, total_alerts
 
     def generate_layout(self) -> Layout:
         layout = Layout()
@@ -92,7 +105,7 @@ class CLIDashboard:
             Layout(name="system", ratio=2),
         )
 
-        alerts, severity_counts, threat_counts = self._current_window()
+        alerts, severity_counts, threat_counts, total_alerts = self._current_window()
         healthy = stream_manager.status().get("broker_healthy", False)
 
         # 1. Header
@@ -108,7 +121,7 @@ class CLIDashboard:
             kpi_table.add_column(ratio=1)
         kpi_table.add_row(
             Panel(
-                Align.center(Text(f"{len(alerts):,}\nIn Current Window", style="bold blue")),
+                Align.center(Text(f"{total_alerts:,}\nTotal Attacks Detected", style="bold blue")),
                 border_style=PALETTE["border"],
             ),
             Panel(
@@ -175,7 +188,7 @@ class CLIDashboard:
             dist_table.add_row(f"[{PALETTE['text']}]{clean_name}[/]", f"[{PALETTE['accent']}]{count}[/]")
             dist_table.add_row(f"[dim {PALETTE['accent']}]{bar}[/]", "")
 
-        layout["distribution"].update(Panel(dist_table, title=f"[bold {PALETTE['text']}]Threat Signatures[/]", border_style=PALETTE["border"]))
+        layout["distribution"].update(Panel(dist_table, title=f"[bold {PALETTE['text']}]Threat Signatures (last {len(alerts)})[/]", border_style=PALETTE["border"]))
 
         # 5. System Status (Sidebar Bottom)
         elapsed = int(time.monotonic() - self._started_at)

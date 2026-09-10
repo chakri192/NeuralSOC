@@ -125,6 +125,22 @@ class MainScreen(Screen):
         Binding("c", "confirm", "Confirm"),
         Binding("/", "start_filter", "Filter"),
         Binding("escape", "clear_filter", "Clear Filter", show=False),
+        # Quick severity filters -- same substring-match filter box the "/"
+        # key opens, just pre-filled instead of typed. Digits chosen since
+        # 1-4 map naturally to critical-through-low without colliding with
+        # any letter already bound above.
+        Binding("1", "filter_severity('critical')", "Crit", show=False),
+        Binding("2", "filter_severity('high')", "High", show=False),
+        Binding("3", "filter_severity('medium')", "Med", show=False),
+        Binding("4", "filter_severity('low')", "Low", show=False),
+        # Quick status filters -- shift of the matching action letter (Ack
+        # is "a", filtering to ACKNOWLEDGED is "A"; same for confirm/false
+        # positive), plus "O" for the one status with no action key of its
+        # own (nothing "opens" an incident -- it just starts that way).
+        Binding("O", "filter_status('open')", "Open", show=False),
+        Binding("A", "filter_status('acknowledged')", "Ack'd", show=False),
+        Binding("C", "filter_status('confirmed')", "Conf'd", show=False),
+        Binding("F", "filter_status('false_positive')", "False Pos'd", show=False),
     ]
 
     CSS = f"""
@@ -160,6 +176,14 @@ class MainScreen(Screen):
         self._healthy = True
         self._selected_incident_id = None
         self._filter_text = ""
+        # Full incident dict for whichever incident is currently selected,
+        # captured the last time it actually appeared in a fetch -- see
+        # its use in update_queue() below for why this exists.
+        self._selected_incident_cache = None
+        # The exact alert list that produced whatever's currently on
+        # screen -- see update_queue()'s and on_data_table_row_selected()'s
+        # comments for why detail lookups reuse this instead of re-fetching.
+        self._last_alerts = []
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -188,6 +212,24 @@ class MainScreen(Screen):
         filt = self.query_one("#filter-input", Input)
         filt.add_class("-visible")
         filt.focus()
+
+    def _set_filter(self, text: str) -> None:
+        """Shared by the severity/status quick-keys below: fills and shows
+        the same filter box "/" opens, rather than a separate filtering
+        code path -- so Escape (action_clear_filter) already knows how to
+        clear it, and it participates in the exact same substring match
+        every other filter term does."""
+        filt = self.query_one("#filter-input", Input)
+        filt.value = text
+        filt.add_class("-visible")
+        self._filter_text = text
+        self.update_queue(force=True)
+
+    def action_filter_severity(self, severity: str) -> None:
+        self._set_filter(severity)
+
+    def action_filter_status(self, status: str) -> None:
+        self._set_filter(_STATUS_LABELS.get(status, status).lower())
 
     def action_clear_filter(self) -> None:
         filt = self.query_one("#filter-input", Input)
@@ -246,7 +288,41 @@ class MainScreen(Screen):
             self.notify(f"Refresh failed: {ex}", severity="error")
             return
 
+        # Reused by on_data_table_row_selected() below instead of it doing
+        # a second, independent fetch_alerts() call of its own -- with
+        # continuous live traffic, that second fetch can legitimately
+        # disagree with the one that just populated the table a moment
+        # ago (the 100-alert window has already moved on), so a row that
+        # visibly just appeared could 404 out of its own detail lookup and
+        # silently do nothing on Enter. This guarantees whatever's on
+        # screen is exactly what gets looked up -- no second race to lose.
+        self._last_alerts = alerts
+
         incidents = synthesize_incidents(alerts)
+
+        # fetch_alerts() returns only the latest 100 alerts (the API's own
+        # server-side cap), and incidents are grouped by source IP -- under
+        # real, continuous traffic across many distinct sources (confirmed:
+        # 200+ distinct source IPs churning through that 100-row window in
+        # this demo), the specific incident an analyst has selected and
+        # paused on to investigate can fall out of that window within
+        # seconds, well before they finish reading it or act on it. Without
+        # this, it would simply vanish from `incidents` below, the cursor-
+        # restoration logic a few lines down would silently fail its `in
+        # visible_ids` check, and the selection would appear to jump to an
+        # unrelated row the moment the analyst acknowledged/confirmed/
+        # dismissed it -- exactly the bug reported live. Splicing the last-
+        # known copy back in keeps it on screen (with its status still read
+        # fresh from triage_store below, which isn't windowed) until the
+        # analyst moves their selection elsewhere.
+        selected_ids = {inc.get("incident_id") for inc in incidents}
+        if self._selected_incident_id in selected_ids:
+            self._selected_incident_cache = next(
+                inc for inc in incidents if inc.get("incident_id") == self._selected_incident_id
+            )
+        elif self._selected_incident_id and self._selected_incident_cache:
+            incidents.append(self._selected_incident_cache)
+
         queue = self.query_one("#queue", DataTable)
         queue.clear()
         incidents.sort(key=lambda x: x.get("risk_score", 0), reverse=True)
@@ -257,9 +333,19 @@ class MainScreen(Screen):
             sev = str(inc.get("severity", "low")).lower()
             threat = str(inc.get("threat_classes", ["Unknown"])[0])
             target = str(inc.get("affected_entities", ["Unknown"])[0])
-            status = statuses.get(inc.get("incident_id"), {}).get("status", triage_store.OPEN)
+            incident_id = inc.get("incident_id", "")
+            status = statuses.get(incident_id, {}).get("status", triage_store.OPEN)
+            status_label = _STATUS_LABELS.get(status, status.upper())
+            # incident_id is literally "INC-" + the source IP with dots
+            # swapped for dashes (see synthesize_incidents) -- reversing
+            # that gives a real, dotted source IP an analyst can type
+            # straight into the filter box, without needing "affected_entities"
+            # (an unordered set mixing source *and* destination IPs, so its
+            # first element was never reliably the source anyway).
+            source_ip = incident_id[4:].replace("-", ".") if incident_id.startswith("INC-") else ""
 
-            if needle and needle not in f"{sev} {threat} {target}".lower():
+            haystack = f"{sev} {threat} {target} {source_ip} {status_label}".lower()
+            if needle and needle not in haystack:
                 continue
 
             sev_color = SEVERITY_COLORS.get(sev, SEVERITY_COLORS["low"])
@@ -269,10 +355,8 @@ class MainScreen(Screen):
             target_disp = target[:12] + "..." if len(target) > 15 else target
             target_disp = escape(target_disp)
             status_color = STATUS_COLORS.get(status, STATUS_COLORS[triage_store.OPEN])
-            status_label = _STATUS_LABELS.get(status, status.upper())
             status_styled = f"[{status_color}]{status_label}[/]"
 
-            incident_id = inc.get("incident_id")
             queue.add_row(sev_styled, risk, threat_disp, target_disp, status_styled, key=incident_id)
             visible_ids.append(incident_id)
 
@@ -283,9 +367,21 @@ class MainScreen(Screen):
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         incident_id = event.row_key.value
+        if incident_id != self._selected_incident_id:
+            # Moving to a different incident -- drop the previous one's
+            # pinned copy (see update_queue()) so it stops being kept
+            # alive on screen after the analyst has moved on from it.
+            self._selected_incident_cache = None
         self._selected_incident_id = incident_id
+        # Reuse the exact snapshot that put this row on screen (see
+        # update_queue()'s comment) rather than fetching alerts again here
+        # -- a second, independent fetch under continuous live traffic can
+        # legitimately disagree with the first, so a row that just
+        # appeared could otherwise fail to find itself and silently do
+        # nothing. Per-incident triage status isn't windowed the same way,
+        # so that lookup stays a fresh call.
+        alerts = self._last_alerts
         try:
-            alerts = fetch_alerts(self._token)
             triage = triage_store.get_status(self._token, incident_id)
         except requests.RequestException as ex:
             self.notify(f"Failed to load incident detail: {ex}", severity="error")
@@ -293,8 +389,26 @@ class MainScreen(Screen):
 
         incidents = synthesize_incidents(alerts)
         inc = next((i for i in incidents if i.get("incident_id") == incident_id), None)
+        if not inc and self._selected_incident_cache and self._selected_incident_cache.get("incident_id") == incident_id:
+            # This row exists on screen only because update_queue() pinned
+            # it there after it aged out of the live window entirely (see
+            # that method's own comment) -- its alerts were never going to
+            # be in this fetch either. Fall back to the aggregate summary
+            # already captured in the cache; the per-alert evidence lines
+            # below will correctly come up empty rather than the whole
+            # lookup silently doing nothing.
+            inc = self._selected_incident_cache
         if not inc:
             return
+        # Seed the pin cache right here, at selection time -- not just
+        # opportunistically inside update_queue() -- because viewing an
+        # incident's detail auto-pauses live_mode a few lines down in
+        # view_incident_detail(), which stops the periodic timer from ever
+        # calling update_queue() again until the analyst acts on it. Without
+        # capturing it now, there would be no successful update_queue() call
+        # where this incident was both selected and still present in the
+        # fetch window to opportunistically cache it during.
+        self._selected_incident_cache = inc
         detail = self.query_one("#detail-pane", Static)
         summary = escape(str(inc.get("evidence_summary", "")))
         tactics = escape(", ".join(inc.get("mitre_tactics", [])))
