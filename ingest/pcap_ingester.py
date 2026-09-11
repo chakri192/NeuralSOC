@@ -22,11 +22,38 @@ MAX_FLOWS = 50000  # bound memory regardless of how long the capture runs
 MAX_PACKET_BYTES = 65535  # a single packet larger than this is not a normal Ethernet frame
 
 try:
-    from scapy.all import IP, TCP, UDP
+    from scapy.all import DNS, DNSQR, IP, TCP, UDP
     from kafka import KafkaProducer
 except ImportError:
     print("Please install scapy and kafka-python: pip install scapy kafka-python")
     sys.exit(1)
+
+
+def _extract_dns_event(pkt, src_ip: str, dst_ip: str) -> dict:
+    """A DNS query is a single request/response exchange, not something
+    that accumulates like a TCP/UDP byte-count flow -- emitted directly,
+    once, rather than folded into the flows dict below."""
+    dns = pkt[DNS]
+    # dns.qd is a _DNSPacketListField list of DNSQR records (even for the
+    # ordinary single-question case), not a bare DNSQR -- indexing into it
+    # directly as if it were one is why this returned None for every real
+    # DNS query the first time this was tried.
+    if dns.qr != 0 or dns.qdcount == 0 or not dns.qd:
+        return None
+    question = dns.qd[0]
+    if not isinstance(question, DNSQR):
+        return None
+    query = question.qname.decode("utf-8", errors="ignore").rstrip(".")
+    if not query:
+        return None
+    qtype_name = {1: "A", 28: "AAAA", 16: "TXT", 5: "CNAME"}.get(question.qtype, str(question.qtype))
+    return {
+        "event_type": "dns",
+        "id.orig_h": src_ip,
+        "id.resp_h": dst_ip,
+        "query": query,
+        "qtype_name": qtype_name,
+    }
 
 def _emit_flow(producer, topic, key, payload, log):
     """Shared size-guarded send -- previously the 5MB guard only existed
@@ -84,6 +111,12 @@ def ingest_pcap(pcap_file: str, broker: str = "localhost:9092", topic: str = "ra
                 if IP in pkt:
                     src_ip = pkt[IP].src
                     dst_ip = pkt[IP].dst
+
+                    if DNS in pkt:
+                        dns_event = _extract_dns_event(pkt, src_ip, dst_ip)
+                        if dns_event is not None:
+                            _emit_flow(producer, topic, f"dns-{uuid.uuid4()}", dns_event, logger)
+
                     # Scapy indexes layers by CLASS (pkt[TCP]), not by a
                     # lowercase string ("tcp") -- pkt["tcp"] raises
                     # IndexError on the very first packet, meaning this
@@ -123,6 +156,17 @@ def ingest_pcap(pcap_file: str, broker: str = "localhost:9092", topic: str = "ra
                                     "proto": proto,
                                     "service": "unknown",
                                     "conn_state": "SF",
+                                    # Without this, every event_type check
+                                    # throughout inference/rules.py and
+                                    # inference/features.py silently fails
+                                    # (event.get("event_type") == "conn" is
+                                    # never true), so nothing this ingester
+                                    # ever emits was reachable by any
+                                    # connection-based rule -- confirmed by
+                                    # actually trying to run a real pcap
+                                    # through the live pipeline and watching
+                                    # zero detections come out the other end.
+                                    "event_type": "conn",
                                 }
                                 flows[flow_key] = f
                             f = flows[flow_key]

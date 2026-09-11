@@ -125,7 +125,7 @@ sequenceDiagram
 
 Detection thresholds are constants in `inference/rules.py` (the malicious-JA4-fingerprint list is the one exception, configurable via an environment variable); the dashboard's Network page only filters what's *displayed*, not what's detected.
 
-The DGA classifier has been validated against a real published dataset of 25 malware families' actual DGA domains, not just this repo's own synthetic traffic (`scripts/evaluate_against_real_dga_dataset.py`) — current measured result: 86.5% precision, 38.1% recall, 5.9% false-positive rate, with real per-family variance. See [SECURITY.md](SECURITY.md#model-validation-against-real-world-data) for the full numbers, the dataset citation, and a real bug this validation caught and fixed.
+The DGA classifier has been validated against a real published dataset of 25 malware families' actual DGA domains, not just this repo's own synthetic traffic (`scripts/evaluate_against_real_dga_dataset.py`) — current measured result: 85.2% precision, 69.8% recall, 12.0% false-positive rate, with real per-family variance. Also run end-to-end against a real published malware pcap (Lumma Stealer). See [SECURITY.md](SECURITY.md#model-validation-against-real-world-data) for the full numbers, the dataset citation, and the real bugs this validation caught and fixed.
 
 ## Repository layout
 

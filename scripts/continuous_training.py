@@ -12,7 +12,8 @@ try:
     import torch
     import torch.nn as nn
     import torch.optim as optim
-    from inference.train_model import DGA_CNN
+    from inference.train_model import DGA_HybridModel, LEX_DIM
+    from inference.models import lexical_features
 except Exception as e:
     print(f"Failed to import ML libraries: {e}")
     sys.exit(1)
@@ -110,12 +111,19 @@ def generate_dynamic_dataset(num_samples, difficulty="medium"):
     
     max_len = 35
     encoded_data = []
+    lex_data = []
     for d in data:
-        encoded = [char_map.get(c, 0) for c in d.lower()]
+        d_lower = d.lower()[:max_len]
+        encoded = [char_map.get(c, 0) for c in d_lower]
         if len(encoded) < max_len: encoded += [0] * (max_len - len(encoded))
         encoded_data.append(encoded[:max_len])
-        
-    return torch.tensor(encoded_data, dtype=torch.long), torch.tensor(labels, dtype=torch.float32).unsqueeze(1)
+        lex_data.append(lexical_features(d_lower))
+
+    return (
+        torch.tensor(encoded_data, dtype=torch.long),
+        torch.tensor(lex_data, dtype=torch.float32),
+        torch.tensor(labels, dtype=torch.float32).unsqueeze(1),
+    )
 
 
 def continuous_train_loop():
@@ -133,58 +141,58 @@ def continuous_train_loop():
             print(f"[*] Cycle {cycle} | Difficulty: {difficulty.upper()} | Samples: {samples:,} | LR: {lr}")
             print(f"=======================================================")
             
-            X, y = generate_dynamic_dataset(samples, difficulty=difficulty)
-            
+            X, X_lex, y = generate_dynamic_dataset(samples, difficulty=difficulty)
+
             split_idx = int(len(X) * 0.8)
-            X_train, y_train = X[:split_idx], y[:split_idx]
-            X_val, y_val = X[split_idx:], y[split_idx:]
-            
-            model = DGA_CNN()
+            X_train, X_lex_train, y_train = X[:split_idx], X_lex[:split_idx], y[:split_idx]
+            X_val, X_lex_val, y_val = X[split_idx:], X_lex[split_idx:], y[split_idx:]
+
+            model = DGA_HybridModel()
             criterion = nn.BCELoss()
             optimizer = optim.Adam(model.parameters(), lr=lr)
-            
+
             best_acc = 0.0
             patience = 5
             epochs_no_improve = 0
             epoch = 0
-            
+
             from torch.utils.data import TensorDataset, DataLoader
-            train_dataset = TensorDataset(X_train, y_train)
+            train_dataset = TensorDataset(X_train, X_lex_train, y_train)
             train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True)
-            
+
             while epochs_no_improve < patience and epoch < 30:
                 epoch += 1
                 model.train()
-                for batch_x, batch_y in train_loader:
+                for batch_x, batch_lex, batch_y in train_loader:
                     optimizer.zero_grad()
-                    loss = criterion(model(batch_x), batch_y)
+                    loss = criterion(model(batch_x, batch_lex), batch_y)
                     loss.backward()
                     optimizer.step()
-                
+
                 model.eval()
-                with torch.no_grad():
-                    val_preds = model(X_val) # X_val is small enough (20%) or should be batched. Let's batch val too to be safe.
-                
-                val_dataset = TensorDataset(X_val, y_val)
+                val_dataset = TensorDataset(X_val, X_lex_val, y_val)
                 val_loader = DataLoader(val_dataset, batch_size=512)
                 correct = 0
                 total = 0
                 with torch.no_grad():
-                    for batch_x, batch_y in val_loader:
-                        preds = model(batch_x)
+                    for batch_x, batch_lex, batch_y in val_loader:
+                        preds = model(batch_x, batch_lex)
                         predictions = (preds > 0.5).float()
                         correct += (predictions == batch_y).float().sum().item()
                         total += len(batch_y)
                 accuracy = (correct / total) * 100
-                    
+
                 acc_val = float(accuracy)
-                
+
                 if acc_val > best_acc:
                     print(f"    Epoch {epoch:02d} | Val Accuracy: {acc_val:.3f}% (NEW BEST)")
                     best_acc = acc_val
                     epochs_no_improve = 0
-                    
-                    traced_model = torch.jit.trace(model, torch.zeros((1, 35), dtype=torch.long))
+
+                    traced_model = torch.jit.trace(
+                        model,
+                        (torch.zeros((1, 35), dtype=torch.long), torch.zeros((1, LEX_DIM), dtype=torch.float32)),
+                    )
                     traced_model.save("models/cnn_dga_temp.pt")
 
                     # Pre-calculate hash for the temp model to ensure atomicity

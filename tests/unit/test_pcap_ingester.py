@@ -9,7 +9,7 @@ import os
 from unittest.mock import MagicMock, patch
 
 import pytest
-from scapy.all import IP, TCP, UDP, Raw, wrpcap
+from scapy.all import DNS, DNSQR, IP, TCP, UDP, Raw, wrpcap
 
 from ingest.pcap_ingester import _emit_flow, ingest_pcap
 
@@ -69,6 +69,61 @@ class TestIngestPcap:
         fake_producer.flush.assert_called_once()
         sent_flows = [call.args[1] for call in fake_producer.send.call_args_list]
         assert any(f.get("orig_pkts") == 1 and f.get("resp_pkts") == 1 for f in sent_flows)
+
+    def test_conn_flows_carry_event_type_conn(self, tmp_path):
+        """Regression test: every rule in inference/rules.py and every
+        extractor in inference/features.py gates on
+        event.get("event_type") == "conn" -- without this key, nothing
+        this ingester ever emitted was reachable by any connection-based
+        rule at all, confirmed by actually running a real malware pcap
+        through the live pipeline and getting zero detections back."""
+        pcap_path = tmp_path / "tcp.pcap"
+        wrpcap(str(pcap_path), [IP(src="10.0.0.1", dst="10.0.0.2") / TCP(sport=1234, dport=80)])
+
+        fake_producer = MagicMock()
+        with patch("ingest.pcap_ingester.KafkaProducer", return_value=fake_producer):
+            ingest_pcap(str(pcap_path))
+
+        sent_flows = [call.args[1] for call in fake_producer.send.call_args_list]
+        assert any(f.get("event_type") == "conn" for f in sent_flows)
+
+    def test_dns_query_is_emitted_as_its_own_dns_event(self, tmp_path):
+        pcap_path = tmp_path / "dns.pcap"
+        dns_query = (
+            IP(src="10.0.0.1", dst="8.8.8.8")
+            / UDP(sport=5353, dport=53)
+            / DNS(rd=1, qd=DNSQR(qname="xqzjk7fake-dga.example.com"))
+        )
+        wrpcap(str(pcap_path), [dns_query])
+
+        fake_producer = MagicMock()
+        with patch("ingest.pcap_ingester.KafkaProducer", return_value=fake_producer):
+            ingest_pcap(str(pcap_path))
+
+        sent_flows = [call.args[1] for call in fake_producer.send.call_args_list]
+        dns_events = [f for f in sent_flows if f.get("event_type") == "dns"]
+        assert len(dns_events) == 1
+        assert dns_events[0]["query"] == "xqzjk7fake-dga.example.com"
+        assert dns_events[0]["qtype_name"] == "A"
+
+    def test_dns_response_is_not_emitted_as_a_query(self, tmp_path):
+        """qr=1 marks a DNS *response*, not a query -- inference/rules.py's
+        entropy/tunnelling checks are about what a host asked for, not
+        what a resolver answered with."""
+        pcap_path = tmp_path / "dns_response.pcap"
+        dns_response = (
+            IP(src="8.8.8.8", dst="10.0.0.1")
+            / UDP(sport=53, dport=5353)
+            / DNS(qr=1, rd=1, qd=DNSQR(qname="example.com"))
+        )
+        wrpcap(str(pcap_path), [dns_response])
+
+        fake_producer = MagicMock()
+        with patch("ingest.pcap_ingester.KafkaProducer", return_value=fake_producer):
+            ingest_pcap(str(pcap_path))
+
+        sent_flows = [call.args[1] for call in fake_producer.send.call_args_list]
+        assert not any(f.get("event_type") == "dns" for f in sent_flows)
 
     def test_udp_flow_is_tracked(self, tmp_path):
         pcap_path = tmp_path / "udp.pcap"

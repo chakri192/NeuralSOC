@@ -15,6 +15,58 @@ from prometheus_client import Histogram
 
 logger = logging.getLogger(__name__)
 
+_VOWELS = frozenset("aeiou")
+_CONSONANTS = frozenset(string.ascii_lowercase) - _VOWELS
+LEX_DIM = 7
+
+
+def lexical_features(label: str) -> list:
+    """Cheap statistical signal alongside the character CNN below.
+
+    Dictionary-style DGA domains -- real families like suppobox/gozi, and
+    the arch.filemegahab4.sbs-style domains seen when this pipeline was
+    run against a real Lumma Stealer capture -- are built from real words
+    specifically to defeat character-randomness detection. Entropy/digit/
+    vowel-ratio features look past the raw character sequence and give
+    the model a second, largely independent signal for exactly that case.
+
+    inference/train_model.py imports this same function for training-time
+    feature computation -- one implementation, not two that could drift
+    and silently make the lex half of the model meaningless at inference.
+    """
+    n = len(label)
+    if n == 0:
+        return [0.0] * LEX_DIM
+
+    counts: dict = {}
+    for c in label:
+        counts[c] = counts.get(c, 0) + 1
+    entropy = -sum((cnt / n) * math.log2(cnt / n) for cnt in counts.values())
+
+    digits = sum(1 for c in label if c.isdigit())
+    vowels = sum(1 for c in label if c in _VOWELS)
+    hyphens = label.count('-')
+
+    max_run = 0
+    current_run = 0
+    for c in label:
+        if c in _CONSONANTS:
+            current_run += 1
+            max_run = max(max_run, current_run)
+        else:
+            current_run = 0
+
+    return [
+        min(n / 63.0, 1.0),
+        min(entropy / 5.25, 1.0),
+        digits / n,
+        vowels / n,
+        len(counts) / n,
+        min(max_run / 10.0, 1.0),
+        hyphens / n,
+    ]
+
+
 MODEL_INFERENCE_DURATION = Histogram(
     'model_inference_duration_seconds',
     'Wall time of DeepLearningEngine.predict(), including every early-exit guard clause',
@@ -201,34 +253,43 @@ class DeepLearningEngine:
             domains_subset = domains_to_check[:8]
             budget_per_domain = max(1, 32 // len(domains_subset)) if domains_subset else 32
 
+            all_texts = []
+
             for d in domains_subset:
                 encoded = [self.char_map.get(c, 0) for c in d]
                 if not encoded:
                     continue
 
                 domain_slices = []
+                text_slices = []
                 # Sliding window across domain to ensure zero blind spots for long domains
                 if len(encoded) > 35:
                     step = 15
                     for start in range(0, len(encoded) - 35 + 1, step):
                         domain_slices.append(encoded[start:start + 35])
+                        text_slices.append(d[start:start + 35])
                         if len(domain_slices) >= budget_per_domain:
                             break
                     if len(domain_slices) < budget_per_domain and (len(encoded) - 35) % step != 0:
                         domain_slices.append(encoded[-35:])
+                        text_slices.append(d[-35:])
                 else:
                     domain_slices.append(encoded + [0] * (35 - len(encoded)))
+                    text_slices.append(d)
 
                 all_slices.extend(domain_slices[:budget_per_domain])
+                all_texts.extend(text_slices[:budget_per_domain])
 
             # Bound slices to 32 to guarantee deterministic O(1) memory and latency
             all_slices = all_slices[:32]
+            all_texts = all_texts[:32]
 
             if all_slices and current_model is not None:
                 # Batch all slices into a single forward context to eliminate GIL/Python loop overhead
                 batch_tensor = torch.tensor(all_slices, dtype=torch.long)
+                lex_tensor = torch.tensor([lexical_features(t) for t in all_texts], dtype=torch.float32)
                 with torch.no_grad():
-                    output_probs = current_model(batch_tensor)
+                    output_probs = current_model(batch_tensor, lex_tensor)
                     max_prob = float(torch.max(output_probs).item())
                     if max_prob > highest_prob:
                         highest_prob = max_prob
@@ -328,6 +389,7 @@ class ThreatModelOrchestrator:
                     "threat_class": "DGA / DNS Tunnelling",
                     "severity": "high",
                     "confidence": prob,
-                    "rule_id": "DL_CNN_DGA"
+                    "rule_id": "DL_CNN_DGA",
+                    "evidence": {"domain": query},
                 })
         return detections

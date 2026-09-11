@@ -205,7 +205,17 @@ async def process_traffic(stream):
                                     "threat_class": "DGA / DNS Tunnelling",
                                     "severity": "high",
                                     "confidence": prob,
-                                    "rule_id": "DL_CNN_DGA"
+                                    "rule_id": "DL_CNN_DGA",
+                                    # Previously omitted entirely: every DGA
+                                    # alert this pipeline ever produced was
+                                    # undiagnosable without re-parsing raw
+                                    # traffic -- confirmed by having to do
+                                    # exactly that (a standalone script
+                                    # re-scoring the pcap's real DNS queries)
+                                    # to find out which domain triggered a
+                                    # real alert during the Lumma Stealer
+                                    # pcap test.
+                                    "evidence": {"domain": query},
                                 })
                 except asyncio.TimeoutError:
                     logger.warning("DL inference timed out for domain; skipping")

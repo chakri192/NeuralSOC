@@ -251,6 +251,12 @@ class TestSOCPipelineSecurity(unittest.TestCase):
         # Test benign dns event
         dets = orchestrator.evaluate({"event_type": "dns", "query": "google.com"}, {})
         self.assertEqual(dets, [])
+        # A flagged DGA detection must carry the triggering domain in
+        # evidence -- previously omitted entirely (see the matching
+        # stream_processor_faust.py regression test).
+        with patch.object(orchestrator.dl_engine, "predict", return_value=(True, 0.97, 0.1)):
+            dets = orchestrator.evaluate({"event_type": "dns", "query": "xk3q9z7-evil.biz"}, {})
+        self.assertEqual(dets[0]["evidence"], {"domain": "xk3q9z7-evil.biz"})
 
     def test_idna_homoglyph_handling(self):
         engine = DeepLearningEngine()
@@ -1229,6 +1235,36 @@ class TestSOCPipelineSecurity(unittest.TestCase):
             self.assertTrue(alerts_send.call_args.kwargs.get("force"))
             incidents_send.assert_not_awaited()  # add_alert returned None -> no incident
             dlq.assert_not_awaited()
+
+        asyncio.run(_run())
+
+    def test_dga_alert_evidence_carries_the_triggering_domain(self):
+        """Regression test: the DGA alert dict used to omit `evidence`
+        entirely, so every DGA alert this pipeline ever produced was
+        undiagnosable without re-parsing raw traffic -- confirmed by
+        having to do exactly that (independently re-scoring a real
+        pcap's DNS queries) to find out which domain triggered a real
+        alert during a live Lumma Stealer pcap test."""
+        import inference.stream_processor_faust as sp
+
+        event = {"event_type": "dns", "id.orig_h": "10.0.0.5", "id.resp_h": "8.8.8.8", "query": "xk3q9z7-evil.biz"}
+
+        async def _run():
+            with patch.object(sp, "extract_features", return_value={}), \
+                 patch.object(sp, "evaluate_rules", return_value=[]), \
+                 patch.object(sp.dl_engine, "predict", return_value=(True, 0.97, 0.1)), \
+                 patch.object(sp, "validate_alert", return_value=(True, None)), \
+                 patch.object(sp.enricher, "enrich", new=AsyncMock(side_effect=lambda a: a)), \
+                 patch.object(sp.alerts_topic, "send", new=AsyncMock(return_value=None)) as alerts_send, \
+                 patch.object(sp.correlator, "add_alert", return_value=None), \
+                 patch.object(sp.incidents_topic, "send", new=AsyncMock(return_value=None)), \
+                 patch.object(sp, "_send_dlq_safely", new=AsyncMock()):
+                await sp.process_traffic.fun(self._fake_stream([event]))
+
+            alerts_send.assert_awaited_once()
+            sent_alert = alerts_send.call_args.kwargs["value"]
+            self.assertEqual(sent_alert["threat_class"], "DGA / DNS Tunnelling")
+            self.assertEqual(sent_alert["evidence"], {"domain": "xk3q9z7-evil.biz"})
 
         asyncio.run(_run())
 

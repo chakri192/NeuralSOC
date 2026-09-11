@@ -16,9 +16,9 @@ This project simulates a real-time, high-speed SOC (Security Operations Center) 
 To solve the payload-blindness constraint, the system uses a hybrid mix of **Deep Learning, Machine Learning, and Behavioral Statistics** to detect the 6 deadliest threat vectors:
 
 ### 1. DGA & DNS Tunnelling (Deep Learning, validated against real malware)
-* **Threat:** Hackers exfiltrate data or find C2 servers using randomized domain names.
-* **Solution:** A **PyTorch 1D Convolutional Neural Network (CNN)** reads the sequence of characters in a domain name, rather than just scoring entropy.
-* **Validated against real data, not just our own simulator:** run against a published research dataset of 25 real malware families' actual DGA domains — 86.5% precision, 5.9% false-positive rate. Honest nuance if asked for the per-family breakdown: it catches character-random families like `corebot`/`rovnix` at 98%+, but the dictionary-word-style families (`suppobox`, `gozi` — deliberately designed by their authors to generate real-word-like domains specifically to evade this class of detection) are where it's weakest. That's a real, known gap, not a hidden one.
+* **Threat:** Hackers exfiltrate data or find C2 servers using randomized domain names — or real-word domains built to look legitimate.
+* **Solution:** A **PyTorch hybrid model** — three parallel 1D-CNN branches (kernel sizes 3/5/7) reading the character sequence at multiple scales, plus a lexical-statistics branch (entropy, digit/vowel ratio, etc.) as a second, independent signal — specifically built to catch dictionary-style DGA that a pure character CNN misses.
+* **Validated against real data, not just our own simulator:** run against a published research dataset of 25 real malware families' actual DGA domains — 85.2% precision, 69.8% recall, 12.0% false-positive rate. Also run against a real published Lumma Stealer pcap end-to-end through the live pipeline: caught 5 of 7 genuinely suspicious domains in that capture (was 1 of 7 before this rebuild). Honest nuance: this is a real trade-off, not a strict win — recall nearly doubled, but false-positive rate roughly doubled too, and a few character-random families (`vawtrak`, `conficker`, `pushdo`) score lower than before. That's a disclosed, measured cost, not a hidden one.
 
 ### 2. Zero-Day Data Exfiltration & Behavioral Anomalies (Statistical rule + Deep Learning, both live)
 * **Threat:** A compromised insider machine starts uploading a database to an unknown IP -- or any flow that simply doesn't look like the rest of the traffic on this network.
