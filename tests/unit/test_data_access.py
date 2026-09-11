@@ -184,8 +184,12 @@ class TestGetIncidents:
         assert set(inc["threat_classes"]) == {"DDoS", "Reconnaissance"}
         assert set(inc["affected_entities"]) == {"10.0.0.5", "1.1.1.1", "2.2.2.2"}
         assert inc["related_alert_ids"] == ["a1", "a2"]
-        # base_score 100 (critical) + volume_bonus min(20, (2-1)*5) = 5 -> 100 (capped)
-        assert inc["risk_score"] == 100.0
+        # inference.risk.calculate_risk_score(): two distinct detectors
+        # (DDoS at severity-implied 0.55, Reconnaissance at 0.97, neither
+        # alert sets confidence_score) combine via log-odds pooling, not
+        # a flat severity-bucket-plus-volume formula -- see
+        # inference/risk.py's docstring for why.
+        assert inc["risk_score"] == 97.53
 
     def test_alerts_from_different_source_ips_produce_separate_incidents(self, monkeypatch):
         mgr = _configured_manager(monkeypatch)

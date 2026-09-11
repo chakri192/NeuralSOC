@@ -237,7 +237,7 @@ class IncidentCorrelator:
             return False
 
 
-    def add_alert(self, alert, threshold=80.0):
+    def add_alert(self, alert, threshold=50.0):
         if not self.check_redis_master(): return None
         import re
         raw_src = str(alert.get("source_ip", "127.0.0.1")).strip()
@@ -338,6 +338,24 @@ class IncidentCorrelator:
                 entities_list = list(affected_entities_set)
                 calculated_risk = calculate_risk_score(parsed_alerts_list)
                 final_risk = float(calculated_risk)
+
+                # `threshold` used to be accepted here and never once
+                # read in the rest of this method -- the Lua script's own
+                # per-alert severity/volume heuristic was the only thing
+                # that ever decided whether an incident got constructed
+                # at all, so this parameter silently implied a filter
+                # that didn't exist. Now it does: the Lua script's
+                # cheaper, single-alert-severity check still decides
+                # WHEN to even build a candidate incident (unchanged --
+                # not touched here), but a candidate whose full
+                # corroborated risk score doesn't clear this threshold is
+                # suppressed rather than published. Redis's own window
+                # state is untouched either way -- this only decides
+                # whether THIS call returns an incident, not whether the
+                # underlying alert/count state was recorded (it already
+                # was, by the Lua script above).
+                if final_risk < threshold:
+                    return None
 
                 return {
                     "incident_id": f"INC-{uuid.uuid4().hex[:8].upper()}",

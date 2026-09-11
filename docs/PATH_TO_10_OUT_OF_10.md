@@ -4,11 +4,12 @@ Honest starting point, not a sales pitch: two of six detection categories
 (DGA, flow anomaly) are now validated against real attack data and hold up
 well. Of the other four, three now have real numbers too — one
 (Reconnaissance) genuinely works, three others (DDoS, C2, Exfil) barely
-fire on real traffic. Every detector fires independently into one flat
-alert stream — nothing combines their signals into one calibrated
-per-incident confidence. And every validated model/rule so far is proven
-against exactly one real dataset, not several. That's the gap between
-"genuinely good, evidence-backed in places" (where this is today) and 10/10.
+fire on real traffic. Detectors now combine into one calibrated
+per-incident score instead of firing independently, and that combination
+is itself measured against real data: 53.7% recall at 98.8% precision,
+beating the best single detector alone. Every validated model/rule/
+composite-score is still proven against exactly one real dataset, not
+several — see Phase 10.
 
 Ordered by how directly each phase closes a *named* gap from the honest
 assessment above, cheapest first. CTU-13 (already downloaded, CC-BY,
@@ -17,13 +18,16 @@ covers most of Phases 5-6 with zero new data-sourcing — a deliberate
 choice: reuse what's already been paid for in download time before going
 back to the well for a new dataset.
 
-**Phases 5, 6, and 7 are done** (6 partially — JA4 still needs new data).
-5 and 6 found real, previously-unmeasured gaps, not false alarms: Phase
-5's DNS burst detector had a 100%-reproducible false-positive bug; Phase
-6 found that only 1 of 4 newly-validated rules actually works well
-against real attack traffic. Phase 7 makes sure neither regresses
-silently: every validated detector (DGA, flow anomaly, and the 4 rules)
-now has the same CI-enforced real-world regression gate. See each phase
+**Phases 5, 6, 7, and 8 are done** (6 partially — JA4 still needs new
+data). 5 and 6 found real, previously-unmeasured gaps, not false alarms:
+Phase 5's DNS burst detector had a 100%-reproducible false-positive bug;
+Phase 6 found that only 1 of 4 newly-validated rules actually works well
+against real attack traffic. Phase 7 makes sure none of it regresses
+silently: every validated detector — DGA, flow anomaly, the 4 rules, and
+now the composite score itself — has the same CI-enforced real-world
+regression gate. Phase 8 combined all of it into one calibrated
+per-incident score and proved, against real data, that the combination
+genuinely catches more than any single detector alone. See each phase
 below for the numbers.
 
 ---
@@ -122,24 +126,36 @@ yet), not something this gate makes for you.
 
 ## Phase 8 — Composite, per-incident scoring instead of independent alerts
 
-Right now the DGA CNN, the entropy rule, the DNS-burst tracker, and the
-flow autoencoder each fire independently — a single suspicious connection
-can produce two, three, or more separate alerts for the same underlying
-incident (already visible in this session's own live-pipeline runs: DGA
-alerts and burst alerts both firing for the same domain query).
-`inference/correlation.py` already groups alerts into incidents by
-source/time window, but doesn't combine their *confidence* into one
-calibrated number — an incident with one weak signal and one with four
-weak signals corroborating each other currently look similar in severity.
+**Status: done.** `inference/risk.py`'s `calculate_risk_score()` now
+combines each incident's distinct detectors via log-odds pooling instead
+of a flat severity-bucket-plus-volume heuristic that ignored
+`confidence_score` entirely and let repeated firings of the same
+detector (224 duplicate `RULE_DNS_QUERY_BURST` alerts from one ongoing
+DNS burst, observed live this session) inflate risk linearly.
 
-A genuinely 10/10 system computes one incident-level risk score as a
-function of which detectors fired and how confidently, calibrated against
-labeled ground truth (CTU-13's rich per-flow labels are, again, directly
-reusable here as training/validation data for this calibration) rather
-than each detector's threshold being tuned in isolation. This is the
-piece that actually delivers the "recall and precision improve together"
-promise from the original roadmap's Phase 2 framing — behavioral and
-lexical signals corroborating each other, not just running in parallel.
+**Measured against real data**
+(`scripts/evaluate_composite_scoring_against_real_data.py`, real CTU-13
+flows through the flow autoencoder + all 4 rules): combining detectors
+catches **53.7% of real botnet flows at 98.8% precision**, versus 48.5%
+for the best single detector alone — this is the "recall and precision
+improve together" promise actually delivered, not just reframed. Also
+surfaced a genuinely new finding along the way: the flow autoencoder's
+headline 99.8% recall (Phase 3) is against one held-out scenario; across
+all 13 real scenarios it catches only ~37% alone, a materially more
+honest picture that directly motivates Phase 10 below.
+
+**A second real bug, found while wiring this in:**
+`IncidentCorrelator.add_alert()`'s `threshold` parameter had been dead
+code — accepted, never read — so no risk-score filter existed at all
+despite the parameter's name implying one. Now it gates real incident
+publication, calibrated the same way as every other threshold in this
+project: a real sweep found the naive inherited default (80) actually
+made the composite score perform *worse* than trusting the single best
+detector (26.3% vs. 48.5% recall); 50 is the real, evidence-based value.
+
+Full writeup, numbers, and the exact log-odds formula in
+[SECURITY.md](../SECURITY.md#composite-incident-scoring). Also gated by
+a CI regression check, same as every other detector in this plan.
 
 ## Phase 9 — External reputation signal (the one architectural gap, not just a tuning gap)
 
@@ -192,20 +208,24 @@ Not a bigger model, again — a system where:
    model — is caught by CI before merge: verified by simulating a real
    regression against each new gate and confirming it fails the build
    (Phase 7).
-4. An incident's reported confidence reflects how many independent
+4. ✅ An incident's reported confidence reflects how many independent
    signals corroborate it, not just whichever detector happened to fire
-   first (Phase 8).
+   first — and combining them measurably catches more real attacks
+   (53.7% vs. 48.5% recall for the best single detector), not just a
+   reshuffled number (Phase 8).
 5. The one remaining hard problem (dictionary DGA) has an honestly-scoped
    answer — a named external dependency to add, not a vague "needs more
    research" (Phase 9).
 6. Today's real numbers are shown to hold up across many real scenarios,
-   not one lucky benchmark each (Phase 10).
+   not one lucky benchmark each (Phase 10) — Phase 8's own evaluation
+   already surfaced a concrete reason this matters: the flow
+   autoencoder's 99.8% recall (Phase 3) drops to ~37% across all 13 real
+   scenarios instead of the one it was validated against.
 
-Phases 5, 6, and 7 are done (6 partially). Effort for the rest: Phase 8
-is the real project-sized piece here, similar scope to the original
-roadmap's Phase 2. Phase 9 is a real infrastructure/cost decision to
-raise with whoever owns that call, not a solo coding task. Phase 10 is
-mostly re-running Phase 1/3/6's already-built scripts against more of
-what's already downloaded — plus, now, a second independent dataset
-before retuning Phase 6's three weak rules, to avoid validating a fix
-against the same data that found the gap.
+Phases 5, 6, 7, and 8 are done (6 partially). Effort for the rest: Phase
+9 is a real infrastructure/cost decision to raise with whoever owns that
+call, not a solo coding task. Phase 10 is mostly re-running Phase
+1/3/6/8's already-built scripts against more of what's already
+downloaded — plus, now, a second independent dataset before retuning
+Phase 6's three weak rules, to avoid validating a fix against the same
+data that found the gap.

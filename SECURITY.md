@@ -513,6 +513,73 @@ TLS handshake data at all. That needs a genuinely different real
 dataset (a real malicious JA3/JA4 fingerprint feed, e.g. Abuse.ch), not
 something already on disk; still open.
 
+## Composite incident scoring
+
+Every detector above fires independently into one flat alert stream.
+[inference/risk.py](inference/risk.py)'s `calculate_risk_score()` is
+what turns a correlated group of alerts
+([inference/correlation.py](inference/correlation.py)'s
+`IncidentCorrelator`) into one reported confidence number — it used to
+be a "max severity bucket + 5 flat points per additional alert"
+heuristic that had two real problems, both found by actually running it
+against real behavior rather than by inspection:
+
+1. It **ignored each alert's own `confidence_score` entirely** — a
+   `DL_CNN_DGA` hit at 0.51 and one at 0.99 both just mapped to "high"
+   severity's flat 75 points.
+2. It **rewarded raw alert volume linearly**, whether that volume came
+   from several genuinely different, corroborating detectors or the
+   same detector re-firing on one ongoing pattern. Observed live this
+   session: 224 duplicate `RULE_DNS_QUERY_BURST` alerts from a single
+   host's one ongoing DNS burst would have inflated risk 224x under the
+   old scheme for what is, underneath, one corroborating signal.
+
+**Fix:** log-odds pooling (a naive-Bayes-style independent-evidence
+combination). Alerts are grouped by detector (`model_name`/`rule_id`,
+falling back to `threat_class`) and deduplicated to each detector's
+single strongest alert — correlated repeats of the same detector aren't
+independent evidence — then combined via `Σ log(cᵢ/(1-cᵢ))` and mapped
+back to a 0-100 score. A single detector's score reduces to its own
+confidence; genuinely distinct, corroborating detectors combine into a
+meaningfully stronger joint estimate; endless repeats of one detector
+don't move the score at all.
+
+**Measured against real data**
+(`scripts/evaluate_composite_scoring_against_real_data.py`, running the
+flow autoencoder and all 4 real rules against every real CTU-13 flow in
+`benchmarks/real_rule_validation_dataset.csv`): combining detectors
+catches **53.7% of real botnet flows at 98.8% precision**, versus 48.5%
+for the single best detector (Reconnaissance) alone — a genuine recall
+improvement from corroboration, not a reshuffled number. This same run
+also surfaced a real, previously-undisclosed nuance: the flow
+autoencoder's headline 99.8% recall number is against one held-out
+scenario; across all 13 real scenarios it catches only ~37% alone — a
+materially more honest picture of its single-model generalization, and
+the concrete motivation for combining it with other signals rather than
+trusting it alone (see `docs/PATH_TO_10_OUT_OF_10.md`'s Phase 10 for the
+broader multi-scenario validation this points toward).
+
+**A second real bug, found while wiring this up:** `IncidentCorrelator.add_alert()`'s
+`threshold` parameter (default `80.0`) was accepted and never once read
+in the method body — the Lua correlation script's own cheap per-alert
+severity/volume heuristic was the *only* thing that ever decided whether
+an incident got constructed, so the parameter silently implied a
+risk-score filter that didn't exist. Now it does: a candidate incident
+whose composite score doesn't clear `threshold` is suppressed (the
+underlying Redis window/count state is untouched either way — only
+publication is gated). Choosing the right value the same way as every
+other threshold in this document: a real sweep against the composite
+score's actual distribution on real data found the naive inherited value
+of 80 made the composite score perform *worse* than the best single
+detector alone (26.3% vs. 48.5% recall, since no individual rule's fixed
+confidence — Reconnaissance's 0.75, e.g. — clears 80 without
+corroboration); 50 sits at the safe edge of a wide, flat, real plateau
+that gives the 53.7%/98.8%/0.50% numbers above.
+
+Also gated by a CI regression check
+(`benchmarks/composite_scoring_baseline.json`), same pattern as every
+other real-data evaluator in this document.
+
 ## Dependency scanning
 
 A one-time `pip-audit` sweep brought the full dependency tree to zero

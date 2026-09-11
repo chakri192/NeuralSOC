@@ -177,6 +177,37 @@ class TestSOCPipelineSecurity(unittest.TestCase):
         self.assertEqual(inc2["severity"], "high")
         self.assertGreaterEqual(inc2["risk_score"], 75.0)
 
+    def test_correlator_suppresses_a_weakly_corroborated_incident(self):
+        """The `threshold` param on add_alert() used to be accepted and
+        never once read in the method body -- the Lua script's own
+        total_count==2 escalation trigger was the only thing that
+        decided whether an incident got constructed at all, so this
+        silently implied a risk-score filter that didn't exist. Two
+        genuinely low-confidence alerts (0.3 each) combine to a real
+        composite score of ~15.5 (inference.risk.calculate_risk_score's
+        log-odds pooling) -- below the default threshold=50.0 -- and
+        must now be suppressed even though the Lua script's cheap
+        per-alert heuristic would have escalated on alert count alone."""
+        correlator = self._make_correlator()
+        test_ip = "192.168.100.43"
+
+        weak1 = {
+            "alert_id": "ALT-W1", "source_ip": test_ip, "destination_ip": "10.0.0.1",
+            "threat_class": "Reconnaissance", "model_name": "RULE_RECON_PORT_SCAN",
+            "severity": "low", "confidence_score": 0.3,
+        }
+        weak2 = {
+            "alert_id": "ALT-W2", "source_ip": test_ip, "destination_ip": "10.0.0.2",
+            "threat_class": "C2 Beaconing", "model_name": "RULE_C2_HEARTBEAT",
+            "severity": "low", "confidence_score": 0.3,
+        }
+
+        self.assertIsNone(correlator.add_alert(weak1))
+        # The Lua script's own total_count==2 trigger would have
+        # escalated this -- it must be suppressed by the composite
+        # score gate instead, not published as a real incident.
+        self.assertIsNone(correlator.add_alert(weak2))
+
     def test_enrichment_cache_and_fallback(self):
         async def run_async_test():
             enricher = ThreatEnricher(cache_ttl_sec=60)

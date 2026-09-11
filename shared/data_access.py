@@ -11,7 +11,15 @@ import time
 import logging
 from datetime import datetime, timezone
 
+from inference.risk import calculate_risk_score
+
 logger = logging.getLogger("data_access")
+
+# Only for picking which single severity string to display as an
+# incident's headline "severity" field (the highest-scored alert's own
+# severity wins) -- risk SCORING itself is calculate_risk_score() above,
+# not this table.
+_SEVERITY_DISPLAY_ORDER = {"critical": 100.0, "high": 75.0, "medium": 50.0, "low": 25.0}
 
 # Same env var _load_config() resolves below for DataStreamManager, and
 # the same one shared/triage_store.py and terminal/tsoc_console.py each
@@ -55,12 +63,20 @@ def synthesize_incidents(alerts: list) -> list:
     tenant-scoped alerts via its own per-employee JWT, not through this
     module's single-service-key singleton -- can reuse the exact same
     grouping/risk-scoring logic instead of re-implementing it.
+
+    Risk scoring itself is inference.risk.calculate_risk_score() -- this
+    function used to reimplement a materially weaker version inline
+    (uncapped severity-bucket max + a flat volume bonus, ignoring each
+    alert's own confidence_score entirely), a second implementation that
+    had already drifted from the live pipeline's own scoring before this
+    was noticed. Same real alert schema either way (confidence_score,
+    model_name, from api/routes/alerts.py's stored rows), so the shared
+    function applies directly.
     """
     if not alerts:
         return []
 
     incidents_by_src = {}
-    severity_scores = {"critical": 100.0, "high": 75.0, "medium": 50.0, "low": 25.0}
 
     for a in alerts:
         src = a.get("source_ip") or "127.0.0.1"
@@ -75,10 +91,10 @@ def synthesize_incidents(alerts: list) -> list:
                 "evidence_summary": "",
                 "status": "active",
                 "max_sev_score": 0.0,
-                "alert_count": 0
+                "group_alerts": [],
             }
         inc = incidents_by_src[src]
-        inc["alert_count"] += 1
+        inc["group_alerts"].append(a)
         if a.get("threat_class"):
             inc["threat_classes"].add(a["threat_class"])
         if a.get("destination_ip"):
@@ -87,16 +103,14 @@ def synthesize_incidents(alerts: list) -> list:
             inc["related_alert_ids"].append(a["alert_id"])
 
         sev = str(a.get("severity", "low")).lower()
-        score = severity_scores.get(sev, 25.0)
+        score = _SEVERITY_DISPLAY_ORDER.get(sev, 25.0)
         if score > inc["max_sev_score"]:
             inc["max_sev_score"] = score
             inc["severity"] = sev
 
     formatted_incidents = []
     for src, inc in incidents_by_src.items():
-        base_score = inc["max_sev_score"]
-        volume_bonus = min(20.0, (inc["alert_count"] - 1) * 5.0)
-        risk_score = min(100.0, base_score + volume_bonus)
+        risk_score = calculate_risk_score(inc["group_alerts"])
 
         threats = list(inc["threat_classes"]) if inc["threat_classes"] else ["Unclassified Threat"]
         entities = [e for e in inc["affected_entities"] if e]
@@ -109,7 +123,7 @@ def synthesize_incidents(alerts: list) -> list:
             "threat_classes": threats,
             "affected_entities": entities if entities else [src],
             "related_alert_ids": inc["related_alert_ids"],
-            "evidence_summary": f"Aggregated {inc['alert_count']} alert(s) across {len(threats)} threat class(es) involving {src}",
+            "evidence_summary": f"Aggregated {len(inc['group_alerts'])} alert(s) across {len(threats)} threat class(es) involving {src}",
             "status": "active",
             "mitre_tactics": ["Command and Control", "Initial Access"],
             "mitre_techniques": ["T1071", "T1132"]
