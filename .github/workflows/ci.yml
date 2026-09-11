@@ -105,6 +105,22 @@ jobs:
         # own --help), not something CI should silently wave through.
         run: PYTHONPATH=. python3 scripts/evaluate_against_real_dga_dataset.py
 
+      - name: DGA model second, independent dataset regression gate
+        # Answers docs/PATH_TO_10_OUT_OF_10.md's Phase 10 question: does
+        # the gate above's 84.6%/77.2%/13.9% actually generalize, or is it
+        # an artifact of that one benchmark's specific domain generation?
+        # benchmarks/real_dga_domains_umudga.csv is built from UMUDGA (MIT
+        # licensed, malware DGA implementations actually executed, not
+        # wire-observed like the first dataset) for the malicious side and
+        # Tranco (not Alexa) for the benign side -- both independent of
+        # the first gate's sourcing. Measured live: 86.3%/75.8%/12.0%,
+        # remarkably close to the first dataset's numbers -- real evidence
+        # the CNN's performance isn't an artifact of one benchmark. This
+        # gate protects that finding the same way: fails if any of the 51
+        # anonymized-but-traceable malware groups' recall drops more than
+        # 10 points against benchmarks/dga_second_dataset_baseline.json.
+        run: PYTHONPATH=. python3 scripts/evaluate_against_second_dga_dataset.py
+
       - name: Flow autoencoder real-world regression gate
         # Same idea as the DGA gate above, for the other validated DL
         # detector. The autoencoder was synthetic-only until this session

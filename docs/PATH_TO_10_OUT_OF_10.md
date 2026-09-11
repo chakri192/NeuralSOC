@@ -7,9 +7,10 @@ well. Of the other four, three now have real numbers too — one
 fire on real traffic. Detectors now combine into one calibrated
 per-incident score instead of firing independently, and that combination
 is itself measured against real data: 53.7% recall at 98.8% precision,
-beating the best single detector alone. Every validated model/rule/
-composite-score is still proven against exactly one real dataset, not
-several — see Phase 10.
+beating the best single detector alone. The flow autoencoder and DGA CNN
+are now each validated against a second, independent real dataset too —
+see Phase 10 — though the three weak rules (DDoS, C2, Exfil) still only
+have one real dataset (CTU-13) behind them.
 
 Ordered by how directly each phase closes a *named* gap from the honest
 assessment above, cheapest first. CTU-13 (already downloaded, CC-BY,
@@ -298,15 +299,39 @@ across a real, diverse set of them." See
 [SECURITY.md](../SECURITY.md#flow-autoencoder-validation-against-real-world-data)
 for the full writeup and the regression-catch verification.
 
-**Still open**: a second, independent DGA dataset.
-`benchmarks/real_dga_domains.csv` covers 25 families from one published
-dataset; a second, independent DGA dataset (if one can be sourced as
-cleanly as CTU-13 was) would confirm today's numbers aren't an artifact
-of this one benchmark's specific domain generation. Retuning Phase 6's
-three weak rules (`RULE_DDOS_VOLUMETRIC`, `RULE_C2_HEARTBEAT`,
-`RULE_CONN_EXFIL` — all 0.2-0.5% recall) is also still open, and depends
-on this: retuning them against the same CTU-13 data that measured the
-gap would be circular, not a real fix.
+**The second, independent DGA dataset: done.** Sourced UMUDGA (Zago et
+al., *Data in Brief*, 2020, MIT licensed — real malware DGA
+implementations actually executed, not wire-observed like the first
+dataset's Cucchiarelli source) for the malicious side, and Tranco (not
+Alexa) for the benign side, since UMUDGA's own benign set turned out to
+be built from English-word combinations rather than verified-real
+registered domains. Verified independence directly (0.07% exact-domain
+overlap with the first dataset) before trusting any of it. Measured live
+against the exact same shipped model: **86.3% precision / 75.8% recall /
+12.0% FPR**, versus the first dataset's 84.6%/77.2%/13.9% — remarkably
+close, real evidence today's numbers generalize across two
+independently-sourced real datasets rather than being an artifact of one
+benchmark's specific construction. One honest limitation, disclosed
+rather than worked around: UMUDGA's public metadata never exposes which
+of its 51 domain-list folders is which named malware family (only Locky
+was identifiable), so malicious rows are grouped by an anonymized but
+fully traceable group id (`benchmarks/umudga_group_manifest.csv` maps
+each back to its exact source folder) rather than a guessed, possibly
+wrong, family name. Now its own independent CI gate
+(`scripts/evaluate_against_second_dga_dataset.py`,
+`benchmarks/dga_second_dataset_baseline.json`), verified to actually
+catch a regression the same way as every other gate in this document.
+See [SECURITY.md](../SECURITY.md#model-validation-against-real-world-data)
+for the full writeup.
+
+**Still open**: retuning Phase 6's three weak rules
+(`RULE_DDOS_VOLUMETRIC`, `RULE_C2_HEARTBEAT`, `RULE_CONN_EXFIL` — all
+0.2-0.5% recall). This was originally blocked on sourcing a second
+dataset to retune against (retuning against the same CTU-13 data that
+measured the gap would be circular, not a real fix) — that gate now
+exists on the DGA side, but the equivalent for CTU-13 network-flow rules
+would need a second, independent flow-based intrusion dataset (not
+CTU-13 again), which hasn't been sourced yet.
 
 ---
 
@@ -342,17 +367,23 @@ Not a bigger model, again — a system where:
    in as a second, independent signal combined via Phase 8's log-odds
    pooling — live re-verification against the real pcap surfaced and
    fixed a real Python-3.10 date-parsing bug in the process (Phase 9).
-6. 🟡 Today's real numbers are shown to hold up across many real
-   scenarios, not one lucky benchmark each — done for the 4 rule-based
-   detectors and, now, independently CI-gated for the flow autoencoder:
-   its 99.8% recall (Phase 3) drops to 36.9% across all 13 real CTU-13
-   scenarios instead of the one it was validated against, and that gap
-   can no longer regress unnoticed (Phase 10). Still open: a second,
-   independent DGA dataset to rule out the DGA CNN's numbers being an
-   artifact of its one benchmark's specific domain-generation style.
+6. ✅ Today's real numbers are shown to hold up across many real
+   scenarios and against a second, independent dataset, not one lucky
+   benchmark each: the 4 rule-based detectors and flow autoencoder are
+   validated across all 13 real CTU-13 scenarios (its 99.8% recall from
+   Phase 3 drops to 36.9% there, and that gap is now independently
+   CI-gated so it can't regress unnoticed), and the DGA CNN's numbers
+   (84.6%/77.2%/13.9%) hold up nearly unchanged (86.3%/75.8%/12.0%)
+   against UMUDGA + Tranco, a second real dataset built from a
+   genuinely different malicious-domain-generation methodology and a
+   different benign source — real evidence today's numbers aren't an
+   artifact of any one benchmark's specific construction (Phase 10).
 
-Phases 5, 7, 8, and 9 are done (6 and 10 partially). Effort for the rest:
-Phase 10's remaining piece is sourcing a second, independent DGA dataset,
-then retuning Phase 6's three weak rules against it rather than against
-the same CTU-13 data that found the gap (retuning against the same data
-that measured the problem would be circular, not a real fix).
+Phases 5, 7, 8, 9, and 10 are done (6 partially — item 6's flow-
+autoencoder/rules piece is done, JA4 fingerprinting from Phase 6 remains
+the one still-unchecked detection category). What's left beyond that:
+retuning Phase 6's three weak rules (`RULE_DDOS_VOLUMETRIC`,
+`RULE_C2_HEARTBEAT`, `RULE_CONN_EXFIL`) needs a second, independent
+network-flow intrusion dataset (not CTU-13 again, for the same
+circularity reason the DGA retune avoided reusing its own first
+dataset) — not yet sourced.

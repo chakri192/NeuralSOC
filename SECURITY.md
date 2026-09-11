@@ -277,6 +277,66 @@ plan; these are its Phase 0):
   fix's effect lands on the *next* retrain, not the currently-deployed
   model.
 
+**A second, independently-sourced dataset: do these numbers hold up, or
+are they an artifact of this one benchmark?** Every number above is
+against exactly one real dataset (Cucchiarelli et al., wire-observed
+traffic, Alexa benign). [scripts/evaluate_against_second_dga_dataset.py](scripts/evaluate_against_second_dga_dataset.py)
+runs the identical live model against
+[benchmarks/real_dga_domains_umudga.csv](benchmarks/real_dga_domains_umudga.csv),
+built from a genuinely different real source for both halves:
+
+- **Malicious side: UMUDGA** (Zago, Gil Pérez, Martínez Pérez, *Data in
+  Brief*, 2020 — https://doi.org/10.1016/j.dib.2020.105400; dataset:
+  https://doi.org/10.17632/y8ph45msv8.1, MIT licensed). Different
+  construction from the first dataset entirely: instead of observing DGA
+  traffic on the wire, UMUDGA *executes* 50 real malware families' actual
+  DGA implementations in a controlled environment and records their real
+  output. Same real malware, a structurally different way of sampling
+  what it actually generates.
+- **Benign side: Tranco** (https://tranco-list.eu, list ID `K9QPW`,
+  captured 2026-09-01), not Alexa — a research-grade, manipulation-
+  resistant popularity ranking from a different organization, deliberately
+  *not* UMUDGA's own million-FQDN benign set, which turned out to be
+  built from Leipzig Corpora English words (plausible-looking strings,
+  not verified-real registered domains) rather than something suitable
+  as real ground truth.
+
+**Honest limitation, disclosed rather than worked around:** UMUDGA's
+public Mendeley listing exposes 206 file folders (roughly 4 per family:
+generator source plus domain lists at several size tiers) but never
+exposes which folder belongs to which of the 50 malware family names —
+only Locky was identifiable, via a distinctively-named build artifact
+sitting in its folder. Guessing the other names risked mislabeling a
+well-known malware family incorrectly, which is worse than not labeling
+it — so each of the 51 domain-list folders found is its own anonymous
+but reproducible group (`umudga_group_NN`), traceable back to its exact
+Mendeley source folder via [benchmarks/umudga_group_manifest.csv](benchmarks/umudga_group_manifest.csv).
+Verified independence directly before trusting any of this: only 21 of
+30,600 domains in the new dataset exactly match a domain already in the
+first one (0.07%, consistent with coincidental short-string collisions,
+not reused data).
+
+**Measured live, head-to-head against the exact same shipped model:**
+
+| | First dataset (Cucchiarelli/Alexa) | Second dataset (UMUDGA/Tranco) |
+|---|---|---|
+| Precision | 84.6% | 86.3% |
+| Recall | 77.2% | 75.8% |
+| FPR | 13.9% | 12.0% |
+
+Remarkably close — real evidence the model's performance generalizes
+across two independently-sourced, methodologically-different real
+datasets, not an artifact of the first benchmark's specific sampling.
+Per-group recall on the second dataset still varies widely (100% on
+several groups, down to 6.7% on the weakest one — printed in full by the
+script, traceable to a real source folder even without a confirmed
+malware name), the same real unevenness the first dataset already
+showed. Gated the same way as every other real-data check in this
+document: `benchmarks/dga_second_dataset_baseline.json` records each
+group's recall, and CI fails if any group drops more than 10 points —
+verified by mutating two groups' baselines to simulate a regression and
+confirming the script exits 1, then restoring the real measured values.
+
 ## Flow autoencoder validation against real-world data
 
 The flow autoencoder used to have no real-world benchmark at all — it
