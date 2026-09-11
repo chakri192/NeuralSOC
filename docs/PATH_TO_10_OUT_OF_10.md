@@ -159,20 +159,78 @@ a CI regression check, same as every other detector in this plan.
 
 ## Phase 9 — External reputation signal (the one architectural gap, not just a tuning gap)
 
+**Status: signal validated with real data; infrastructure decision still
+open, deliberately not made unilaterally — see below.**
+
 Dictionary-style DGA (`vawtrak`, `gozi`, `matsnu` — still 15-44% recall
 after everything else in this plan) has a real ceiling for any classifier
-that only ever sees the domain string once. The single most predictive
-real-world signal against this specific failure mode — used by every
-production DGA-detection system that actually beats a pure classifier —
-is **domain registration age**: a DGA domain is typically registered
-minutes to hours before use; a legitimate two-word brand domain is not.
-This system has no access to that signal today, and closing it requires
-a live external dependency (WHOIS/RDAP lookup, or a passive-DNS/threat-
-intel feed with registration-date data) — a real infrastructure and
-cost decision, not a code change, and one that should be raised
-explicitly rather than silently added. Flagging it here as the one gap
-in this whole plan that isn't closeable with more retraining or more
-already-downloaded data.
+that only ever sees the domain string once. Domain registration age is
+the standard production signal against this specific failure mode. This
+plan originally claimed DGA domains are "typically registered minutes to
+hours before use" — that was an unverified industry generalization, not
+something checked against this project's own real data. It's now been
+checked, and the real picture is more nuanced:
+
+**Real RDAP lookups against the 7 genuinely suspicious domains from the
+real Lumma Stealer capture** (free, public `rdap.org`, no cost, no data
+committed anywhere it wasn't already public):
+
+| Domain | Registered | Days before capture (2026-01-31) |
+|---|---|---|
+| `holiday-forever.cc` | 2026-01-22 | 9 |
+| `whooptm.cyou` | 2026-01-13 | 18 |
+| `megafilehub4.lat` | 2025-12-24 | 38 |
+| `communicationfirewall-security.cc` | 2025-12-16 | 46 |
+| `filemegahab4.sbs` | 2025-12-09 | 53 |
+| `hiyter.com` | 2025-05-15 | 261 (~8.7 months) |
+| `whitepepper.su` | — | **no RDAP service available for `.su`** |
+
+Compared against real legitimate domains (`google.com`: 1997,
+`microsoft.com`: 1991, `wikipedia.org`: 2001, `github.com`: 2007) — the
+separation is real and would be easy to threshold on (days-to-months old
+vs. decades old), but two honest caveats this plan's original framing
+missed entirely:
+
+1. **"Minutes to hours" was wrong.** These domains were registered days
+   to months ahead of use, not immediately before — malware operators
+   evidently pre-register infrastructure in batches. A signal built on
+   the "minutes to hours" assumption would have missed all seven of these.
+2. **Coverage gap that specifically hurts on the traffic that matters
+   most.** `whitepepper.su` — the domain queried 10 times in a real
+   beaconing pattern, arguably the single strongest signal in the whole
+   capture — has **no RDAP data available at all**. `.su` and several
+   other cheap TLDs real malware favors (`.cc`, `.lat`, `.cyou`, `.sbs`
+   all resolved fine here, but coverage varies by TLD and registrar) have
+   inconsistent or absent registration transparency — not a coincidence;
+   it's part of why malware operators use them. A domain-age signal's
+   real-world coverage is weaker specifically where it's needed most.
+
+**Infrastructure options, for whoever makes this call** (not decided
+here):
+- **Free public RDAP** (what validated the table above): no cost, no
+  API key, but real-time per-query network calls (100-500ms+ latency —
+  belongs in an async enrichment stage like `ThreatEnricher`, not the
+  hot classification path), inconsistent TLD coverage, and a genuine
+  privacy consideration: every domain sent for lookup leaves the
+  organization's network, which is a real question for a product
+  monitoring potentially sensitive internal DNS traffic (mitigated if
+  restricted to only CNN-flagged/already-suspicious domains, not every
+  query).
+- **Commercial passive-DNS/WHOIS-history feeds** (WhoisXML, SecurityTrails,
+  DomainTools): paid, but bulk/cached lookups, SLAs, and historical WHOIS
+  data current lookups can't see (privacy-service-obscured current
+  records sometimes still expose original registration history). A real
+  procurement/budget decision.
+- **Local zone-file-based lookup**: some registries publish daily
+  newly-registered-domain zone files (e.g. ICANN's Centralized Zone Data
+  Service); building a local table avoids per-query external calls and
+  the privacy exposure entirely, at the cost of more infrastructure to
+  stand up and maintain.
+
+This is exactly the kind of decision this plan flagged from the start as
+not a solo coding task — a real cost/privacy/architecture trade-off, now
+backed by real evidence instead of a hypothesis, for whoever owns that
+call to actually make.
 
 ## Phase 10 — Multi-dataset validation (closes "proven once" → "proven repeatedly")
 
@@ -213,9 +271,14 @@ Not a bigger model, again — a system where:
    first — and combining them measurably catches more real attacks
    (53.7% vs. 48.5% recall for the best single detector), not just a
    reshuffled number (Phase 8).
-5. The one remaining hard problem (dictionary DGA) has an honestly-scoped
-   answer — a named external dependency to add, not a vague "needs more
-   research" (Phase 9).
+5. 🟡 The one remaining hard problem (dictionary DGA) has an honestly-
+   scoped, *evidence-checked* answer, not a vague "needs more research"
+   or an untested industry generalization — real RDAP lookups against
+   the real Lumma capture's malicious domains confirmed the signal
+   works but corrected the original "minutes to hours" assumption
+   (real gap: days-to-months) and found a real coverage hole on exactly
+   the cheap TLDs malware favors. The actual infrastructure/cost
+   decision is still open, deliberately (Phase 9).
 6. Today's real numbers are shown to hold up across many real scenarios,
    not one lucky benchmark each (Phase 10) — Phase 8's own evaluation
    already surfaced a concrete reason this matters: the flow
