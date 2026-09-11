@@ -13,7 +13,7 @@ try:
     import torch.nn as nn
     import torch.optim as optim
     from inference.train_model import DGA_HybridModel, LEX_DIM
-    from inference.models import lexical_features
+    from inference.models import lexical_features, sanitize_domain_chars
 except Exception as e:
     print(f"Failed to import ML libraries: {e}")
     sys.exit(1)
@@ -114,10 +114,13 @@ def generate_dynamic_dataset(num_samples, difficulty="medium"):
     lex_data = []
     for d in data:
         d_lower = d.lower()[:max_len]
-        encoded = [char_map.get(c, 0) for c in d_lower]
+        # Must match _predict_impl's inference-time sanitization exactly --
+        # see inference/models.py's sanitize_domain_chars() docstring.
+        sanitized = sanitize_domain_chars(d_lower, char_map)
+        encoded = [char_map[c] for c in sanitized]
         if len(encoded) < max_len: encoded += [0] * (max_len - len(encoded))
         encoded_data.append(encoded[:max_len])
-        lex_data.append(lexical_features(d_lower))
+        lex_data.append(lexical_features(sanitized))
 
     return (
         torch.tensor(encoded_data, dtype=torch.long),

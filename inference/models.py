@@ -72,6 +72,44 @@ MODEL_INFERENCE_DURATION = Histogram(
     'Wall time of DeepLearningEngine.predict(), including every early-exit guard clause',
 )
 
+# Decision threshold for DeepLearningEngine._predict_impl's is_dga call --
+# exposed as a config value rather than a hardcoded constant so an
+# operator can trade recall for precision/FPR without retraining. The
+# real-world benchmark's threshold sweep (scripts/calibrate_dga_threshold.py)
+# is the reference for what each value actually costs/buys.
+# 0.97, not the original model's 0.85 -- re-calibrated against the
+# retrained hybrid model's own score distribution via
+# scripts/calibrate_dga_threshold.py, and chosen using the per-family
+# regression gate (scripts/evaluate_against_real_dga_dataset.py), not
+# just the three aggregate numbers: a higher threshold (0.995) gave
+# better aggregate precision/FPR but disproportionately crushed already-
+# weak families (gozi, padcrypt, simda dropped >10 points each). 0.97 is
+# the highest threshold that clears the regression gate cleanly against
+# every one of the 25 real families, while still measuring 84.6%
+# precision / 77.2% recall / 13.9% FPR overall -- a broad recall
+# improvement over the previously-committed threshold/model pairing
+# (85.2%/69.8%/12.0%) for a marginal precision/FPR cost.
+DGA_CLASSIFICATION_THRESHOLD = float(os.getenv("DGA_CLASSIFICATION_THRESHOLD", "0.97"))
+
+
+def sanitize_domain_chars(text: str, char_map: dict) -> str:
+    """Maps any character not in char_map to '-' rather than silently
+    encoding it as the padding token.
+
+    Must produce byte-for-byte the same string in training
+    (inference/train_model.py, scripts/continuous_training.py) as at
+    inference (this file's _predict_impl) -- a drift here previously
+    meant a character training never learned to expect (e.g. '_', common
+    in DNS SRV/service records like "_ldap._tcp...") encoded completely
+    differently in the two paths: training's `char_map.get(c, 0)` mapped
+    it straight to the padding token (as if the character were simply
+    absent), while inference sanitized it to '-' first and then looked
+    that up in char_map. Same root-cause shape as the bare-label
+    93%-false-positive bug this model already hit once -- a small,
+    silent train/inference mismatch that only shows up on real traffic.
+    """
+    return "".join(c if c in char_map else "-" for c in text)
+
 
 def _load_verified_torchscript_model(artifact_path: str) -> Tuple[torch.jit.ScriptModule, str]:
     """Loads and validates a TorchScript model from disk against its
@@ -204,7 +242,7 @@ class DeepLearningEngine:
                 ascii_domain = clean_domain
 
             # 2. Resilient character sanitization (map '_' to '-' and unmapped chars to standard tokens)
-            sanitized_ascii = "".join(c if c in self.char_map else "-" for c in ascii_domain)
+            sanitized_ascii = sanitize_domain_chars(ascii_domain, self.char_map)
             if not sanitized_ascii:
                 return False, 0.0, 0.0
 
@@ -214,7 +252,7 @@ class DeepLearningEngine:
                 # homoglyph domain with Cyrillic lookalikes could collapse
                 # to a DIFFERENT, shorter string here than in sanitized_ascii,
                 # defeating length-based checks between the two variants.
-                return "".join(c if c in self.char_map else "-" for c in text)
+                return sanitize_domain_chars(text, self.char_map)
 
             # Check deadline before multi-segment inspection & tensor creation
             if deadline is not None and time.time() > deadline:
@@ -294,7 +332,7 @@ class DeepLearningEngine:
                     if max_prob > highest_prob:
                         highest_prob = max_prob
 
-            is_dga = highest_prob > 0.85
+            is_dga = highest_prob > DGA_CLASSIFICATION_THRESHOLD
             return is_dga, highest_prob, 0.1
         except Exception as e:
             logger.error(f"Prediction Error: {e}")
@@ -332,12 +370,28 @@ class FlowAnomalyEngine:
     connection shape (bytes/duration/packets), so it can catch a
     behaviorally unusual flow that never touches DNS at all.
 
-    Trained only on synthetic benign traffic (inference/train_model.py's
-    train_flow_autoencoder()) -- like the CNN, it has never been
-    validated against real-world attack traffic, only the shape of this
-    repo's own simulator. Its anomaly threshold is fixed at training
-    time (mean + 4 standard deviations of validation reconstruction
-    error), not adaptive to a specific deployment's traffic mix.
+    Trained on a mix of real CTU-13 flows (Stratosphere IPS / CVUT,
+    CC-BY) and synthetic traffic (inference/train_model.py's
+    train_flow_autoencoder()) and validated against a real, disjoint
+    held-out CTU-13 scenario
+    (scripts/evaluate_flow_autoencoder_against_real_data.py) -- see
+    SECURITY.md's "Flow autoencoder validation" section for the full
+    story: the synthetic-only version of this model measured a ~98%
+    false-positive rate against real flows with no threshold able to fix
+    it (real Normal/Botnet reconstruction error barely separated at
+    all); retraining on real data fixed the separation itself, and the
+    auto-computed "mean + 4 standard deviations of validation
+    reconstruction error" threshold turned out to still be
+    miscalibrated for the real held-out set (0.006717, giving 67% FPR)
+    versus a threshold chosen by directly inspecting the real held-out
+    error distribution (0.013, giving 0% FPR at 99.8% recall on that
+    same set) -- the same lesson as the DGA classifier's own threshold
+    story: never trust an automatically-derived statistic over what
+    real data actually shows. FLOW_ANOMALY_THRESHOLD (env var) overrides
+    the model's shipped .threshold file without retraining, mirroring
+    DGA_CLASSIFICATION_THRESHOLD above --
+    scripts/calibrate_flow_anomaly_threshold.py shows the real
+    precision/recall/FPR at each candidate value.
     """
 
     def __init__(self):
@@ -346,8 +400,12 @@ class FlowAnomalyEngine:
         try:
             artifact_path = os.getenv("FLOW_MODEL_PATH", "models/autoencoder_flow.pt")
             self.model, self._expected_sha = _load_verified_torchscript_model(artifact_path)
-            with open(artifact_path + ".threshold", "r", encoding="utf-8") as f:
-                self.threshold = float(f.read().strip())
+            threshold_override = os.getenv("FLOW_ANOMALY_THRESHOLD")
+            if threshold_override:
+                self.threshold = float(threshold_override)
+            else:
+                with open(artifact_path + ".threshold", "r", encoding="utf-8") as f:
+                    self.threshold = float(f.read().strip())
         except Exception as e:
             logger.error(f"FlowAnomalyEngine initialization failure: {e}")
             raise

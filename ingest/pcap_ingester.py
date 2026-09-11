@@ -55,6 +55,43 @@ def _extract_dns_event(pkt, src_ip: str, dst_ip: str) -> dict:
         "qtype_name": qtype_name,
     }
 
+
+_RCODE_NAMES = {0: "NOERROR", 1: "FORMERR", 2: "SERVFAIL", 3: "NXDOMAIN", 4: "NOTIMP", 5: "REFUSED"}
+
+
+def _extract_dns_response_event(pkt, src_ip: str, dst_ip: str) -> dict:
+    """A response's own src/dst are resolver -> client -- the host whose
+    behavior actually matters (the one that issued the query) is this
+    packet's DESTINATION, not its source, the reverse of the query event
+    above. Carries the response code (NXDOMAIN in particular) so a
+    downstream per-host behavioral tracker (inference/dns_behavior.py)
+    can compute a client's NXDOMAIN rate: a DGA-infected host typically
+    generates many candidate domains and gets NXDOMAIN back for most of
+    them before the one live C2 domain resolves -- a signal that's
+    independent of any single domain's character-level shape, and
+    directly motivated by a real domain (whitepepper.su) queried 10
+    times in a tight window during this project's own Lumma Stealer
+    pcap validation.
+    """
+    dns = pkt[DNS]
+    if dns.qr != 1 or dns.qdcount == 0 or not dns.qd:
+        return None
+    question = dns.qd[0]
+    if not isinstance(question, DNSQR):
+        return None
+    query = question.qname.decode("utf-8", errors="ignore").rstrip(".")
+    if not query:
+        return None
+    rcode = int(dns.rcode)
+    return {
+        "event_type": "dns_response",
+        "id.orig_h": dst_ip,
+        "id.resp_h": src_ip,
+        "query": query,
+        "rcode": rcode,
+        "rcode_name": _RCODE_NAMES.get(rcode, str(rcode)),
+    }
+
 def _emit_flow(producer, topic, key, payload, log):
     """Shared size-guarded send -- previously the 5MB guard only existed
     on the periodic re-emission path; the final flush loop sent whatever
@@ -113,9 +150,14 @@ def ingest_pcap(pcap_file: str, broker: str = "localhost:9092", topic: str = "ra
                     dst_ip = pkt[IP].dst
 
                     if DNS in pkt:
-                        dns_event = _extract_dns_event(pkt, src_ip, dst_ip)
-                        if dns_event is not None:
-                            _emit_flow(producer, topic, f"dns-{uuid.uuid4()}", dns_event, logger)
+                        if pkt[DNS].qr == 0:
+                            dns_event = _extract_dns_event(pkt, src_ip, dst_ip)
+                            if dns_event is not None:
+                                _emit_flow(producer, topic, f"dns-{uuid.uuid4()}", dns_event, logger)
+                        else:
+                            dns_response_event = _extract_dns_response_event(pkt, src_ip, dst_ip)
+                            if dns_response_event is not None:
+                                _emit_flow(producer, topic, f"dns-resp-{uuid.uuid4()}", dns_response_event, logger)
 
                     # Scapy indexes layers by CLASS (pkt[TCP]), not by a
                     # lowercase string ("tcp") -- pkt["tcp"] raises

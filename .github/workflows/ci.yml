@@ -89,6 +89,22 @@ jobs:
             echo "PASS: $f verified"
           done
 
+      - name: DGA model real-world regression gate
+        # Hash verification above only proves the shipped model wasn't
+        # corrupted or swapped -- it says nothing about whether it's any
+        # good. This runs the exact same real-world benchmark used to
+        # validate every retrain by hand this far (SECURITY.md's "Model
+        # validation against real-world data" section) and fails the
+        # build if any of the 25 real malware families' recall drops more
+        # than 10 points against benchmarks/dga_family_recall_baseline.json
+        # -- the same check that, run manually, caught a real
+        # vawtrak/conficker/pushdo regression from a training-mix change
+        # before it shipped. `--update-baseline` is deliberately never
+        # passed here: accepting a real, intentional trade-off from a
+        # retrain is a human decision (see scripts/evaluate_against_real_dga_dataset.py's
+        # own --help), not something CI should silently wave through.
+        run: PYTHONPATH=. python3 scripts/evaluate_against_real_dga_dataset.py
+
       - name: Model provenance (real Sigstore keyless sign + verify)
         # Previously conditional on a COSIGN_PUBLIC_KEY secret that was
         # never configured, so this step only ever printed a warning that

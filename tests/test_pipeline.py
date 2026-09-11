@@ -4,8 +4,9 @@ import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import fakeredis
+import torch
 
-from inference.models import DeepLearningEngine, FlowAnomalyEngine
+from inference.models import DeepLearningEngine, FlowAnomalyEngine, sanitize_domain_chars
 from inference.correlation import IncidentCorrelator
 from inference.enrichment import ThreatEnricher
 from api.deps import _validate_ip, _is_trusted_proxy, get_remote_address
@@ -124,6 +125,18 @@ class TestSOCPipelineSecurity(unittest.TestCase):
         with patch("inference.models.secrets.compare_digest", return_value=False):
             with self.assertRaises(RuntimeError):
                 FlowAnomalyEngine()
+
+    def test_flow_anomaly_threshold_is_configurable_without_retraining(self):
+        """FLOW_ANOMALY_THRESHOLD (env var, see
+        scripts/calibrate_flow_anomaly_threshold.py) overrides the
+        model's shipped .threshold file -- real-world calibration
+        (SECURITY.md's "Flow autoencoder validation" section) found the
+        auto-computed file threshold miscalibrated against real data, so
+        this override is what made the fix deployable without hand-
+        editing the shipped model artifact."""
+        with patch.dict(os.environ, {"FLOW_ANOMALY_THRESHOLD": "0.5"}):
+            engine = FlowAnomalyEngine()
+        self.assertEqual(engine.threshold, 0.5)
 
     def test_correlator_multi_alert_aggregation(self):
         correlator = self._make_correlator()
@@ -257,6 +270,36 @@ class TestSOCPipelineSecurity(unittest.TestCase):
         with patch.object(orchestrator.dl_engine, "predict", return_value=(True, 0.97, 0.1)):
             dets = orchestrator.evaluate({"event_type": "dns", "query": "xk3q9z7-evil.biz"}, {})
         self.assertEqual(dets[0]["evidence"], {"domain": "xk3q9z7-evil.biz"})
+
+    def test_sanitize_domain_chars_maps_unmapped_to_dash(self):
+        char_map = {c: i + 1 for i, c in enumerate("abcdefghijklmnopqrstuvwxyz0123456789-.")}
+        # '_' is not in char_map -- must become '-', not vanish (the old
+        # training-time behavior mapped it to the padding token instead,
+        # a real train/inference mismatch this function exists to close).
+        self.assertEqual(sanitize_domain_chars("_ldap._tcp", char_map), "-ldap.-tcp")
+        # Every character already in char_map passes through unchanged.
+        self.assertEqual(sanitize_domain_chars("google.com", char_map), "google.com")
+
+    def test_dga_classification_threshold_is_configurable_without_retraining(self):
+        """DGA_CLASSIFICATION_THRESHOLD (read from the environment, see
+        scripts/calibrate_dga_threshold.py) gates the is_dga decision, not
+        a hardcoded 0.85 -- an operator can trade recall for precision/FPR
+        without a retrain. The underlying model is mocked to return a
+        fixed 0.5 probability so this test is about the threshold
+        comparison itself, not any particular trained model's real
+        output for some domain."""
+        import inference.models as models_module
+
+        engine = DeepLearningEngine(start_verifier=False)
+        with patch.object(engine, "model", return_value=torch.tensor([[0.5]])):
+            with patch.object(models_module, "DGA_CLASSIFICATION_THRESHOLD", 0.9):
+                is_dga_strict, prob, _ = engine.predict({}, "example.com")
+            with patch.object(models_module, "DGA_CLASSIFICATION_THRESHOLD", 0.1):
+                is_dga_lenient, _, _ = engine.predict({}, "example.com")
+
+        self.assertEqual(prob, 0.5)
+        self.assertFalse(is_dga_strict)
+        self.assertTrue(is_dga_lenient)
 
     def test_idna_homoglyph_handling(self):
         engine = DeepLearningEngine()
@@ -1253,6 +1296,8 @@ class TestSOCPipelineSecurity(unittest.TestCase):
             with patch.object(sp, "extract_features", return_value={}), \
                  patch.object(sp, "evaluate_rules", return_value=[]), \
                  patch.object(sp.dl_engine, "predict", return_value=(True, 0.97, 0.1)), \
+                 patch.object(sp.dns_behavior_tracker, "record_query", return_value=None), \
+                 patch.object(sp.dns_behavior_tracker, "is_burst", return_value=(False, None, {})), \
                  patch.object(sp, "validate_alert", return_value=(True, None)), \
                  patch.object(sp.enricher, "enrich", new=AsyncMock(side_effect=lambda a: a)), \
                  patch.object(sp.alerts_topic, "send", new=AsyncMock(return_value=None)) as alerts_send, \
@@ -1265,6 +1310,63 @@ class TestSOCPipelineSecurity(unittest.TestCase):
             sent_alert = alerts_send.call_args.kwargs["value"]
             self.assertEqual(sent_alert["threat_class"], "DGA / DNS Tunnelling")
             self.assertEqual(sent_alert["evidence"], {"domain": "xk3q9z7-evil.biz"})
+
+        asyncio.run(_run())
+
+    def test_process_traffic_publishes_a_burst_alert_independent_of_the_cnn_verdict(self):
+        """A source host issuing a DNS-query burst is its own signal,
+        independent of what the CNN thinks of this specific domain --
+        the CNN is mocked to NOT flag this domain, so the resulting
+        alert can only have come from the behavioral tracker."""
+        import inference.stream_processor_faust as sp
+
+        event = {"event_type": "dns", "id.orig_h": "10.0.0.7", "id.resp_h": "8.8.8.8", "query": "legit-looking-domain.com"}
+        burst_stats = {"distinct_domains": 20, "nxdomain_rate": 0.0, "total_responses": 0}
+
+        async def _run():
+            with patch.object(sp, "extract_features", return_value={}), \
+                 patch.object(sp, "evaluate_rules", return_value=[]), \
+                 patch.object(sp.dl_engine, "predict", return_value=(False, 0.1, 0.1)), \
+                 patch.object(sp.dns_behavior_tracker, "record_query", return_value=None), \
+                 patch.object(sp.dns_behavior_tracker, "is_burst", return_value=(True, "distinct_domain_burst", burst_stats)), \
+                 patch.object(sp, "validate_alert", return_value=(True, None)), \
+                 patch.object(sp.enricher, "enrich", new=AsyncMock(side_effect=lambda a: a)), \
+                 patch.object(sp.alerts_topic, "send", new=AsyncMock(return_value=None)) as alerts_send, \
+                 patch.object(sp.correlator, "add_alert", return_value=None), \
+                 patch.object(sp, "_send_dlq_safely", new=AsyncMock()) as dlq:
+                await sp.process_traffic.fun(self._fake_stream([event]))
+
+            alerts_send.assert_awaited_once()
+            sent_alert = alerts_send.call_args.kwargs["value"]
+            self.assertEqual(sent_alert["threat_class"], "DGA / DNS Tunnelling")
+            self.assertEqual(sent_alert["model_name"], "RULE_DNS_QUERY_BURST")
+            self.assertEqual(sent_alert["evidence"]["reason"], "distinct_domain_burst")
+            self.assertEqual(sent_alert["evidence"]["distinct_domains"], 20)
+            dlq.assert_not_awaited()
+
+        asyncio.run(_run())
+
+    def test_process_traffic_dns_response_event_updates_tracker_without_alerting(self):
+        """A dns_response event exists purely to feed the behavioral
+        tracker's NXDOMAIN rate -- it must never itself produce an
+        alert, and must correctly resolve the querying CLIENT (this
+        event's id.orig_h, per ingest/pcap_ingester.py's
+        _extract_dns_response_event()) as the tracked host."""
+        import inference.stream_processor_faust as sp
+
+        event = {"event_type": "dns_response", "id.orig_h": "10.0.0.9", "id.resp_h": "8.8.8.8", "query": "evil.com", "rcode": 3}
+
+        async def _run():
+            with patch.object(sp, "extract_features", return_value={}), \
+                 patch.object(sp, "evaluate_rules", return_value=[]), \
+                 patch.object(sp.dns_behavior_tracker, "record_response", return_value=None) as record_response, \
+                 patch.object(sp.alerts_topic, "send", new=AsyncMock(return_value=None)) as alerts_send, \
+                 patch.object(sp, "_send_dlq_safely", new=AsyncMock()) as dlq:
+                await sp.process_traffic.fun(self._fake_stream([event]))
+
+            record_response.assert_called_once_with("10.0.0.9", True)
+            alerts_send.assert_not_awaited()
+            dlq.assert_not_awaited()
 
         asyncio.run(_run())
 

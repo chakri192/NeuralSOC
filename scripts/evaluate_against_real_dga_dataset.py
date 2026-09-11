@@ -17,12 +17,23 @@ reports real accuracy/precision/recall/false-positive-rate, broken down
 per real malware family, not one aggregate number that could hide a
 family this completely misses.
 
+Also acts as a regression gate: benchmarks/dga_family_recall_baseline.json
+records each family's CNN recall as of the last deliberate retrain. Every
+run compares against it and exits non-zero if any family's recall drops
+by more than REGRESSION_THRESHOLD_POINTS -- this is exactly the check
+that would have caught the vawtrak/conficker/pushdo recall regression
+from the hybrid-model retrain automatically, instead of requiring a
+manual re-run to notice. Pass --update-baseline after a deliberate
+retrain to accept the new numbers as the baseline going forward.
+
 Usage:
     PYTHONPATH=. venv/bin/python3 scripts/evaluate_against_real_dga_dataset.py
     PYTHONPATH=. venv/bin/python3 scripts/evaluate_against_real_dga_dataset.py --limit 2000
+    PYTHONPATH=. venv/bin/python3 scripts/evaluate_against_real_dga_dataset.py --update-baseline
 """
 import argparse
 import csv
+import json
 import os
 import sys
 from collections import defaultdict
@@ -34,6 +45,8 @@ from inference.models import DeepLearningEngine
 from inference.rules import evaluate_rules
 
 DATASET_PATH = os.path.join(os.path.dirname(__file__), "..", "benchmarks", "real_dga_domains.csv")
+BASELINE_PATH = os.path.join(os.path.dirname(__file__), "..", "benchmarks", "dga_family_recall_baseline.json")
+REGRESSION_THRESHOLD_POINTS = 10.0
 
 
 def _load_dataset(limit=None):
@@ -65,9 +78,38 @@ def _confusion(tp, fp, tn, fn):
     return {"accuracy": accuracy, "precision": precision, "recall": recall, "fpr": fpr, "f1": f1}
 
 
+def _load_baseline():
+    if not os.path.exists(BASELINE_PATH):
+        return None
+    with open(BASELINE_PATH, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _write_baseline(cnn_metrics, family_stats):
+    baseline = {
+        "overall": {
+            "precision": cnn_metrics["precision"],
+            "recall": cnn_metrics["recall"],
+            "fpr": cnn_metrics["fpr"],
+            "accuracy": cnn_metrics["accuracy"],
+        },
+        "family_recall": {
+            family: s["cnn_caught"] / s["total"] if s["total"] else 0.0
+            for family, s in family_stats.items()
+        },
+    }
+    with open(BASELINE_PATH, "w", encoding="utf-8") as f:
+        json.dump(baseline, f, indent=2, sort_keys=True)
+        f.write("\n")
+    return baseline
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--limit", type=int, default=None, help="Only evaluate the first N rows (default: all)")
+    parser.add_argument("--update-baseline", action="store_true",
+                         help="Overwrite benchmarks/dga_family_recall_baseline.json with this run's numbers "
+                              "(only after a deliberate retrain, not to silence a real regression)")
     args = parser.parse_args()
 
     print(f"[*] Loading {DATASET_PATH}...")
@@ -145,6 +187,54 @@ def main():
           "https://doi.org/10.1016/j.eswa.2020.114551) -- real malware-family DGA "
           "domains and real Alexa-ranked benign domains, not this project's own simulator.")
 
+    if args.update_baseline:
+        baseline = _write_baseline(cnn_metrics, family_stats)
+        print(f"\n[+] Baseline updated: {BASELINE_PATH}")
+        print(f"    Overall: precision={baseline['overall']['precision']:.1%} "
+              f"recall={baseline['overall']['recall']:.1%} fpr={baseline['overall']['fpr']:.2%}")
+        return 0
+
+    baseline = _load_baseline()
+    if baseline is None:
+        print(f"\n[!] No baseline found at {BASELINE_PATH} -- run with --update-baseline to create one. "
+              "Skipping regression check.")
+        return 0
+
+    print("\n" + "-" * 72)
+    print(f"REGRESSION CHECK vs. baseline (fails if any family's recall drops > {REGRESSION_THRESHOLD_POINTS:.0f} points)")
+    print("-" * 72)
+    regressions = []
+    for family in sorted(family_stats.keys()):
+        s = family_stats[family]
+        current_recall = (s["cnn_caught"] / s["total"] if s["total"] else 0.0) * 100
+        baseline_recall = baseline.get("family_recall", {}).get(family)
+        if baseline_recall is None:
+            print(f"  {family:<20} {current_recall:>6.1f}%  (new family, no baseline yet)")
+            continue
+        baseline_recall_pct = baseline_recall * 100
+        delta = current_recall - baseline_recall_pct
+        flag = ""
+        if delta < -REGRESSION_THRESHOLD_POINTS:
+            flag = "  <-- REGRESSION"
+            regressions.append((family, baseline_recall_pct, current_recall))
+        print(f"  {family:<20} baseline={baseline_recall_pct:>6.1f}%  current={current_recall:>6.1f}%  "
+              f"delta={delta:+6.1f}{flag}")
+
+    overall_delta = (cnn_metrics["recall"] - baseline["overall"]["recall"]) * 100
+    print(f"\n  Overall recall: baseline={baseline['overall']['recall']:.1%}  "
+          f"current={cnn_metrics['recall']:.1%}  delta={overall_delta:+.1f}pts")
+
+    if regressions:
+        print(f"\n[!] {len(regressions)} family regression(s) beyond {REGRESSION_THRESHOLD_POINTS:.0f} points:")
+        for family, before, after in regressions:
+            print(f"    {family}: {before:.1f}% -> {after:.1f}%")
+        print("[!] If this is expected (a deliberate trade-off from a real retrain), "
+              "re-run with --update-baseline to accept it.")
+        return 1
+
+    print("\n[+] No family regressions beyond threshold.")
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

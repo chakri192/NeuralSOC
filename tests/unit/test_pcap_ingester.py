@@ -125,6 +125,50 @@ class TestIngestPcap:
         sent_flows = [call.args[1] for call in fake_producer.send.call_args_list]
         assert not any(f.get("event_type") == "dns" for f in sent_flows)
 
+    def test_dns_nxdomain_response_is_emitted_with_rcode_and_client_ip(self, tmp_path):
+        """A response's own src/dst are resolver -> client -- the host
+        whose behavior a downstream tracker cares about (the one that
+        asked) is this packet's DESTINATION, not its source."""
+        pcap_path = tmp_path / "dns_nxdomain.pcap"
+        dns_response = (
+            IP(src="8.8.8.8", dst="10.0.0.5")
+            / UDP(sport=53, dport=5353)
+            / DNS(qr=1, rd=1, rcode=3, qd=DNSQR(qname="xk3q9z7-nonexistent.com"))
+        )
+        wrpcap(str(pcap_path), [dns_response])
+
+        fake_producer = MagicMock()
+        with patch("ingest.pcap_ingester.KafkaProducer", return_value=fake_producer):
+            ingest_pcap(str(pcap_path))
+
+        sent_flows = [call.args[1] for call in fake_producer.send.call_args_list]
+        responses = [f for f in sent_flows if f.get("event_type") == "dns_response"]
+        assert len(responses) == 1
+        assert responses[0]["id.orig_h"] == "10.0.0.5"  # the client that asked
+        assert responses[0]["id.resp_h"] == "8.8.8.8"  # the resolver that answered
+        assert responses[0]["query"] == "xk3q9z7-nonexistent.com"
+        assert responses[0]["rcode"] == 3
+        assert responses[0]["rcode_name"] == "NXDOMAIN"
+
+    def test_dns_noerror_response_is_emitted_with_rcode_zero(self, tmp_path):
+        pcap_path = tmp_path / "dns_noerror.pcap"
+        dns_response = (
+            IP(src="8.8.8.8", dst="10.0.0.5")
+            / UDP(sport=53, dport=5353)
+            / DNS(qr=1, rd=1, rcode=0, qd=DNSQR(qname="example.com"))
+        )
+        wrpcap(str(pcap_path), [dns_response])
+
+        fake_producer = MagicMock()
+        with patch("ingest.pcap_ingester.KafkaProducer", return_value=fake_producer):
+            ingest_pcap(str(pcap_path))
+
+        sent_flows = [call.args[1] for call in fake_producer.send.call_args_list]
+        responses = [f for f in sent_flows if f.get("event_type") == "dns_response"]
+        assert len(responses) == 1
+        assert responses[0]["rcode"] == 0
+        assert responses[0]["rcode_name"] == "NOERROR"
+
     def test_udp_flow_is_tracked(self, tmp_path):
         pcap_path = tmp_path / "udp.pcap"
         wrpcap(str(pcap_path), [IP(src="10.0.0.1", dst="8.8.8.8") / UDP(sport=5353, dport=53)])

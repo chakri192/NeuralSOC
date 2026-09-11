@@ -154,12 +154,33 @@ def test_generate_benign_flow_dataset_shape_and_scaling():
     assert X.shape == (50, 5)
     assert X.dtype == torch.float32
     # log1p'd and divided by FLOW_FEATURE_SCALE -- every training range
-    # (orig_bytes up to 2000, resp_bytes up to 500000, etc.) stays well
-    # under 1.0 once scaled; a value near or above 1 here would mean the
-    # scaling constants and the actual generation ranges have drifted
-    # apart from each other.
+    # (orig_bytes up to 2000, resp_bytes up to 500000, etc., plus real
+    # CTU-13 flows) stays well under 1.0 once scaled; a value near or
+    # above 1 here would mean the scaling constants and the actual
+    # generation ranges have drifted apart from each other.
     assert torch.all(X >= 0.0)
     assert torch.all(X < 1.0)
+
+
+def test_load_real_benign_flow_rows_reads_the_committed_csv():
+    from inference.train_model import _load_real_benign_flow_rows
+
+    rows = _load_real_benign_flow_rows()
+    assert len(rows) > 0
+    orig_bytes, resp_bytes, duration, orig_pkts = rows[0]
+    for v in (orig_bytes, resp_bytes, duration, orig_pkts):
+        assert isinstance(v, float)
+        assert v >= 0.0
+
+
+def test_generate_benign_flow_dataset_mixes_real_and_synthetic(monkeypatch):
+    # 10 real rows requested against num_samples=20 -- exactly half real,
+    # half synthetic (real_rows is smaller than num_samples // 2 here,
+    # so every real row must appear, none dropped).
+    fake_real_rows = [(1000.0, 10000.0, 1.0, 50.0) for _ in range(10)]
+    monkeypatch.setattr("inference.train_model._load_real_benign_flow_rows", lambda: fake_real_rows)
+    X = generate_benign_flow_dataset(num_samples=20)
+    assert X.shape == (20, 5)
 
 
 def test_flow_autoencoder_forward_reconstructs_the_input_shape():

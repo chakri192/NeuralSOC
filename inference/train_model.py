@@ -10,7 +10,7 @@ import string
 import time
 from torch.utils.data import DataLoader, TensorDataset
 
-from inference.models import LEX_DIM, lexical_features
+from inference.models import LEX_DIM, lexical_features, sanitize_domain_chars
 
 
 # 1. Hybrid character-CNN + lexical-features architecture.
@@ -157,6 +157,58 @@ def _extract_check_worthy_label(domain: str):
     return random.choice(parts) if parts else None  # nosec B311
 
 
+_INTERNATIONAL_TLDS = [
+    ".com", ".net", ".org", ".ru", ".nl", ".hn", ".ps", ".ve", ".cn", ".info",
+    ".biz", ".com.mt", ".com.bo", ".com.pe", ".co.za", ".tk", ".ws", ".cc",
+]
+
+
+def _generate_pronounceable_random(min_len=6, max_len=12):
+    """A consonant/vowel-alternating pseudo-word -- matches real vawtrak
+    domains (usecwemser.com, esergimlohw.com, masuhno.com) far more
+    closely than uniform-random character sampling does, which tends to
+    produce unpronounceable consonant clusters real DGA authors' own
+    generators mostly avoid."""
+    vowels = "aeiou"
+    consonants = "bcdfghjklmnpqrstvwxyz"
+    length = random.randint(min_len, max_len)  # nosec B311
+    start_with_consonant = random.random() < 0.7  # nosec B311
+    chars = []
+    for i in range(length):
+        use_consonant = (i % 2 == 0) == start_with_consonant
+        chars.append(random.choice(consonants if use_consonant else vowels))  # nosec B311
+    return "".join(chars)
+
+
+def _generate_random_string_dga():
+    """Broadened beyond one fixed 15-25-char/digits/.com shape to cover
+    the real length/TLD/digit-presence range measured across three real
+    families this model's recall regressed on when the training mix
+    shifted toward dictionary-style patterns: conficker (4-9 chars,
+    digit-free, internationally diverse ccTLDs -- xpun.nl, gxaa.com.mt,
+    idlxfhyif.ps), pushdo (8 chars, digit-free, always .ru --
+    gasozjom.ru, dokbuxok.ru), and vawtrak (7-11 char pronounceable
+    pseudo-words, always .com -- see _generate_pronounceable_random()).
+    The original long/digit-mixed/.com-only shape is kept as one of
+    three styles, not replaced -- it's still what corebot/cryptolocker
+    actually look like.
+    """
+    style = random.random()  # nosec B311
+    if style < 0.4:
+        # Short, ccTLD-diverse, digit-free (conficker/pushdo-shaped)
+        length = random.randint(4, 11)  # nosec B311
+        body = ''.join(random.choices(string.ascii_lowercase, k=length))  # nosec B311
+    elif style < 0.65:
+        # Pronounceable pseudo-word (vawtrak-shaped)
+        body = _generate_pronounceable_random()
+    else:
+        # Long, digit-mixed (corebot/cryptolocker-shaped) -- the
+        # original pattern, kept as-is.
+        length = random.randint(15, 25)  # nosec B311
+        body = ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))  # nosec B311
+    return body + random.choice(_INTERNATIONAL_TLDS)  # nosec B311
+
+
 def _generate_service_discovery_benign(benign_domains):
     base = random.choice(benign_domains)  # nosec B311
     choice = random.random()  # nosec B311
@@ -224,9 +276,10 @@ def generate_hard_dataset(num_samples=100000):
             if dga == base:
                 dga = "g00gle.com"
         else:
-            # 4. Standard Corebot/Cryptolocker
-            length = random.randint(15, 25)  # nosec B311
-            dga = ''.join(random.choices(string.ascii_lowercase + string.digits, k=length)) + ".com"  # nosec B311
+            # 4. Random-string DGA -- see _generate_random_string_dga()
+            # for why this covers three distinct real shapes now, not
+            # just one.
+            dga = _generate_random_string_dga()
 
         data.append(dga)
         labels.append(1.0)
@@ -276,11 +329,18 @@ def generate_hard_dataset(num_samples=100000):
     lex_data = []
     for d in data:
         d_lower = d.lower()[:max_len]
-        encoded = [char_map.get(c, 0) for c in d_lower]
+        # sanitize_domain_chars, not char_map.get(c, 0) directly -- must
+        # match _predict_impl's inference-time sanitization exactly. See
+        # its docstring: an out-of-charset character (e.g. '_' in
+        # "_ldap._tcp...") used to silently become the padding token here
+        # while inference mapped it to '-' instead, a train/inference
+        # mismatch of the same shape as the bare-label 93%-FPR bug.
+        sanitized = sanitize_domain_chars(d_lower, char_map)
+        encoded = [char_map[c] for c in sanitized]
         if len(encoded) < max_len:
             encoded += [0] * (max_len - len(encoded))
         encoded_data.append(encoded[:max_len])
-        lex_data.append(lexical_features(d_lower))
+        lex_data.append(lexical_features(sanitized))
 
     return (
         torch.tensor(encoded_data, dtype=torch.long),
@@ -409,46 +469,96 @@ class FlowAutoencoder(nn.Module):
 # either side raising an error.
 FLOW_FEATURE_SCALE = [15.0, 15.0, 10.0, 10.0, 10.0]
 
+_REAL_FLOW_TRAIN_PATH = os.path.join(os.path.dirname(__file__), "..", "benchmarks", "real_flow_dataset_train.csv")
 
-def generate_benign_flow_dataset(num_samples=20000):
-    """Synthetic "normal" connection flows only -- an autoencoder is
-    trained to reconstruct what it's shown, so training it on anything
-    but benign traffic would teach it to faithfully reconstruct attack
-    traffic too, defeating the entire approach. Ranges chosen to look
-    like ordinary client/server request-response traffic: a modest
-    request, a larger response, sub-10-second duration, tens to hundreds
-    of packets -- deliberately not calibrated against any real network's
-    actual baseline, which is exactly why FlowAnomalyEngine's own
-    docstring is upfront that this hasn't been validated against real
-    traffic.
+
+def _load_real_benign_flow_rows():
+    """Real confirmed-clean flows from CTU-13 (Stratosphere IPS / CVUT,
+    CC-BY, https://www.stratosphereips.org/datasets-ctu13), scenarios
+    5/7/12 -- held out entirely from
+    benchmarks/real_flow_dataset_test.csv's scenario 11, the same
+    train/test separation benchmarks/real_dga_domains.csv follows for
+    the DGA model. Without this, the autoencoder was trained only on a
+    narrow synthetic range (orig_bytes uniform 500-2000, duration
+    uniform 0.1-10s, etc.) that doesn't resemble real traffic's actual
+    variance -- confirmed empirically:
+    scripts/evaluate_flow_autoencoder_against_real_data.py measured a
+    ~98% false-positive rate against real CTU-13 flows, and unlike the
+    DGA CNN, no threshold recalibration fixed it -- real Normal and
+    Botnet reconstruction-error distributions barely separated at all
+    (medians only ~2x apart, heavy overlap), meaning the synthetic-only
+    training data itself was the problem, not the decision threshold.
     """
+    if not os.path.exists(_REAL_FLOW_TRAIN_PATH):
+        return []
     rows = []
-    for _ in range(num_samples):
-        orig_bytes = random.uniform(500, 2000)
-        resp_bytes = random.uniform(5000, 500000)
-        duration = random.uniform(0.1, 10.0)
-        orig_pkts = random.uniform(10, 500)
-        ratio = resp_bytes / max(1.0, orig_bytes)
-        raw = [
-            math.log1p(orig_bytes),
-            math.log1p(resp_bytes),
-            math.log1p(duration),
-            math.log1p(orig_pkts),
-            math.log1p(ratio),
-        ]
-        rows.append([v / s for v, s in zip(raw, FLOW_FEATURE_SCALE)])
+    with open(_REAL_FLOW_TRAIN_PATH, encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            rows.append((float(row["orig_bytes"]), float(row["resp_bytes"]), float(row["duration"]), float(row["tot_pkts"])))
+    return rows
+
+
+def _flow_row_to_scaled_features(orig_bytes, resp_bytes, duration, orig_pkts):
+    ratio = resp_bytes / max(1.0, orig_bytes)
+    raw = [
+        math.log1p(orig_bytes),
+        math.log1p(resp_bytes),
+        math.log1p(duration),
+        math.log1p(orig_pkts),
+        math.log1p(ratio),
+    ]
+    return [v / s for v, s in zip(raw, FLOW_FEATURE_SCALE)]
+
+
+def generate_benign_flow_dataset(num_samples=28000):
+    """Half real, half synthetic "normal" connection flows -- an
+    autoencoder is trained to reconstruct what it's shown, so training
+    it on anything but benign traffic would teach it to faithfully
+    reconstruct attack traffic too, defeating the entire approach. Real
+    CTU-13 Normal flows (see _load_real_benign_flow_rows()) anchor the
+    model to what real traffic variance actually looks like; the
+    synthetic generator's tighter, uniform ranges keep coverage of this
+    repo's own simulator/demo traffic shape, which real CTU-13 data was
+    never sourced from and won't itself represent.
+    """
+    real_rows = _load_real_benign_flow_rows()
+    rows = []
+
+    num_real = min(num_samples // 2, len(real_rows)) if real_rows else 0
+    for orig_bytes, resp_bytes, duration, orig_pkts in random.sample(real_rows, num_real):  # nosec B311
+        rows.append(_flow_row_to_scaled_features(orig_bytes, resp_bytes, duration, orig_pkts))
+
+    for _ in range(num_samples - num_real):
+        orig_bytes = random.uniform(500, 2000)  # nosec B311
+        resp_bytes = random.uniform(5000, 500000)  # nosec B311
+        duration = random.uniform(0.1, 10.0)  # nosec B311
+        orig_pkts = random.uniform(10, 500)  # nosec B311
+        rows.append(_flow_row_to_scaled_features(orig_bytes, resp_bytes, duration, orig_pkts))
+
+    random.shuffle(rows)  # nosec B311
     return torch.tensor(rows, dtype=torch.float32)
 
 
 def train_flow_autoencoder():
-    print("\n[*] Generating Benign Flow Dataset for Autoencoder (20,000 samples)...")
-    X = generate_benign_flow_dataset(20000)
+    print("\n[*] Generating Benign Flow Dataset for Autoencoder (28,000 samples: real CTU-13 + synthetic)...")
+    X = generate_benign_flow_dataset(28000)
     split_idx = int(len(X) * 0.8)
     X_train, X_val = X[:split_idx], X[split_idx:]
 
     model = FlowAutoencoder()
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=0.01)
+
+    # Mini-batched, not one full-batch gradient step per "epoch" -- the
+    # DGA CNN hit exactly this bug when its training data went from a
+    # trivially-separable synthetic set to genuinely diverse real data
+    # (see inference/train_model.py's DGA_HybridModel history / SECURITY.md):
+    # one full-batch step per epoch was enough signal for an easy task,
+    # nowhere near enough once the task got harder. Now that this
+    # autoencoder's training data mixes in real, more heavy-tailed
+    # CTU-13 flows instead of a narrow synthetic range, applying the
+    # same fix preemptively rather than waiting to hit the same failure.
+    train_loader = DataLoader(TensorDataset(X_train), batch_size=256, shuffle=True)
 
     print("[*] Training Flow Autoencoder...")
     best_val_loss = float("inf")
@@ -458,10 +568,11 @@ def train_flow_autoencoder():
     while epochs_no_improve < patience and epoch < 100:
         epoch += 1
         model.train()
-        optimizer.zero_grad()
-        loss = criterion(model(X_train), X_train)
-        loss.backward()
-        optimizer.step()
+        for (batch_x,) in train_loader:
+            optimizer.zero_grad()
+            loss = criterion(model(batch_x), batch_x)
+            loss.backward()
+            optimizer.step()
 
         model.eval()
         with torch.no_grad():

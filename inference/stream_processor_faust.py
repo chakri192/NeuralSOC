@@ -22,6 +22,7 @@ from inference.features import extract_features, safe_int
 from inference.rules import evaluate_rules
 from inference.models import DeepLearningEngine, FlowAnomalyEngine
 from inference.correlation import IncidentCorrelator
+from inference.dns_behavior import DnsBehaviorTracker
 from inference.enrichment import ThreatEnricher
 from inference.schemas import validate_alert
 from shared.tracing import init_tracing
@@ -29,6 +30,10 @@ from shared.tracing import init_tracing
 dl_engine = DeepLearningEngine()
 flow_engine = FlowAnomalyEngine()
 correlator = IncidentCorrelator()
+# Reuses correlator's already-configured (mandatory auth + TLS) Redis
+# connection rather than opening a second pool with its own security
+# config to audit -- see inference/dns_behavior.py's module docstring.
+dns_behavior_tracker = DnsBehaviorTracker(correlator.redis)
 enricher = ThreatEnricher()
 
 logger = logging.getLogger(__name__)
@@ -222,6 +227,40 @@ async def process_traffic(stream):
                 except Exception as e:
                     logger.error(f"DL inference failed: {e}")
 
+                # 3a. DNS behavioral tracking -- independent of the CNN's
+                # per-domain verdict above. A single domain's character
+                # shape has a hard ceiling (a well-made dictionary DGA
+                # domain can be lexically indistinguishable from a real
+                # word), but a DGA-infected host issuing many distinct,
+                # never-seen domains in a short window -- or getting
+                # NXDOMAIN back for most of them -- looks different from
+                # ordinary browsing regardless of any single domain's
+                # shape. See inference/dns_behavior.py's module docstring
+                # for the real Lumma Stealer finding that motivated this
+                # (whitepepper.su, queried 10 times in a tight window).
+                # Dispatched to io_executor, not cpu_executor: these are
+                # Redis I/O calls, not CPU-bound inference, and shouldn't
+                # compete with the DGA CNN/flow autoencoder for the same
+                # 4 ML worker threads.
+                try:
+                    source_ip = str(event.get("id.orig_h") or "")
+                    if source_ip and query and len(query) <= 253:
+                        loop = asyncio.get_running_loop()
+                        await loop.run_in_executor(io_executor, dns_behavior_tracker.record_query, source_ip, query)
+                        is_burst, burst_reason, burst_stats = await loop.run_in_executor(
+                            io_executor, dns_behavior_tracker.is_burst, source_ip
+                        )
+                        if is_burst:
+                            detections.append({
+                                "threat_class": "DGA / DNS Tunnelling",
+                                "severity": "high" if burst_reason == "distinct_domain_burst" else "medium",
+                                "confidence": 0.9,
+                                "rule_id": "RULE_DNS_QUERY_BURST",
+                                "evidence": {"domain": query, "reason": burst_reason, **burst_stats},
+                            })
+                except Exception as e:
+                    logger.error(f"DNS behavioral tracking failed: {e}")
+
             # 3b. Deep-learning inference (flow anomaly) -- same bounded
             # cpu_executor/semaphores as the DGA CNN above, since both
             # compete for the same 4 worker threads. Complements the
@@ -264,6 +303,24 @@ async def process_traffic(stream):
                     logger.warning("Flow anomaly inference timed out; skipping")
                 except Exception as e:
                     logger.error(f"Flow anomaly inference failed: {e}")
+
+            # 3c. DNS response tracking -- feeds the behavioral tracker's
+            # NXDOMAIN rate (see 3a above). Purely an update to shared
+            # state; a dns_response event never produces a detection on
+            # its own, and ingest/pcap_ingester.py's
+            # _extract_dns_response_event() already resolves id.orig_h
+            # to the querying CLIENT (a response packet's destination),
+            # not the resolver that sent it.
+            if event.get("event_type") == "dns_response":
+                try:
+                    source_ip = str(event.get("id.orig_h") or "")
+                    if source_ip:
+                        is_nxdomain = safe_int(event.get("rcode", -1)) == 3
+                        await asyncio.get_running_loop().run_in_executor(
+                            io_executor, dns_behavior_tracker.record_response, source_ip, is_nxdomain
+                        )
+                except Exception as e:
+                    logger.error(f"DNS response tracking failed: {e}")
 
             # Extract or initialize distributed W3C trace context. When
             # tracing is configured (OTEL_EXPORTER_OTLP_ENDPOINT set), this
