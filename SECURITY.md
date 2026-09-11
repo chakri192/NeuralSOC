@@ -437,6 +437,82 @@ regression tests (`tests/unit/test_dns_behavior.py`) lock in both the
 realistic-burst-size non-trigger behavior and the still-detects-a-real-
 burst behavior, using the same real domain corpus.
 
+## Rule-based detector validation against real-world data
+
+Two of six detection categories (DGA, flow anomaly) were validated
+against real attack data above. The other four rule-based detectors in
+[inference/rules.py](inference/rules.py) — DDoS, C2 Beaconing,
+Reconnaissance, Data Exfiltration — had never been run against anything
+but this repo's own synthetic simulator until
+[scripts/evaluate_rules_against_real_data.py](scripts/evaluate_rules_against_real_data.py),
+which runs the real `evaluate_rules()` production code directly against
+`benchmarks/real_rule_validation_dataset.csv` — a sampled extract (2,000
+per class per scenario, capped) from all 13 CTU-13 scenarios, real
+botnet-infected and real confirmed-clean traffic.
+
+Two disclosed data-shape limitations, same spirit as the flow
+autoencoder's: CTU-13's `.binetflow` format has no per-direction packet
+count (`TotPkts`, both directions combined, stands in for `orig_pkts`),
+and Argus's `State` field uses TCP-flag notation (`S_` = SYN sent, no
+reply; `S_RA` = SYN sent, RST-ACK received) rather than Zeek's semantic
+`conn_state` labels ("S0", "REJ") the Reconnaissance and DDoS rules
+check for. `_argus_state_to_zeek_conn_state()` is a best-effort
+translation for just those two categories — verified before trusting it
+by checking real packet-count distributions (`S_` rows: mostly 1-7
+total packets, consistent with a bare connection attempt) and by
+spot-checking translated rows directly: real `S0`-translated flows are
+botnet connection attempts to port 135 (Windows RPC — a classic
+worm-scanning target) and port 25 (SMTP — spam-bot behavior); real
+`REJ`-translated flows hit port 6667 (IRC — the classic C2 channel for
+2011-era botnet families like this dataset's) and 443. Not a complete
+or authoritative Argus↔Zeek mapping, and anything unrecognized maps to
+no match rather than a guess.
+
+**Measured results (all 13 scenarios, 18,627 real Botnet flows, 24,305
+real Normal flows):**
+
+| Rule | Threat class | Precision | Recall | FPR |
+|---|---|---|---|---|
+| `RULE_RECON_PORT_SCAN` | Reconnaissance | 99.8% | 48.5% | 0.06% |
+| `RULE_C2_HEARTBEAT` | C2 Beaconing | 74.8% | 0.5% | 0.12% |
+| `RULE_DDOS_VOLUMETRIC` | DDoS | 55.3% | 0.2% | 0.14% |
+| `RULE_CONN_EXFIL` | Data Exfiltration | 100.0% | 0.3% | 0.00% |
+
+**Reconnaissance genuinely works on real data** — high precision, real
+recall, and it varies sensibly per scenario (0% to 96% depending on how
+much port-scanning behavior that specific botnet family exhibits, which
+is exactly what a working detector should show, not a flat number
+everywhere).
+
+**The other three barely fire on this real dataset at all.** Each is a
+real, honest finding, not necessarily the same finding: DDoS's
+single-flow packet-count threshold doesn't capture *distributed* volume
+(many modest flows forming a flood, rather than one enormous flow) —
+even CTU-13's own explicitly DDoS-labeled scenario (4, `rbot-dos`) only
+tripped it on 1 of 1,277 real botnet flows. C2 Beaconing's 50-150-byte
+symmetric-payload window is narrow relative to what this dataset's
+actual C2 traffic looks like. Data Exfiltration's near-zero recall may
+partly reflect that bulk exfiltration is a late-stage, comparatively
+rare behavior even within real botnet traffic dominated by routine C2
+and reconnaissance — not necessarily that the rule's shape is wrong.
+
+**Deliberately not retuned yet.** Unlike the DGA/flow-model fixes, which
+had genuine held-out real test sets to validate against, hastily
+adjusting these three rules' fixed thresholds using only this one
+dataset would be circular — tuning against the exact same data used to
+measure the "fix" isn't real validation, and CTU-13 is one specific
+2011-era set of botnet families, not necessarily representative of
+what a rule's threshold should look like broadly. This is the same
+single-dataset caution [docs/PATH_TO_10_OUT_OF_10.md](docs/PATH_TO_10_OUT_OF_10.md)
+already raises about the DGA/flow models. Recorded here as a real,
+disclosed limitation rather than a silently "fixed" number.
+
+**Not covered:** the Encrypted-Traffic Malware rule (JA4 fingerprinting)
+has no equivalent real-data validation — CTU-13's flow records carry no
+TLS handshake data at all. That needs a genuinely different real
+dataset (a real malicious JA3/JA4 fingerprint feed, e.g. Abuse.ch), not
+something already on disk; still open.
+
 ## Dependency scanning
 
 A one-time `pip-audit` sweep brought the full dependency tree to zero

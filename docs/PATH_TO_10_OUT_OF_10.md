@@ -2,12 +2,13 @@
 
 Honest starting point, not a sales pitch: two of six detection categories
 (DGA, flow anomaly) are now validated against real attack data and hold up
-well. The other four have never been checked against anything but this
-repo's own simulator. Every detector fires independently into one flat
+well. Of the other four, three now have real numbers too — one
+(Reconnaissance) genuinely works, three others (DDoS, C2, Exfil) barely
+fire on real traffic. Every detector fires independently into one flat
 alert stream — nothing combines their signals into one calibrated
-per-incident confidence. And the two validated models are each proven
+per-incident confidence. And every validated model/rule so far is proven
 against exactly one real dataset, not several. That's the gap between
-"genuinely good, evidence-backed" (where this is today) and 10/10.
+"genuinely good, evidence-backed in places" (where this is today) and 10/10.
 
 Ordered by how directly each phase closes a *named* gap from the honest
 assessment above, cheapest first. CTU-13 (already downloaded, CC-BY,
@@ -16,8 +17,11 @@ covers most of Phases 5-6 with zero new data-sourcing — a deliberate
 choice: reuse what's already been paid for in download time before going
 back to the well for a new dataset.
 
-**Phase 5 is done** — and it wasn't a false alarm: a real, 100%-reproducible
-false-positive mode was found and fixed. See Phase 5 below for the numbers.
+**Phases 5 and 6 are done** (6 partially — JA4 still needs new data). Both
+found real, previously-unmeasured gaps, not false alarms: Phase 5's DNS
+burst detector had a 100%-reproducible false-positive bug; Phase 6 found
+that only 1 of 4 newly-validated rules actually works well against real
+attack traffic. See each phase below for the numbers.
 
 ---
 
@@ -51,40 +55,45 @@ for the full writeup.
 
 ## Phase 6 — Real-world validation for the other 4 detection categories
 
-DGA and flow anomaly are 2 of 6. `evaluate_rules()`'s other four rules
-(C2 Beaconing, Reconnaissance, Volumetric DDoS, JA4 fingerprinting) have
-**never been run against real attack data** — every claim made about them
-so far is against this repo's own synthetic simulator only.
+**Status: done for 3 of 4; JA4 remains genuinely blocked on new data.**
 
-- **C2 Beaconing and Reconnaissance — no new data needed.** CTU-13's
-  `.binetflow` files (already extracted for Phases 1/3) carry exactly the
-  fields these rules need: `State` (e.g. `S0` = connection attempt, no
-  reply — Reconnaissance's own signature), packet/byte counts, and
-  inter-flow timing per source host. The dataset's whole premise is real
-  botnet C2 traffic, so real beaconing patterns are already sitting in
-  data this project has paid the download cost for. Build
-  `scripts/evaluate_rules_against_real_data.py` mirroring the two
-  existing real-data evaluators, feeding real CTU-13 rows through
-  `evaluate_rules()` directly (no model loading needed — these are pure
-  functions).
-- **Volumetric DDoS — also covered by CTU-13.** Scenario 9's own capture
-  is literally named `botnet-capture-20110815-rbot-dos` — a real DDoS
-  campaign is already in the downloaded archive, just not yet extracted
-  (`CTU-13-Dataset/4/` in the archive's numbering, per the file listing
-  from Phase 3's extraction).
-- **JA4 fingerprinting is the one genuine new-data-sourcing item.**
-  Needs real TLS handshakes with known-malicious JA4 fingerprints — a
-  different kind of dataset than network-flow records. Abuse.ch's
-  feeds (SSLBL/ThreatFox) publish real malicious JA3/JA4 fingerprints
-  associated with actual malware families; cross-referencing those
-  against JA4s extracted from a real malware pcap (the Lumma capture
-  already in `/tmp`, or a new one) would close this the same way DGA/flow
-  validation did. Flag before starting: confirm Abuse.ch's terms permit
-  this use, the same diligence already applied to CTU-13/baderj's repo.
+Ran `scripts/evaluate_rules_against_real_data.py` (the real
+`evaluate_rules()` production code, not a reimplementation) against
+`benchmarks/real_rule_validation_dataset.csv` — a sampled extract from
+all 13 CTU-13 scenarios (18,627 real Botnet flows, 24,305 real Normal
+flows), closing DDoS, C2 Beaconing, Reconnaissance, and Data
+Exfiltration with zero new data-sourcing, exactly as predicted below.
 
-Each of these should get its own committed benchmark CSV and evaluation
-script, matching the DGA/flow pattern exactly — not a one-off scratch
-check.
+**Result: one real win, three real gaps.**
+`RULE_RECON_PORT_SCAN` genuinely works — 99.8% precision, 48.5% recall,
+varying sensibly per scenario (0-96%) with how scan-heavy each real
+botnet family actually is. `RULE_DDOS_VOLUMETRIC`, `RULE_C2_HEARTBEAT`,
+and `RULE_CONN_EXFIL` barely fire on real traffic at all (0.2-0.5%
+recall each) — three distinct real reasons, not one bug: DDoS's
+single-flow threshold misses *distributed* volume (many modest flows,
+not one huge one — even the dataset's own explicitly-DDoS-labeled
+scenario only tripped it once), C2's byte window is narrower than this
+dataset's actual beacon traffic, and Exfil's near-zero recall may partly
+reflect that bulk exfiltration is genuinely rare even within real
+botnet traffic dominated by C2/recon. Full numbers and the Argus-state
+translation this needed (with its own empirical verification) are in
+[SECURITY.md](../SECURITY.md#rule-based-detector-validation-against-real-world-data).
+
+**Deliberately not retuned.** Unlike the DGA/flow-model fixes, these
+three rules have no held-out real test set to validate a "fix" against
+— adjusting thresholds using only the same data that measured the gap
+would be circular, and would compound the single-dataset risk Phase 10
+already names. Recorded as a disclosed limitation, not silently patched.
+If this gets picked up: source a *second* independent real dataset first
+(Phase 10), then tune against one and validate against the other, the
+same held-out discipline the DGA benchmark already uses.
+
+**JA4 fingerprinting is still blocked on new data sourcing** — CTU-13's
+flow records carry no TLS handshake data at all. Needs a real malicious
+JA3/JA4 fingerprint feed (Abuse.ch's SSLBL/ThreatFox) cross-referenced
+against JA4s extracted from a real malware pcap. Confirm Abuse.ch's
+terms permit this use before starting, the same diligence already
+applied to CTU-13/baderj's repo.
 
 ## Phase 7 — CI gate parity (cheap, mechanical, currently a real gap)
 
@@ -155,8 +164,11 @@ domain generation.
 ## What "10/10" actually means, concretely
 
 Not a bigger model, again — a system where:
-1. Every detection category the platform claims to have has been checked
-   against real attack data at least once, not just 2 of 6 (Phase 6).
+1. 🟡 Every detection category the platform claims to have has been
+   checked against real attack data at least once — 5 of 6 now (DGA,
+   flow anomaly, and 3 of `evaluate_rules()`'s 4 remaining rules); only
+   JA4 fingerprinting is still unchecked, blocked on sourcing a real
+   TLS-fingerprint feed rather than anything already on disk (Phase 6).
 2. ✅ A false-positive mode nobody had looked for yet (DNS-burst on
    benign traffic) got found and fixed before a real deployment found it
    first — and it was real, not hypothetical: 100% false-positive rate
@@ -173,10 +185,12 @@ Not a bigger model, again — a system where:
 6. Today's real numbers are shown to hold up across many real scenarios,
    not one lucky benchmark each (Phase 10).
 
-Phase 5 is done. Effort for the rest if picked up in order: Phase 6 is
-2-3 days (C2/Recon/DDoS need no new data; JA4 does). Phase 7 is an hour
-once Phase 6 lands. Phase 8 is the real project-sized piece here, similar
-scope to the original roadmap's Phase 2. Phase 9 is a real
-infrastructure/cost decision to raise with whoever owns that call, not a
-solo coding task. Phase 10 is mostly re-running Phase 1/3/6's
-already-built scripts against more of what's already downloaded.
+Phases 5 and 6 are done (6 partially). Effort for the rest if picked up
+in order: Phase 7 is an hour now that Phase 6's evaluators exist. Phase 8
+is the real project-sized piece here, similar scope to the original
+roadmap's Phase 2. Phase 9 is a real infrastructure/cost decision to
+raise with whoever owns that call, not a solo coding task. Phase 10 is
+mostly re-running Phase 1/3/6's already-built scripts against more of
+what's already downloaded — plus, now, a second independent dataset
+before retuning Phase 6's three weak rules, to avoid validating a fix
+against the same data that found the gap.
