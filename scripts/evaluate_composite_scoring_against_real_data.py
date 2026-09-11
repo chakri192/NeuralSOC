@@ -14,15 +14,18 @@ model_name -- see inference/stream_processor_faust.py's raw_alert
 construction), and measures the union/composite coverage against real
 Botnet/Normal ground truth.
 
-This script is also what discovered a real, disclosed nuance about the
-flow autoencoder's generalization: scripts/evaluate_flow_autoencoder_against_real_data.py's
+This script is also what originally discovered a real, disclosed nuance
+about the flow autoencoder's generalization: scripts/evaluate_flow_autoencoder_against_real_data.py's
 100%/99.8%/0.00% numbers are against ONE held-out scenario (11). Across
 ALL 13 real scenarios (most of which contributed no training data at
 all, unlike scenario 11's neighbors 5/7/12), the flow autoencoder alone
 catches only ~37% of real botnet flows -- a materially different, more
 honest picture of single-model generalization, and the concrete
 motivation for combining it with the rule-based detectors rather than
-relying on it alone.
+relying on it alone. That finding is now formalized as its own gated,
+CI-enforced baseline directly in evaluate_flow_autoencoder_against_real_data.py
+(benchmarks/flow_autoencoder_all_scenarios_baseline.json) rather than
+only ever surfacing here.
 
 Also acts as a regression gate, mirroring the other real-data
 evaluators: benchmarks/composite_scoring_baseline.json records the

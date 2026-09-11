@@ -276,18 +276,37 @@ practice.
 
 ## Phase 10 — Multi-dataset validation (closes "proven once" → "proven repeatedly")
 
-Both validated models are proven against exactly one real dataset each.
-CTU-13 alone has 13 scenarios across multiple botnet families (Neris,
-Rbot, Virut, Menti, Sogou, Murlo, NSIS, Donbot) — Phases 1 and 3 used only
-4-5 of them. Extending the flow-autoencoder and rule evaluations across
-*all 13* scenarios (not just the ones already extracted) turns "validated
-against one real botnet campaign" into "validated across a real, diverse
-set of them" — the difference between a lucky result and a robust one.
-Same idea for the DGA benchmark: `benchmarks/real_dga_domains.csv` already
-covers 25 families from one published dataset: a second, independent DGA
-dataset (if one can be sourced as cleanly as CTU-13 was) would confirm
-today's numbers aren't an artifact of this one benchmark's specific
-domain generation.
+**Status: partially done.** Both validated models were originally proven
+against exactly one real dataset each. CTU-13 alone has 13 scenarios
+across multiple botnet families (Neris, Rbot, Virut, Menti, Sogou, Murlo,
+NSIS, Donbot) — Phases 1 and 3 used only 4-5 of them.
+
+**The rule-based detectors and flow autoencoder's all-13-scenario
+coverage: done.** `benchmarks/real_rule_validation_dataset.csv` (Phase
+6/7) already spans all 13 real CTU-13 scenarios, so the 4 rule-based
+detectors were already validated across all of them, not just a handful.
+The flow autoencoder's all-13-scenario number existed too, but only as a
+one-off finding buried inside the composite-scoring evaluator with no
+baseline of its own — formalized this session as its own independent,
+CI-gated check
+(`scripts/evaluate_flow_autoencoder_against_real_data.py`,
+`benchmarks/flow_autoencoder_all_scenarios_baseline.json`): 36.9% recall
+across all 13 scenarios versus 99.8% on the single held-out scenario it
+was originally validated against — a real, now permanently-guarded gap
+between "validated against one real botnet campaign" and "validated
+across a real, diverse set of them." See
+[SECURITY.md](../SECURITY.md#flow-autoencoder-validation-against-real-world-data)
+for the full writeup and the regression-catch verification.
+
+**Still open**: a second, independent DGA dataset.
+`benchmarks/real_dga_domains.csv` covers 25 families from one published
+dataset; a second, independent DGA dataset (if one can be sourced as
+cleanly as CTU-13 was) would confirm today's numbers aren't an artifact
+of this one benchmark's specific domain generation. Retuning Phase 6's
+three weak rules (`RULE_DDOS_VOLUMETRIC`, `RULE_C2_HEARTBEAT`,
+`RULE_CONN_EXFIL` — all 0.2-0.5% recall) is also still open, and depends
+on this: retuning them against the same CTU-13 data that measured the
+gap would be circular, not a real fix.
 
 ---
 
@@ -323,14 +342,17 @@ Not a bigger model, again — a system where:
    in as a second, independent signal combined via Phase 8's log-odds
    pooling — live re-verification against the real pcap surfaced and
    fixed a real Python-3.10 date-parsing bug in the process (Phase 9).
-6. Today's real numbers are shown to hold up across many real scenarios,
-   not one lucky benchmark each (Phase 10) — Phase 8's own evaluation
-   already surfaced a concrete reason this matters: the flow
-   autoencoder's 99.8% recall (Phase 3) drops to ~37% across all 13 real
-   scenarios instead of the one it was validated against.
+6. 🟡 Today's real numbers are shown to hold up across many real
+   scenarios, not one lucky benchmark each — done for the 4 rule-based
+   detectors and, now, independently CI-gated for the flow autoencoder:
+   its 99.8% recall (Phase 3) drops to 36.9% across all 13 real CTU-13
+   scenarios instead of the one it was validated against, and that gap
+   can no longer regress unnoticed (Phase 10). Still open: a second,
+   independent DGA dataset to rule out the DGA CNN's numbers being an
+   artifact of its one benchmark's specific domain-generation style.
 
-Phases 5, 7, 8, and 9 are done (6 partially). Effort for the rest: Phase
-10 is mostly re-running Phase 1/3/6/8's already-built scripts against more
-of what's already downloaded — plus, now, a second independent dataset
-before retuning Phase 6's three weak rules, to avoid validating a fix
-against the same data that found the gap.
+Phases 5, 7, 8, and 9 are done (6 and 10 partially). Effort for the rest:
+Phase 10's remaining piece is sourcing a second, independent DGA dataset,
+then retuning Phase 6's three weak rules against it rather than against
+the same CTU-13 data that found the gap (retuning against the same data
+that measured the problem would be circular, not a real fix).

@@ -115,6 +115,16 @@ jobs:
         # against a real held-out scenario. This is what stops a future
         # retrain from silently sliding back toward that ~98% number
         # without anyone noticing until a real deployment does.
+        #
+        # This gate now ALSO checks a second, independent baseline
+        # (benchmarks/flow_autoencoder_all_scenarios_baseline.json): the
+        # 99.8% figure above is against one held-out scenario whose own
+        # neighbors trained the model; run against real traffic from all
+        # 13 real CTU-13 scenarios instead, the same model catches only
+        # ~37% of real botnet flows. Without this second gate, a future
+        # retrain could keep acing the narrow scenario-11 holdout while
+        # silently regressing broad generalization and nothing would
+        # catch it -- both baselines must hold for this step to pass.
         run: PYTHONPATH=. python3 scripts/evaluate_flow_autoencoder_against_real_data.py
 
       - name: Rule-based detector real-world regression gate

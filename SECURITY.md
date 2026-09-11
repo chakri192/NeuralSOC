@@ -345,6 +345,35 @@ result: real data doesn't just validate a model, it finds problems no
 amount of synthetic testing would have surfaced, and fixing them
 (training data *and* threshold, in this case) genuinely works.
 
+**A second, independent gate: does the 99.8% figure generalize past its
+own eval split?** Scenario 11's own neighbors (5/7/12) trained the model
+above — a real but narrow test. Run instead against
+`benchmarks/real_rule_validation_dataset.csv` (the same real CTU-13
+extract [Rule-based detector validation](#rule-based-detector-validation-against-real-world-data)
+below uses, spanning all 13 real scenarios, most of which contributed no
+training data at all), the identical model catches only **36.9% of real
+botnet flows** (99.3% precision, 0.21% FPR) — a materially more honest
+picture of single-model generalization than the scenario-11 number
+alone, and the concrete reason [Composite incident scoring](#composite-incident-scoring)
+below combines this detector with others rather than trusting it alone.
+
+This number was first surfaced as a side effect inside the composite-
+scoring evaluation, with no baseline of its own — meaning a future
+retrain could keep acing the narrow scenario-11 holdout while silently
+regressing broad generalization, and nothing would catch it.
+`scripts/evaluate_flow_autoencoder_against_real_data.py` now runs and
+gates *both* numbers independently
+(`benchmarks/flow_autoencoder_baseline.json` for the scenario-11 holdout,
+`benchmarks/flow_autoencoder_all_scenarios_baseline.json` for the
+all-13-scenario generalization check) — either regressing beyond 5 points
+fails CI, since the two answer genuinely different questions ("did this
+regress against its own exact eval split" vs. "did this regress against
+real traffic it never specifically prepared for"). Verified the gate
+actually catches a regression the same way every other gate in this
+document was verified: mutated the all-scenarios baseline to simulate a
+23-point recall drop and confirmed the script exits 1 while the
+independent scenario-11 gate still correctly passes.
+
 ## DNS behavioral detection (query bursts, NXDOMAIN rate)
 
 A character-level classifier has a hard ceiling: a well-made dictionary

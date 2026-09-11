@@ -40,6 +40,26 @@ exiting non-zero if recall/precision drop or FPR rises by more than
 REGRESSION_THRESHOLD_POINTS. Pass --update-baseline after a deliberate
 retrain to accept new numbers as the baseline going forward.
 
+SECOND gate, added after scripts/evaluate_composite_scoring_against_real_data.py
+found a real, previously-undisclosed nuance: this scenario-11 holdout
+alone measures 100%/99.8%/0.00%, but the model was trained with scenario
+11's own neighbors (5/7/12) folded in as augmentation data -- a real but
+narrow test of generalization. benchmarks/real_rule_validation_dataset.csv
+(the same real CTU-13 extract evaluate_rules_against_real_data.py uses,
+with every field this model needs) spans all 13 real scenarios, most of
+which contributed no training data at all. Run against that broader set,
+the same model catches only ~37% of real botnet flows -- a materially
+more honest picture of single-model generalization than the holdout
+number alone. That number was previously only ever printed once, buried
+inside the composite-scoring script's output, with no baseline of its
+own -- meaning a future retrain could quietly regress broad
+generalization while still acing the narrow scenario-11 holdout, and
+nothing would catch it. benchmarks/flow_autoencoder_all_scenarios_baseline.json
+closes that gap: both gates are independent (either one failing fails
+the build), because they answer different questions -- "did this regress
+against its own exact eval split" vs. "did this regress against real
+traffic it never specifically prepared for."
+
 Usage:
     PYTHONPATH=. venv/bin/python3 scripts/evaluate_flow_autoencoder_against_real_data.py
     PYTHONPATH=. venv/bin/python3 scripts/evaluate_flow_autoencoder_against_real_data.py --limit 2000
@@ -57,12 +77,16 @@ from inference.models import FlowAnomalyEngine
 
 DATASET_PATH = os.path.join(os.path.dirname(__file__), "..", "benchmarks", "real_flow_dataset_test.csv")
 BASELINE_PATH = os.path.join(os.path.dirname(__file__), "..", "benchmarks", "flow_autoencoder_baseline.json")
+ALL_SCENARIOS_DATASET_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "benchmarks", "real_rule_validation_dataset.csv")
+ALL_SCENARIOS_BASELINE_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "benchmarks", "flow_autoencoder_all_scenarios_baseline.json")
 REGRESSION_THRESHOLD_POINTS = 5.0
 
 
-def _load_dataset(limit=None):
+def _load_dataset(path, limit=None):
     rows = []
-    with open(DATASET_PATH, newline="", encoding="utf-8") as f:
+    with open(path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
             rows.append((
@@ -85,36 +109,20 @@ def _confusion(tp, fp, tn, fn):
     return {"accuracy": accuracy, "precision": precision, "recall": recall, "fpr": fpr}
 
 
-def _load_baseline():
-    if not os.path.exists(BASELINE_PATH):
+def _load_baseline(path):
+    if not os.path.exists(path):
         return None
-    with open(BASELINE_PATH, encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 
-def _write_baseline(metrics):
-    with open(BASELINE_PATH, "w", encoding="utf-8") as f:
+def _write_baseline(path, metrics):
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(metrics, f, indent=2, sort_keys=True)
         f.write("\n")
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--limit", type=int, default=None, help="Only evaluate the first N rows (default: all)")
-    parser.add_argument("--update-baseline", action="store_true",
-                         help="Overwrite benchmarks/flow_autoencoder_baseline.json with this run's numbers "
-                              "(only after a deliberate retrain, not to silence a real regression)")
-    args = parser.parse_args()
-
-    print(f"[*] Loading {DATASET_PATH}...")
-    rows = _load_dataset(args.limit)
-    n_botnet = sum(1 for is_botnet, *_ in rows if is_botnet)
-    n_normal = len(rows) - n_botnet
-    print(f"[*] {len(rows)} real flows loaded ({n_botnet} real Botnet, {n_normal} real Normal)\n")
-
-    print("[*] Loading the live flow autoencoder (models/autoencoder_flow.pt)...")
-    engine = FlowAnomalyEngine()
-
+def _evaluate(engine, rows):
     tp = fp = tn = fn = 0
     for is_botnet, orig_bytes, resp_bytes, duration, tot_pkts in rows:
         is_anomalous, _, _ = engine.score(orig_bytes, resp_bytes, duration, tot_pkts)
@@ -124,30 +132,30 @@ def main():
         else:
             fp += int(is_anomalous)
             tn += int(not is_anomalous)
+    return _confusion(tp, fp, tn, fn), (tp, fp, tn, fn)
 
-    metrics = _confusion(tp, fp, tn, fn)
+
+def _report_and_gate(label, dataset_desc, metrics, confusion, baseline_path, update_baseline):
+    tp, fp, tn, fn = confusion
     print("\n" + "=" * 72)
-    print("RESULTS -- flow autoencoder against real CTU-13 botnet/normal flows")
+    print(f"RESULTS -- {label}")
     print("=" * 72)
     print(f"  Accuracy:  {metrics['accuracy']:.1%}")
     print(f"  Precision: {metrics['precision']:.1%}   (of what it flagged, how much was really Botnet)")
     print(f"  Recall:    {metrics['recall']:.1%}   (of real Botnet flows, how many it caught)")
     print(f"  False-positive rate: {metrics['fpr']:.2%}   (real Normal flows wrongly flagged)")
     print(f"  Confusion: TP={tp} FP={fp} TN={tn} FN={fn}")
+    print(f"\nDataset: {dataset_desc}")
 
-    print("\nDataset: benchmarks/real_flow_dataset_test.csv (CTU-13 scenario 11, Stratosphere IPS / "
-          "CVUT, CC-BY, https://www.stratosphereips.org/datasets-ctu13) -- real botnet-infected host "
-          "traffic and real confirmed-clean host traffic, not this project's own simulator.")
-
-    if args.update_baseline:
-        _write_baseline(metrics)
-        print(f"\n[+] Baseline updated: {BASELINE_PATH}")
+    if update_baseline:
+        _write_baseline(baseline_path, metrics)
+        print(f"\n[+] Baseline updated: {baseline_path}")
         print(f"    precision={metrics['precision']:.1%} recall={metrics['recall']:.1%} fpr={metrics['fpr']:.2%}")
         return 0
 
-    baseline = _load_baseline()
+    baseline = _load_baseline(baseline_path)
     if baseline is None:
-        print(f"\n[!] No baseline found at {BASELINE_PATH} -- run with --update-baseline to create one. "
+        print(f"\n[!] No baseline found at {baseline_path} -- run with --update-baseline to create one. "
               "Skipping regression check.")
         return 0
 
@@ -180,6 +188,53 @@ def main():
 
     print("\n[+] No regression beyond threshold.")
     return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--limit", type=int, default=None, help="Only evaluate the first N rows of EACH dataset (default: all)")
+    parser.add_argument("--update-baseline", action="store_true",
+                         help="Overwrite both baseline files with this run's numbers "
+                              "(only after a deliberate retrain, not to silence a real regression)")
+    args = parser.parse_args()
+
+    print("[*] Loading the live flow autoencoder (models/autoencoder_flow.pt)...")
+    engine = FlowAnomalyEngine()
+
+    print(f"\n[*] Loading {DATASET_PATH}...")
+    holdout_rows = _load_dataset(DATASET_PATH, args.limit)
+    n_botnet = sum(1 for is_botnet, *_ in holdout_rows if is_botnet)
+    print(f"[*] {len(holdout_rows)} real flows loaded ({n_botnet} real Botnet, {len(holdout_rows) - n_botnet} real Normal)")
+    holdout_metrics, holdout_confusion = _evaluate(engine, holdout_rows)
+    holdout_exit = _report_and_gate(
+        "flow autoencoder against real CTU-13 scenario-11 holdout (its own exact eval split)",
+        "benchmarks/real_flow_dataset_test.csv (CTU-13 scenario 11, Stratosphere IPS / CVUT, CC-BY, "
+        "https://www.stratosphereips.org/datasets-ctu13) -- real botnet-infected host traffic and real "
+        "confirmed-clean host traffic, not this project's own simulator.",
+        holdout_metrics, holdout_confusion, BASELINE_PATH, args.update_baseline,
+    )
+
+    print(f"\n[*] Loading {ALL_SCENARIOS_DATASET_PATH}...")
+    all_scenarios_rows = _load_dataset(ALL_SCENARIOS_DATASET_PATH, args.limit)
+    n_botnet = sum(1 for is_botnet, *_ in all_scenarios_rows if is_botnet)
+    print(f"[*] {len(all_scenarios_rows)} real flows loaded ({n_botnet} real Botnet, "
+          f"{len(all_scenarios_rows) - n_botnet} real Normal)")
+    all_scenarios_metrics, all_scenarios_confusion = _evaluate(engine, all_scenarios_rows)
+    all_scenarios_exit = _report_and_gate(
+        "flow autoencoder against ALL 13 real CTU-13 scenarios (broad generalization, not just its own eval split)",
+        "benchmarks/real_rule_validation_dataset.csv (CTU-13, all 13 scenarios, Stratosphere IPS / CVUT, "
+        "CC-BY, https://www.stratosphereips.org/datasets-ctu13) -- most of these scenarios contributed no "
+        "training data to this model at all, unlike scenario 11's own neighbors (5/7/12) above.",
+        all_scenarios_metrics, all_scenarios_confusion, ALL_SCENARIOS_BASELINE_PATH, args.update_baseline,
+    )
+
+    print("\n" + "=" * 72)
+    print(f"Scenario-11 holdout recall:      {holdout_metrics['recall']:.1%}")
+    print(f"All-13-scenario recall:          {all_scenarios_metrics['recall']:.1%}")
+    print("The gap between these two is the real cost of validating against only one held-out "
+          "scenario -- both are now independently gated, so neither can silently regress unnoticed.")
+
+    return 0 if (holdout_exit == 0 and all_scenarios_exit == 0) else 1
 
 
 if __name__ == "__main__":
