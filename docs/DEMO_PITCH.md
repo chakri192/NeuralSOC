@@ -15,9 +15,10 @@ This project simulates a real-time, high-speed SOC (Security Operations Center) 
 ##  The AI & Detection Engines
 To solve the payload-blindness constraint, the system uses a hybrid mix of **Deep Learning, Machine Learning, and Behavioral Statistics** to detect the 6 deadliest threat vectors:
 
-### 1. Dictionary DGA & DNS Tunnelling (Deep Learning)
+### 1. DGA & DNS Tunnelling (Deep Learning, validated against real malware)
 * **Threat:** Hackers exfiltrate data or find C2 servers using randomized domain names.
-* **Solution:** We trained a **PyTorch 1D Convolutional Neural Network (CNN)**. Instead of just looking at entropy, the CNN reads the sequence of characters to catch advanced "Dictionary DGAs" that trick traditional ML algorithms.
+* **Solution:** A **PyTorch 1D Convolutional Neural Network (CNN)** reads the sequence of characters in a domain name, rather than just scoring entropy.
+* **Validated against real data, not just our own simulator:** run against a published research dataset of 25 real malware families' actual DGA domains — 86.5% precision, 5.9% false-positive rate. Honest nuance if asked for the per-family breakdown: it catches character-random families like `corebot`/`rovnix` at 98%+, but the dictionary-word-style families (`suppobox`, `gozi` — deliberately designed by their authors to generate real-word-like domains specifically to evade this class of detection) are where it's weakest. That's a real, known gap, not a hidden one.
 
 ### 2. Zero-Day Data Exfiltration & Behavioral Anomalies (Statistical rule + Deep Learning, both live)
 * **Threat:** A compromised insider machine starts uploading a database to an unknown IP -- or any flow that simply doesn't look like the rest of the traffic on this network.

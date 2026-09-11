@@ -7,6 +7,7 @@ import torch.optim as optim
 import random
 import string
 import time
+from torch.utils.data import DataLoader, TensorDataset
 
 # 1. Advanced Neural Network Architecture (CNN)
 class DGA_CNN(nn.Module):
@@ -31,10 +32,39 @@ class DGA_CNN(nn.Module):
         x = self.sigmoid(self.fc2(x))
         return x
 
+_BENIGN_DOMAINS_PATH = os.path.join(os.path.dirname(__file__), "..", "benchmarks", "real_benign_domains_train.csv")
+_FALLBACK_BENIGN_DOMAINS = ["google.com", "apple.com", "microsoft.com", "amazon.com", "netflix.com", "github.com", "ubuntu.com", "wikipedia.org", "yahoo.com", "linkedin.com"]
+
+
+def _load_benign_domains():
+    """40,000 real domains sampled across Tranco's full popularity range
+    (benchmarks/real_benign_domains_train.csv), not just a handful of
+    world-famous brand names.
+
+    The model used to train on exactly 10 hardcoded benign domains
+    (google.com, apple.com, ...) -- confirmed, empirically, to be the
+    root cause of a 98% false-positive rate when the resulting CNN was
+    actually run against benchmarks/real_dga_domains.csv's real Alexa
+    domains (scripts/evaluate_against_real_dga_dataset.py): the model
+    had learned "matches one of these 10 exact strings" rather than any
+    general notion of what a legitimate domain looks like, so anything
+    outside that tiny set -- i.e. nearly every real domain that exists --
+    read as anomalous. Deliberately excludes every domain already used
+    in that held-out real test set, so training and evaluation never
+    see the same benign domains.
+    """
+    if os.path.exists(_BENIGN_DOMAINS_PATH):
+        with open(_BENIGN_DOMAINS_PATH, encoding="utf-8") as f:
+            domains = [line.strip() for line in f if line.strip()]
+        if domains:
+            return domains
+    return _FALLBACK_BENIGN_DOMAINS
+
+
 # 2. Hardened Threat Generator (Synthetic dataset creation for ML training)
 def generate_hard_dataset(num_samples=100000):
     char_map = {c: i+1 for i, c in enumerate(string.ascii_lowercase + string.digits + "-.")}
-    benign_domains = ["google.com", "apple.com", "microsoft.com", "amazon.com", "netflix.com", "github.com", "ubuntu.com", "wikipedia.org", "yahoo.com", "linkedin.com"]
+    benign_domains = _load_benign_domains()
     words = ["login", "admin", "secure", "update", "verify", "account", "portal", "support", "billing", "auth"]
 
     data, labels = [], []
@@ -108,6 +138,18 @@ def train_to_max():
     X_train, y_train = X[:split_idx], y[:split_idx]
     X_val, y_val = X[split_idx:], y[split_idx:]
 
+    # Mini-batched, not one full-batch gradient step per "epoch" -- the
+    # latter was confirmed to matter, not just theoretically: with 50
+    # *total* optimizer steps for the whole run, it trained fine against
+    # the old benign set (10 hardcoded famous domains, a trivially
+    # separable task) but collapsed to predicting "not DGA" for
+    # everything the moment the benign set became 40,000 genuinely
+    # diverse real domains (scripts/evaluate_against_real_dga_dataset.py
+    # went from a 98% false-positive rate straight to 0% recall) -- a
+    # harder, more realistic decision boundary needs real gradient signal
+    # accumulated over many steps, not one giant averaged-out step.
+    train_loader = DataLoader(TensorDataset(X_train, y_train), batch_size=256, shuffle=True)
+
     model = DGA_CNN()
     criterion = nn.BCELoss()
     optimizer = optim.Adam(model.parameters(), lr=0.001)
@@ -125,10 +167,11 @@ def train_to_max():
     while best_acc < target_acc and epochs_no_improve < patience and epoch < 50:
         epoch += 1
         model.train()
-        optimizer.zero_grad()
-        loss = criterion(model(X_train), y_train)
-        loss.backward()
-        optimizer.step()
+        for batch_x, batch_y in train_loader:
+            optimizer.zero_grad()
+            loss = criterion(model(batch_x), batch_y)
+            loss.backward()
+            optimizer.step()
 
         model.eval()
         with torch.no_grad():

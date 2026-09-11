@@ -75,11 +75,13 @@ def test_dga_cnn_forward_produces_probability_in_unit_range():
 
 
 def test_homoglyph_collision_safety_net_does_not_crash(monkeypatch):
-    # Every real entry in benign_domains contains at least one of o/l/i/e,
-    # so base.replace(...) always changes something in practice -- the
-    # "dga == base" safety net (a domain that happens to survive the
-    # replace unchanged) is otherwise unreachable with the real list.
-    # Force it directly: fix threat_type into the homoglyph branch and
+    # Most real domains contain at least one of o/l/i/e, so
+    # base.replace(...) usually changes something -- but with 40,000 real,
+    # diverse benign_domains (not the original 10 hardcoded brand names)
+    # a handful genuinely won't, so the "dga == base" safety net (a domain
+    # that happens to survive the replace unchanged) can't be assumed
+    # unreachable via normal random selection anymore either way. Force it
+    # directly regardless: fix threat_type into the homoglyph branch and
     # random.choice to a domain with none of those characters.
     monkeypatch.setattr("inference.train_model.random.random", lambda: 0.5)
     monkeypatch.setattr("inference.train_model.random.choice", lambda seq: "abcd.zzz")
