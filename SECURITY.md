@@ -404,6 +404,39 @@ Lumma Stealer capture used elsewhere in this document twice:
    direct-code numbers reported earlier in this section, confirming no
    live-vs-offline scoring discrepancy.
 
+**A real false-positive gap, found and fixed after the above was already
+verified working against the real threat:** the burst detector had only
+ever been checked against the one real threat it caught, never against
+realistic *benign* bursty DNS behavior. Simulated a single host rapidly
+querying real domains (`benchmarks/real_benign_domains_train.csv`, the
+same corpus the DGA model itself trains on) in 200 trials at various
+burst sizes: **100% false-positive rate at exactly 15 distinct domains
+in a 60-second window** — a volume any moderately heavy page load or
+multi-tab browsing session can hit, since the threshold was a hard count
+cliff, not a probabilistic signal. A related, smaller gap: 6 total DNS
+responses at a 50% NXDOMAIN rate (a plausible benign scenario — a VPN
+client failing to resolve a few internal hostnames while disconnected)
+also false-triggered.
+
+Fixed using real evidence as the calibration bounds on both sides, the
+same discipline as every other threshold in this document: the real
+malicious host's distinct-domain count (confirmed via the live pipeline
+run above) kept climbing well past 40, up to 72, over the course of the
+same capture — so `DISTINCT_DOMAIN_BURST_THRESHOLD` moved from 15 to 40,
+comfortably below the confirmed-malicious range and well above the
+demonstrated benign non-trigger point (14, in the same simulation).
+`MIN_RESPONSES_FOR_NXDOMAIN_RATE` moved from 5 to 8, after checking that
+the real live detections above mostly fired with 9+ responses anyway
+(only the 8 least statistically confident of many real alerts, all with
+5-7 responses, would be lost). Re-verified live end-to-end after the
+fix: the real infected host is still caught (165 `RULE_DNS_QUERY_BURST`
+alerts this run, exclusively attributed to `10.1.21.58`, same as
+before — fewer alerts because the higher thresholds mean less repeated
+re-triggering on the same ongoing burst, not less detection). 6 new
+regression tests (`tests/unit/test_dns_behavior.py`) lock in both the
+realistic-burst-size non-trigger behavior and the still-detects-a-real-
+burst behavior, using the same real domain corpus.
+
 ## Dependency scanning
 
 A one-time `pip-audit` sweep brought the full dependency tree to zero

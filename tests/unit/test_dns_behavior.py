@@ -6,6 +6,8 @@ dependency for inference/correlation.py's own tests) exercises the real
 Redis command sequences (SADD/EXPIRE/SCARD/INCR/pipeline) rather than
 mocking them away.
 """
+import os
+import random
 from unittest.mock import MagicMock
 
 import fakeredis
@@ -17,6 +19,10 @@ from inference.dns_behavior import (
     MIN_RESPONSES_FOR_NXDOMAIN_RATE,
     DnsBehaviorTracker,
     _validate_source_ip,
+)
+
+_REAL_BENIGN_DOMAINS_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "..", "benchmarks", "real_benign_domains_train.csv"
 )
 
 
@@ -135,6 +141,26 @@ class TestIsBurst:
         assert is_burst is False
         assert reason is None
 
+    def test_small_sample_high_rate_no_longer_false_positives(self, tracker):
+        """Regression test: MIN_RESPONSES_FOR_NXDOMAIN_RATE was
+        originally 5 -- a plausible benign scenario (a VPN client
+        failing to resolve 3 internal hostnames while disconnected,
+        alongside 3 ordinary lookups that resolve fine) hit exactly a
+        50% rate at 6 total responses and false-triggered. Real live
+        pipeline data showed the genuine detections this threshold
+        exists to catch mostly fire with 9+ responses anyway (only 8 of
+        many real alerts fired at the old 5-7 response minimum), so
+        raising it costs only the least statistically confident early
+        alerts, not real detection capability."""
+        for _ in range(3):
+            tracker.record_response("10.0.0.5", is_nxdomain=False)
+        for _ in range(3):
+            tracker.record_response("10.0.0.5", is_nxdomain=True)
+        is_burst, reason, stats = tracker.is_burst("10.0.0.5")
+        assert stats["nxdomain_rate"] == 0.5
+        assert stats["total_responses"] == 6
+        assert is_burst is False
+
     def test_get_stats_error_degrades_to_not_a_burst(self):
         broken_redis = MagicMock()
         broken_redis.scard.side_effect = RuntimeError("redis down")
@@ -142,3 +168,41 @@ class TestIsBurst:
         tracker = DnsBehaviorTracker(broken_redis)
         is_burst, reason, stats = tracker.is_burst("10.0.0.5")  # must not raise
         assert is_burst is False
+
+
+class TestRealBenignBurstDoesNotFalsePositive:
+    """DISTINCT_DOMAIN_BURST_THRESHOLD was originally 15 and false-
+    positived 100% of the time (200/200 simulated trials) on a single
+    host querying just 15 random REAL domains in a tight window -- a
+    volume any moderately heavy page load or multi-tab browsing session
+    can hit. This is the regression test for that fix: real domains from
+    benchmarks/real_benign_domains_train.csv (the same corpus the DGA
+    model trains its benign side on), fed through the real tracker, must
+    not trigger a burst at realistic browsing volumes.
+    """
+
+    @pytest.fixture(scope="class")
+    def real_domains(self):
+        with open(_REAL_BENIGN_DOMAINS_PATH, encoding="utf-8") as f:
+            return [line.strip() for line in f if line.strip()]
+
+    def _simulate_burst(self, real_domains, n_domains, seed):
+        rng = random.Random(seed)  # nosec B311
+        server = fakeredis.FakeServer()
+        tracker = DnsBehaviorTracker(fakeredis.FakeRedis(server=server, decode_responses=True), window_seconds=60)
+        host = "10.0.0.1"
+        for domain in rng.sample(real_domains, n_domains):
+            tracker.record_query(host, domain)
+            tracker.record_response(host, is_nxdomain=False)  # realistic: legit lookups resolve
+        return tracker.is_burst(host)
+
+    @pytest.mark.parametrize("n_domains", [10, 20, 30, DISTINCT_DOMAIN_BURST_THRESHOLD - 1])
+    def test_realistic_browsing_burst_sizes_never_false_positive(self, real_domains, n_domains):
+        for seed in range(20):  # multiple real random samples, not just one lucky draw
+            is_burst, reason, stats = self._simulate_burst(real_domains, n_domains, seed)
+            assert not is_burst, f"seed={seed} n={n_domains} falsely flagged: {stats} ({reason})"
+
+    def test_volume_at_or_above_threshold_still_flags(self, real_domains):
+        is_burst, reason, stats = self._simulate_burst(real_domains, DISTINCT_DOMAIN_BURST_THRESHOLD, seed=0)
+        assert is_burst is True
+        assert reason == "distinct_domain_burst"

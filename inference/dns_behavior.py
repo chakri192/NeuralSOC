@@ -29,9 +29,33 @@ logger = logging.getLogger(__name__)
 # state is: a single noisy or attacking host shouldn't be able to grow
 # Redis memory without limit just by generating a lot of DNS activity.
 MAX_TRACKED_DOMAINS = 200
-DISTINCT_DOMAIN_BURST_THRESHOLD = 15
+
+# DISTINCT_DOMAIN_BURST_THRESHOLD was originally 15 -- verified, after
+# this was already live, to false-positive on entirely realistic benign
+# bursts: 200/200 simulated trials of a single host querying 15-50
+# random real domains (benchmarks/real_benign_domains_train.csv, a
+# proxy for a browser opening several tabs or one ad/CDN-heavy page
+# loading) triggered every time at exactly this threshold, which is far
+# below what modern web browsing routinely generates. Raised using two
+# real data points as bounds: the demonstrated benign non-trigger point
+# (14, in that same simulation) and the real Lumma Stealer host's actual
+# distinct-domain count, which kept climbing past 40 (to 46, 50, 58, 64,
+# eventually 72) over the course of the live pipeline run -- 40 sits
+# clear of both, and the real detection still fired robustly at the
+# higher threshold, just slightly later in the same ongoing burst rather
+# than immediately.
+DISTINCT_DOMAIN_BURST_THRESHOLD = 40
+
 NXDOMAIN_RATE_THRESHOLD = 0.5
-MIN_RESPONSES_FOR_NXDOMAIN_RATE = 5
+
+# Also originally 5 -- real live detections from the same verification
+# pass showed the vast majority of genuine high_nxdomain_rate alerts
+# fired with 9+ responses accumulated; only the earliest, statistically
+# weakest few (5-7 responses) fired right at the old minimum. Raised to
+# require more samples before trusting the rate, at the cost of only
+# those least-confident early alerts -- the same real infected host
+# keeps generating traffic and gets caught at 9+ responses regardless.
+MIN_RESPONSES_FOR_NXDOMAIN_RATE = 8
 
 
 def _validate_source_ip(raw_ip: str):
