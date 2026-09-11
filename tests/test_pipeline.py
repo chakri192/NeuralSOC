@@ -1327,6 +1327,7 @@ class TestSOCPipelineSecurity(unittest.TestCase):
             with patch.object(sp, "extract_features", return_value={}), \
                  patch.object(sp, "evaluate_rules", return_value=[]), \
                  patch.object(sp.dl_engine, "predict", return_value=(True, 0.97, 0.1)), \
+                 patch.object(sp.domain_age_lookup, "lookup_age_days", new=AsyncMock(return_value=None)), \
                  patch.object(sp.dns_behavior_tracker, "record_query", return_value=None), \
                  patch.object(sp.dns_behavior_tracker, "is_burst", return_value=(False, None, {})), \
                  patch.object(sp, "validate_alert", return_value=(True, None)), \
@@ -1341,6 +1342,64 @@ class TestSOCPipelineSecurity(unittest.TestCase):
             sent_alert = alerts_send.call_args.kwargs["value"]
             self.assertEqual(sent_alert["threat_class"], "DGA / DNS Tunnelling")
             self.assertEqual(sent_alert["evidence"], {"domain": "xk3q9z7-evil.biz"})
+
+        asyncio.run(_run())
+
+    def test_domain_age_publishes_a_second_alert_for_a_young_cnn_flagged_domain(self):
+        """Domain age is only looked up for domains the CNN already
+        flagged (is_dga=True) -- a young, CNN-flagged domain must
+        produce its OWN corroborating alert (RULE_DOMAIN_AGE_YOUNG),
+        genuinely additive to the CNN's own verdict rather than mutating
+        it, so both become independent evidence for
+        inference/risk.py's composite scoring."""
+        import inference.stream_processor_faust as sp
+
+        event = {"event_type": "dns", "id.orig_h": "10.0.0.5", "id.resp_h": "8.8.8.8", "query": "freshly-registered-evil.biz"}
+
+        async def _run():
+            with patch.object(sp, "extract_features", return_value={}), \
+                 patch.object(sp, "evaluate_rules", return_value=[]), \
+                 patch.object(sp.dl_engine, "predict", return_value=(True, 0.97, 0.1)), \
+                 patch.object(sp.domain_age_lookup, "lookup_age_days", new=AsyncMock(return_value=5.0)), \
+                 patch.object(sp.dns_behavior_tracker, "record_query", return_value=None), \
+                 patch.object(sp.dns_behavior_tracker, "is_burst", return_value=(False, None, {})), \
+                 patch.object(sp, "validate_alert", return_value=(True, None)), \
+                 patch.object(sp.enricher, "enrich", new=AsyncMock(side_effect=lambda a: a)), \
+                 patch.object(sp.alerts_topic, "send", new=AsyncMock(return_value=None)) as alerts_send, \
+                 patch.object(sp.correlator, "add_alert", return_value=None), \
+                 patch.object(sp.incidents_topic, "send", new=AsyncMock(return_value=None)), \
+                 patch.object(sp, "_send_dlq_safely", new=AsyncMock()):
+                await sp.process_traffic.fun(self._fake_stream([event]))
+
+            self.assertEqual(alerts_send.await_count, 2)
+            sent = [c.kwargs["value"] for c in alerts_send.await_args_list]
+            model_names = {a["model_name"] for a in sent}
+            self.assertEqual(model_names, {"DL_CNN_DGA", "RULE_DOMAIN_AGE_YOUNG"})
+            age_alert = next(a for a in sent if a["model_name"] == "RULE_DOMAIN_AGE_YOUNG")
+            self.assertEqual(age_alert["evidence"]["domain"], "freshly-registered-evil.biz")
+            self.assertEqual(age_alert["evidence"]["registration_age_days"], 5.0)
+
+        asyncio.run(_run())
+
+    def test_domain_age_not_looked_up_when_cnn_does_not_flag_the_domain(self):
+        """Bounds real external network calls to domains already
+        suspicious -- a benign domain the CNN doesn't flag must never
+        trigger an RDAP lookup at all."""
+        import inference.stream_processor_faust as sp
+
+        event = {"event_type": "dns", "id.orig_h": "10.0.0.5", "id.resp_h": "8.8.8.8", "query": "google.com"}
+
+        async def _run():
+            with patch.object(sp, "extract_features", return_value={}), \
+                 patch.object(sp, "evaluate_rules", return_value=[]), \
+                 patch.object(sp.dl_engine, "predict", return_value=(False, 0.01, 0.1)), \
+                 patch.object(sp.domain_age_lookup, "lookup_age_days", new=AsyncMock(return_value=9999.0)) as age_lookup, \
+                 patch.object(sp.dns_behavior_tracker, "record_query", return_value=None), \
+                 patch.object(sp.dns_behavior_tracker, "is_burst", return_value=(False, None, {})), \
+                 patch.object(sp, "_send_dlq_safely", new=AsyncMock()):
+                await sp.process_traffic.fun(self._fake_stream([event]))
+
+            age_lookup.assert_not_awaited()
 
         asyncio.run(_run())
 

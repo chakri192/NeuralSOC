@@ -74,6 +74,27 @@ spec:
         - ports:
             - port: "443"
               protocol: TCP
+    # Domain-age lookup (inference/domain_age.py) via free public RDAP --
+    # only for domains the DGA CNN has already flagged, never every DNS
+    # query (see that module's docstring). Honest limitation this entry
+    # can't fully close: RDAP's own bootstrap design (rdap.org) redirects
+    # to whichever registry's own RDAP server actually holds a given
+    # TLD's records (rdap.verisign.com for .com, dozens of others
+    # otherwise) -- there is no shared suffix to allow-list, so a strict
+    # per-registry FQDN policy isn't practically enumerable here. This
+    # entry allows the bootstrap itself; a deployment that needs the
+    # lookup to actually succeed for TLDs beyond whichever registries are
+    # separately allow-listed (none, currently) will need either a
+    # broader DNS-based policy for this workload or to accept that most
+    # non-.com lookups fail closed to "no signal" under strict Cilium
+    # enforcement -- the same fail-closed behavior domain_age.py already
+    # has for a TLD with no RDAP service at all.
+    - toFQDNs:
+        - matchName: "rdap.org"
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
 ---
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy

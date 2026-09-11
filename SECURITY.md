@@ -580,6 +580,84 @@ Also gated by a CI regression check
 (`benchmarks/composite_scoring_baseline.json`), same pattern as every
 other real-data evaluator in this document.
 
+## Domain-age enrichment
+
+[inference/domain_age.py](inference/domain_age.py)'s `DomainAgeLookup`
+adds a second, independent signal against dictionary-style DGA domains
+(`vawtrak`, `gozi`, `matsnu` — still a real ceiling for a classifier that
+only ever sees the domain string once): real registration age via free,
+public RDAP (RFC 7482+, `rdap.org`'s bootstrap). It's looked up only for
+domains [inference/stream_processor_faust.py](inference/stream_processor_faust.py)'s
+DGA CNN has *already* flagged (`is_dga`), never for every DNS query — both
+to bound external network calls and because sending every domain a
+monitored network queries to a third party is a real privacy trade-off
+this project isn't making unilaterally for every query. A hit young
+enough (`YOUNG_DOMAIN_DAYS_THRESHOLD = 180` days) becomes a second,
+independent `RULE_DOMAIN_AGE_YOUNG` alert, combined with the CNN's own
+verdict via the log-odds pooling above — deliberately not a standalone
+confirm/deny, since a young-but-legitimate domain (a real new startup,
+e.g.) is a known false-positive mode for this signal alone.
+
+**Validated against the real Lumma Stealer capture's actual malicious
+domains** before being trusted: real RDAP lookups showed 9-261 days
+between registration and use, against decades for real legitimate
+infrastructure (`google.com`: 1997, `microsoft.com`: 1991). Two honest,
+disclosed limits found in that same validation: RDAP coverage varies by
+TLD — `.su` has no RDAP service at all, and `whitepepper.su` (the domain
+queried 10x in a real beaconing pattern, arguably the strongest single
+signal in the whole capture) gets no signal from this lookup, fails
+closed to `None` rather than raising; and the original roadmap's
+assumption that DGA domains are registered "minutes to hours" before use
+was wrong — real operators pre-register days to months ahead, which is
+what the threshold above is actually calibrated against.
+
+**A real integration bug, found only by live re-verification, not by
+unit tests.** Every unit test in `tests/unit/test_domain_age.py` passed
+against mocks, and the live stream processor's own logs showed real 200
+OK RDAP responses for the exact malicious domains above — yet
+`RULE_DOMAIN_AGE_YOUNG` never appeared in the alerts table. Root cause:
+`_parse_age_days()` used `datetime.fromisoformat()`, which only accepts a
+single-digit fractional second (RDAP's real `eventDate` format, e.g.
+`"2025-12-09T08:20:51.0Z"`) starting in Python 3.11 — this project runs
+3.10, where every real response raised `ValueError`, silently swallowed
+by the function's fail-closed `except` into "no signal" with nothing
+logged to explain why. Fixed by switching to `dateutil.parser.isoparse`
+(already a project dependency, already used the same way in
+`shared/formatters.py`'s `format_timestamp`) — confirmed directly against
+the real domains: `filemegahab4.sbs` and `whooptm.cyou` now return real,
+correct ages instead of `None`.
+
+That same live re-verification surfaced one more honest finding, about
+methodology rather than code: replaying the original capture live many
+months after it was recorded no longer demonstrates
+`RULE_DOMAIN_AGE_YOUNG` firing for any of those specific domains, because
+age is computed relative to wall-clock "now" and every one of them has
+since aged past the 180-day threshold in the real time that's elapsed —
+expected behavior for a point-in-time signal, not a defect. The "is_dga →
+lookup called" half of the wiring is confirmed live (the same run's logs
+show real RDAP calls firing only for CNN-flagged domains); the "young age
+→ second alert" half is confirmed via
+`tests/test_pipeline.py`'s `test_domain_age_publishes_a_second_alert_for_a_young_cnn_flagged_domain`
+and `test_domain_age_not_looked_up_when_cnn_does_not_flag_the_domain`,
+exercising the exact same production code path against a controlled age
+in place of the (now independently-confirmed-correct) real network call.
+
+TLS posture mirrors [inference/enrichment.py](inference/enrichment.py)'s
+`ThreatEnricher`: TLS 1.2+ enforced via an explicit `ssl.SSLContext`. One
+deliberate difference: `ThreatEnricher` pins a single host and rejects
+redirects outright (`follow_redirects=False`) as SSRF defense; RDAP's
+bootstrap design *requires* following exactly one redirect to the
+authoritative per-TLD registry server, determined by IANA's own bootstrap
+data rather than by anything an attacker-controlled domain string could
+steer — `follow_redirects=True` here is that design's intended discovery
+mechanism, not an inconsistency. `extract_registrable_domain()` validates
+domain syntax via regex before ever embedding a string in a request URL,
+defense-in-depth even though the DNS-query source is already constrained
+upstream by `inference/models.py`'s own sanitization.
+`k8s/cilium-identity-policy.yaml` allow-lists `rdap.org` egress, with an
+inline-documented gap: a fully strict per-registry FQDN policy isn't
+practically enumerable given RDAP's redirect-to-any-registry design.
+
 ## Dependency scanning
 
 A one-time `pip-audit` sweep brought the full dependency tree to zero

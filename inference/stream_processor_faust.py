@@ -23,6 +23,7 @@ from inference.rules import evaluate_rules
 from inference.models import DeepLearningEngine, FlowAnomalyEngine
 from inference.correlation import IncidentCorrelator
 from inference.dns_behavior import DnsBehaviorTracker
+from inference.domain_age import YOUNG_DOMAIN_DAYS_THRESHOLD, DomainAgeLookup, confidence_for_age
 from inference.enrichment import ThreatEnricher
 from inference.schemas import validate_alert
 from shared.tracing import init_tracing
@@ -34,6 +35,7 @@ correlator = IncidentCorrelator()
 # connection rather than opening a second pool with its own security
 # config to audit -- see inference/dns_behavior.py's module docstring.
 dns_behavior_tracker = DnsBehaviorTracker(correlator.redis)
+domain_age_lookup = DomainAgeLookup()
 enricher = ThreatEnricher()
 
 logger = logging.getLogger(__name__)
@@ -227,7 +229,40 @@ async def process_traffic(stream):
                 except Exception as e:
                     logger.error(f"DL inference failed: {e}")
 
-                # 3a. DNS behavioral tracking -- independent of the CNN's
+                # 3a. Domain age enrichment -- only for domains the CNN
+                # has ALREADY flagged as suspicious (is_dga above), never
+                # for every DNS query: this is a real external network
+                # call (public RDAP), and bounding it to the already-
+                # small fraction of traffic the CNN flags both limits
+                # real request volume and limits how much of the
+                # monitored network's DNS activity ever leaves it for a
+                # third-party lookup. See inference/domain_age.py's
+                # module docstring for the real-data validation (checked
+                # against the actual Lumma Stealer capture's malicious
+                # domains) and its disclosed limitations (RDAP coverage
+                # varies by TLD; a young-but-legitimate domain also
+                # triggers this). Appended as its OWN detection rather
+                # than mutating the CNN's own confidence, so it becomes
+                # its own corroborating signal in inference/risk.py's
+                # log-odds pooling when this domain also shows up in
+                # other detectors' alerts for the same incident.
+                if is_dga:
+                    try:
+                        age_days = await asyncio.wait_for(domain_age_lookup.lookup_age_days(query), timeout=5.0)
+                        if age_days is not None and age_days <= YOUNG_DOMAIN_DAYS_THRESHOLD:
+                            detections.append({
+                                "threat_class": "DGA / DNS Tunnelling",
+                                "severity": "medium",
+                                "confidence": confidence_for_age(age_days),
+                                "rule_id": "RULE_DOMAIN_AGE_YOUNG",
+                                "evidence": {"domain": query, "registration_age_days": round(age_days, 1)},
+                            })
+                    except asyncio.TimeoutError:
+                        logger.warning("Domain age lookup timed out for %s; skipping", query)
+                    except Exception as e:
+                        logger.error(f"Domain age lookup failed: {e}")
+
+                # 3b. DNS behavioral tracking -- independent of the CNN's
                 # per-domain verdict above. A single domain's character
                 # shape has a hard ceiling (a well-made dictionary DGA
                 # domain can be lexically indistinguishable from a real
@@ -261,7 +296,7 @@ async def process_traffic(stream):
                 except Exception as e:
                     logger.error(f"DNS behavioral tracking failed: {e}")
 
-            # 3b. Deep-learning inference (flow anomaly) -- same bounded
+            # 3c. Deep-learning inference (flow anomaly) -- same bounded
             # cpu_executor/semaphores as the DGA CNN above, since both
             # compete for the same 4 worker threads. Complements the
             # signature-shaped rules in evaluate_rules(): FlowAnomalyEngine
@@ -304,7 +339,7 @@ async def process_traffic(stream):
                 except Exception as e:
                     logger.error(f"Flow anomaly inference failed: {e}")
 
-            # 3c. DNS response tracking -- feeds the behavioral tracker's
+            # 3d. DNS response tracking -- feeds the behavioral tracker's
             # NXDOMAIN rate (see 3a above). Purely an update to shared
             # state; a dns_response event never produces a detection on
             # its own, and ingest/pcap_ingester.py's
@@ -612,6 +647,10 @@ async def _on_before_shutdown(sender=None, **kwargs):
         await enricher.close()
     except Exception as e:
         logger.error(f"Error closing threat enricher client: {e}")
+    try:
+        await domain_age_lookup.close()
+    except Exception as e:
+        logger.error(f"Error closing domain age lookup client: {e}")
 
     # 2. Asynchronously drain and shutdown threadpool executors without blocking the event loop
     loop = asyncio.get_running_loop()

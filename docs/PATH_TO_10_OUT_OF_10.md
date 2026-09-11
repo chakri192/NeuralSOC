@@ -159,8 +159,13 @@ a CI regression check, same as every other detector in this plan.
 
 ## Phase 9 — External reputation signal (the one architectural gap, not just a tuning gap)
 
-**Status: signal validated with real data; infrastructure decision still
-open, deliberately not made unilaterally — see below.**
+**Status: done.** Free-RDAP, async-enrichment-only option built
+(`inference/domain_age.py`), wired into `inference/stream_processor_faust.py`
+behind the existing DGA CNN's `is_dga` gate (never looked up for every DNS
+query, only for domains the CNN already flagged — see that module's
+docstring), and validated live against the real Lumma Stealer capture. A
+real integration bug was found and fixed during that live validation —
+see below.
 
 Dictionary-style DGA (`vawtrak`, `gozi`, `matsnu` — still 15-44% recall
 after everything else in this plan) has a real ceiling for any classifier
@@ -205,32 +210,69 @@ missed entirely:
    it's part of why malware operators use them. A domain-age signal's
    real-world coverage is weaker specifically where it's needed most.
 
-**Infrastructure options, for whoever makes this call** (not decided
-here):
-- **Free public RDAP** (what validated the table above): no cost, no
-  API key, but real-time per-query network calls (100-500ms+ latency —
-  belongs in an async enrichment stage like `ThreatEnricher`, not the
-  hot classification path), inconsistent TLD coverage, and a genuine
-  privacy consideration: every domain sent for lookup leaves the
-  organization's network, which is a real question for a product
-  monitoring potentially sensitive internal DNS traffic (mitigated if
-  restricted to only CNN-flagged/already-suspicious domains, not every
-  query).
-- **Commercial passive-DNS/WHOIS-history feeds** (WhoisXML, SecurityTrails,
-  DomainTools): paid, but bulk/cached lookups, SLAs, and historical WHOIS
-  data current lookups can't see (privacy-service-obscured current
-  records sometimes still expose original registration history). A real
-  procurement/budget decision.
-- **Local zone-file-based lookup**: some registries publish daily
-  newly-registered-domain zone files (e.g. ICANN's Centralized Zone Data
-  Service); building a local table avoids per-query external calls and
-  the privacy exposure entirely, at the cost of more infrastructure to
-  stand up and maintain.
+**What got built**: `DomainAgeLookup` (free public RDAP via `rdap.org`'s
+bootstrap, which redirects to whichever registry actually holds a TLD's
+records — Verisign for `.com`, CentralNic for `.sbs`/`.cyou`, etc.),
+`extract_registrable_domain()` (SSRF-conscious SLD extraction, validated
+before ever touching a request URL), and `confidence_for_age()` (linear
+0.55-0.95 confidence scaled by how far under the 180-day
+`YOUNG_DOMAIN_DAYS_THRESHOLD` a domain is — calibrated against the 9-261
+day real range above). A hit becomes a second, independent
+`RULE_DOMAIN_AGE_YOUNG` detection alongside the CNN's own verdict, combined
+via `inference/risk.py`'s log-odds pooling (Phase 8) rather than a
+standalone confirm/deny — deliberately, since a young-but-legitimate
+domain is a real, known false-positive mode for this signal alone.
+Result-caching (24h TTL, 5000-entry bound) keeps repeated queries for the
+same domain from re-hitting RDAP. `k8s/cilium-identity-policy.yaml` gained
+a `toFQDNs: rdap.org` egress rule, with an honest limitation documented
+inline: RDAP's redirect-to-registry design means a strict per-registry
+FQDN allow-list isn't practically enumerable.
 
-This is exactly the kind of decision this plan flagged from the start as
-not a solo coding task — a real cost/privacy/architecture trade-off, now
-backed by real evidence instead of a hypothesis, for whoever owns that
-call to actually make.
+**A real integration bug, found by live verification, not by unit
+tests.** Every unit test passed against mocks, and live logs showed real
+200 OK RDAP responses for the exact malicious domains above — yet
+`RULE_DOMAIN_AGE_YOUNG` never fired. Root cause: `_parse_age_days()` used
+`datetime.fromisoformat()`, which only accepts single-digit fractional
+seconds (RDAP's actual `eventDate` format, e.g.
+`"2025-12-09T08:20:51.0Z"`) starting in Python 3.11 — this project runs
+3.10, where every real RDAP response raised `ValueError`, silently
+swallowed by the function's fail-closed `except` clause into "no signal,"
+with nothing logged to point at why. Fixed by switching to
+`dateutil.parser.isoparse` — already a project dependency, already used
+the same way in `shared/formatters.py`. Confirmed fixed directly against
+the real Lumma domains: `filemegahab4.sbs` and `whooptm.cyou` now return
+real, correct ages instead of `None`.
+
+**A second, honest finding from the same live re-verification, about
+testing methodology rather than code**: replaying the original 2026-01-31
+pcap capture live today (many months later) no longer demonstrates
+`RULE_DOMAIN_AGE_YOUNG` firing for any of the table's malicious domains —
+because domain age is computed relative to wall-clock "now" at lookup
+time, and every one of those domains has since aged past the 180-day
+threshold in the real time that's elapsed since the capture (e.g.
+`filemegahab4.sbs` was 53 days old at capture time; it measures ~276 days
+old today). This is expected, correct behavior for a point-in-time signal,
+not a defect — but it does mean this specific aged pcap can no longer
+prove the "young → alert" branch live end-to-end; a fresh capture (or a
+domain registered within the last 180 days) would be needed to demonstrate
+that branch live again. That branch itself is still verified — via
+`tests/test_pipeline.py`'s
+`test_domain_age_publishes_a_second_alert_for_a_young_cnn_flagged_domain`
+and `test_domain_age_not_looked_up_when_cnn_does_not_flag_the_domain`,
+which exercise the exact same production code path, substituting a
+controlled age for the (now independently-confirmed-correct) real network
+call.
+
+**Options not taken, for the record**: commercial passive-DNS/WHOIS-history
+feeds (WhoisXML, SecurityTrails, DomainTools) would add bulk/cached
+lookups, SLAs, and historical WHOIS visibility current lookups can't get,
+at real procurement cost. A local zone-file-based lookup (e.g. ICANN's
+Centralized Zone Data Service) would avoid per-query external calls and
+the privacy exposure of the free-RDAP path entirely, at the cost of more
+infrastructure to stand up and maintain. Free RDAP was chosen as the
+lowest-cost option that still closes the gap; either alternative remains
+available if free RDAP's coverage or latency prove insufficient in
+practice.
 
 ## Phase 10 — Multi-dataset validation (closes "proven once" → "proven repeatedly")
 
@@ -271,24 +313,24 @@ Not a bigger model, again — a system where:
    first — and combining them measurably catches more real attacks
    (53.7% vs. 48.5% recall for the best single detector), not just a
    reshuffled number (Phase 8).
-5. 🟡 The one remaining hard problem (dictionary DGA) has an honestly-
-   scoped, *evidence-checked* answer, not a vague "needs more research"
-   or an untested industry generalization — real RDAP lookups against
-   the real Lumma capture's malicious domains confirmed the signal
-   works but corrected the original "minutes to hours" assumption
-   (real gap: days-to-months) and found a real coverage hole on exactly
-   the cheap TLDs malware favors. The actual infrastructure/cost
-   decision is still open, deliberately (Phase 9).
+5. ✅ The one remaining hard problem (dictionary DGA) has a built,
+   live-verified answer, not a vague "needs more research" or an untested
+   industry generalization — real RDAP lookups against the real Lumma
+   capture's malicious domains confirmed the signal works, corrected the
+   original "minutes to hours" assumption (real gap: days-to-months), and
+   found a real coverage hole on exactly the cheap TLDs malware favors
+   (`.su`, zero RDAP coverage). Domain-age lookup is now built and wired
+   in as a second, independent signal combined via Phase 8's log-odds
+   pooling — live re-verification against the real pcap surfaced and
+   fixed a real Python-3.10 date-parsing bug in the process (Phase 9).
 6. Today's real numbers are shown to hold up across many real scenarios,
    not one lucky benchmark each (Phase 10) — Phase 8's own evaluation
    already surfaced a concrete reason this matters: the flow
    autoencoder's 99.8% recall (Phase 3) drops to ~37% across all 13 real
    scenarios instead of the one it was validated against.
 
-Phases 5, 6, 7, and 8 are done (6 partially). Effort for the rest: Phase
-9 is a real infrastructure/cost decision to raise with whoever owns that
-call, not a solo coding task. Phase 10 is mostly re-running Phase
-1/3/6/8's already-built scripts against more of what's already
-downloaded — plus, now, a second independent dataset before retuning
-Phase 6's three weak rules, to avoid validating a fix against the same
-data that found the gap.
+Phases 5, 7, 8, and 9 are done (6 partially). Effort for the rest: Phase
+10 is mostly re-running Phase 1/3/6/8's already-built scripts against more
+of what's already downloaded — plus, now, a second independent dataset
+before retuning Phase 6's three weak rules, to avoid validating a fix
+against the same data that found the gap.
