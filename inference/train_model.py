@@ -1,4 +1,5 @@
 import hashlib
+import math
 import os
 import torch
 import torch.nn as nn
@@ -153,5 +154,127 @@ def train_to_max():
     print(f"\n[*] Training halted. Maximum achievable accuracy on Hard Dataset: {best_acc:.3f}%")
     print("[*] Best model weights locked into production.")
 
+
+# 3. Flow Autoencoder (behavioral anomaly detection on connection shape,
+# not domain names -- see inference/models.py's FlowAnomalyEngine for how
+# this gets used at inference time).
+class FlowAutoencoder(nn.Module):
+    def __init__(self, input_dim=5):
+        super(FlowAutoencoder, self).__init__()
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, 16),
+            nn.ReLU(),
+            nn.Linear(16, 8),
+            nn.ReLU(),
+            nn.Linear(8, 3),
+        )
+        self.decoder = nn.Sequential(
+            nn.Linear(3, 8),
+            nn.ReLU(),
+            nn.Linear(8, 16),
+            nn.ReLU(),
+            nn.Linear(16, input_dim),
+        )
+
+    def forward(self, x):
+        return self.decoder(self.encoder(x))
+
+
+# Must exactly match inference/models.py's FLOW_FEATURE_SCALE and
+# flow_feature_vector() -- this is what the model is trained to expect,
+# and a mismatch between training and inference scaling would silently
+# make every real flow look anomalous (or none look anomalous) without
+# either side raising an error.
+FLOW_FEATURE_SCALE = [15.0, 15.0, 10.0, 10.0, 10.0]
+
+
+def generate_benign_flow_dataset(num_samples=20000):
+    """Synthetic "normal" connection flows only -- an autoencoder is
+    trained to reconstruct what it's shown, so training it on anything
+    but benign traffic would teach it to faithfully reconstruct attack
+    traffic too, defeating the entire approach. Ranges chosen to look
+    like ordinary client/server request-response traffic: a modest
+    request, a larger response, sub-10-second duration, tens to hundreds
+    of packets -- deliberately not calibrated against any real network's
+    actual baseline, which is exactly why FlowAnomalyEngine's own
+    docstring is upfront that this hasn't been validated against real
+    traffic.
+    """
+    rows = []
+    for _ in range(num_samples):
+        orig_bytes = random.uniform(500, 2000)
+        resp_bytes = random.uniform(5000, 500000)
+        duration = random.uniform(0.1, 10.0)
+        orig_pkts = random.uniform(10, 500)
+        ratio = resp_bytes / max(1.0, orig_bytes)
+        raw = [
+            math.log1p(orig_bytes),
+            math.log1p(resp_bytes),
+            math.log1p(duration),
+            math.log1p(orig_pkts),
+            math.log1p(ratio),
+        ]
+        rows.append([v / s for v, s in zip(raw, FLOW_FEATURE_SCALE)])
+    return torch.tensor(rows, dtype=torch.float32)
+
+
+def train_flow_autoencoder():
+    print("\n[*] Generating Benign Flow Dataset for Autoencoder (20,000 samples)...")
+    X = generate_benign_flow_dataset(20000)
+    split_idx = int(len(X) * 0.8)
+    X_train, X_val = X[:split_idx], X[split_idx:]
+
+    model = FlowAutoencoder()
+    criterion = nn.MSELoss()
+    optimizer = optim.Adam(model.parameters(), lr=0.01)
+
+    print("[*] Training Flow Autoencoder...")
+    best_val_loss = float("inf")
+    patience = 5
+    epochs_no_improve = 0
+    epoch = 0
+    while epochs_no_improve < patience and epoch < 100:
+        epoch += 1
+        model.train()
+        optimizer.zero_grad()
+        loss = criterion(model(X_train), X_train)
+        loss.backward()
+        optimizer.step()
+
+        model.eval()
+        with torch.no_grad():
+            val_loss = criterion(model(X_val), X_val).item()
+
+        if val_loss < best_val_loss - 1e-6:
+            best_val_loss = val_loss
+            epochs_no_improve = 0
+            if epoch % 10 == 0 or epoch == 1:
+                print(f"    Epoch {epoch:03d} | Val Reconstruction Loss: {val_loss:.6f} (NEW BEST)")
+        else:
+            epochs_no_improve += 1
+
+    # Anomaly threshold: mean + 4 standard deviations of *per-sample*
+    # validation reconstruction error -- not the batch-mean loss above,
+    # which would treat one wildly anomalous sample identically to a
+    # thousand slightly-off ones. Computed on held-out validation data
+    # (never trained on) so this reflects genuine generalization error,
+    # not the model's ability to memorize its own training set.
+    model.eval()
+    with torch.no_grad():
+        recon = model(X_val)
+        per_sample_error = torch.mean((recon - X_val) ** 2, dim=1)
+    threshold = float(per_sample_error.mean().item() + 4 * per_sample_error.std().item())
+    print(f"[*] Training halted after {epoch} epochs. Anomaly threshold (mean + 4sd): {threshold:.6f}")
+
+    os.makedirs("models", exist_ok=True)
+    traced_model = torch.jit.trace(model, torch.zeros((1, 5), dtype=torch.float32))
+    save_path = "models/autoencoder_flow.pt"
+    save_traced_model(traced_model, save_path)
+    with open(save_path + ".threshold", "w") as f:
+        f.write(f"{threshold:.8f}\n")
+    print(f"[+] Saved Flow Autoencoder to {save_path} (+ .sha256, + .threshold)")
+
+
 if __name__ == "__main__":
     train_to_max()
+    train_flow_autoencoder()

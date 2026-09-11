@@ -126,6 +126,19 @@ PLAYBOOK_TEMPLATES = {
         ],
         "mitre_mitigations": ["M1057 - Data Loss Prevention", "M1037 - Filter Network Traffic", "M1040 - Restrict File & Directory Access"],
     },
+    "ANOMALOUS_FLOW": {
+        "title": "Behavioral Flow Anomaly -- Undetermined Cause",
+        "containment_steps": [
+            "Do not assume a specific attack type -- this fired because the flow's shape (byte counts, duration, packet count) didn't match the model's training baseline, not because it matched a known-bad pattern.",
+            "Cross-reference the same source/destination pair against any other alerts in this time window before acting -- an anomaly alongside a signature-based hit is a much stronger signal than either alone.",
+            "If unexplained after review, rate-limit or monitor the source rather than immediately blocking -- the underlying model has not been validated against real-world attack traffic, so a false positive here is a real possibility.",
+        ],
+        "forensic_checklist": [
+            "Compare the flow's reconstruction error against the model's threshold (both included in the alert evidence) to gauge how unusual it actually was, not just that it crossed the line.",
+            "Check whether the source or destination is new to this network segment -- a first-seen host is a more mundane explanation than a novel attack.",
+        ],
+        "mitre_mitigations": ["M1030 - Network Segmentation"],
+    },
 }
 
 
@@ -151,6 +164,8 @@ THREAT_CLASS_MAP = {
     "RECON_PORT_SCAN": "RECON_PORT_SCAN",
     "DATA EXFILTRATION": "DATA_EXFILTRATION",
     "DATA_EXFILTRATION": "DATA_EXFILTRATION",
+    "ANOMALOUS FLOW": "ANOMALOUS_FLOW",
+    "ANOMALOUS_FLOW": "ANOMALOUS_FLOW",
 }
 
 def enrich_ip_intel(ip_address: str) -> Dict[str, str]:

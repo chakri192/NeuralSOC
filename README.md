@@ -121,6 +121,7 @@ sequenceDiagram
 | Encrypted malware sessions | TLS metadata only, no decryption | JA4 fingerprint matching, SNI entropy | T1071.001 / T1573.002 |
 | Reconnaissance / port scans | Fan-out across ports or hosts | Stateful vertical/horizontal scan tracking | T1046 |
 | Data exfiltration | Outbound/inbound byte asymmetry | Byte-ratio thresholds | T1048 |
+| Behavioral flow anomalies | Connection shape (bytes, duration, packet count) that doesn't match learned-normal | Autoencoder reconstruction error vs. a training-time threshold (`inference/train_model.py`'s `train_flow_autoencoder()`) | -- (technique-agnostic by design; flags *unusual*, not a specific known pattern) |
 
 Detection thresholds are constants in `inference/rules.py` (the malicious-JA4-fingerprint list is the one exception, configurable via an environment variable); the dashboard's Network page only filters what's *displayed*, not what's detected.
 
@@ -256,7 +257,7 @@ export PYTHONPATH=$(pwd)
 venv/bin/python3 scripts/continuous_training.py
 ```
 
-Let it run for one or two cycles and stop it (`Ctrl+C`) once validation accuracy is acceptable. It atomically swaps `models/cnn_dga.pt` and its `.sha256` without disrupting a running stream processor. `scripts/train_dl_models.py` is a shorter, one-shot alternative for both the DGA classifier and the flow autoencoder.
+Let it run for one or two cycles and stop it (`Ctrl+C`) once validation accuracy is acceptable. It atomically swaps `models/cnn_dga.pt` and its `.sha256` without disrupting a running stream processor -- retrains the DGA classifier only. The flow autoencoder (behavioral anomaly detection) has its own one-shot entry point, `inference/train_model.py`'s `train_flow_autoencoder()`, which likewise writes `models/autoencoder_flow.pt` plus its `.sha256` and `.threshold` sidecars atomically. `scripts/train_dl_models.py` is an older, shorter alternative for both models, kept for local experimentation.
 
 ## Security
 

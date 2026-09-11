@@ -10,7 +10,15 @@ from unittest.mock import patch
 import torch
 import torch.nn as nn
 
-from inference.train_model import DGA_CNN, generate_hard_dataset, save_traced_model, train_to_max
+from inference.train_model import (
+    DGA_CNN,
+    FlowAutoencoder,
+    generate_benign_flow_dataset,
+    generate_hard_dataset,
+    save_traced_model,
+    train_flow_autoencoder,
+    train_to_max,
+)
 
 
 def test_save_traced_model_writes_matching_sha256(tmp_path):
@@ -115,3 +123,65 @@ class TestTrainToMax:
 
         monkeypatch.setattr("inference.train_model.generate_hard_dataset", _degenerate_dataset)
         train_to_max()  # must terminate via the patience or epoch cap, not hang
+
+
+def test_generate_benign_flow_dataset_shape_and_scaling():
+    X = generate_benign_flow_dataset(num_samples=50)
+    assert X.shape == (50, 5)
+    assert X.dtype == torch.float32
+    # log1p'd and divided by FLOW_FEATURE_SCALE -- every training range
+    # (orig_bytes up to 2000, resp_bytes up to 500000, etc.) stays well
+    # under 1.0 once scaled; a value near or above 1 here would mean the
+    # scaling constants and the actual generation ranges have drifted
+    # apart from each other.
+    assert torch.all(X >= 0.0)
+    assert torch.all(X < 1.0)
+
+
+def test_flow_autoencoder_forward_reconstructs_the_input_shape():
+    model = FlowAutoencoder()
+    model.eval()
+    with torch.no_grad():
+        out = model(torch.zeros((4, 5), dtype=torch.float32))
+    assert out.shape == (4, 5)
+
+
+class TestTrainFlowAutoencoder:
+    """Mirrors TestTrainToMax's approach: a tiny, fast, monkeypatched
+    dataset exercises the real training loop, threshold computation, and
+    save_traced_model()/.threshold sidecar writing, instead of the
+    production 20,000-sample run.
+    """
+
+    @staticmethod
+    def _tiny_dataset(num_samples=20000):
+        torch.manual_seed(0)
+        return torch.rand((40, 5), dtype=torch.float32) * 0.3  # matches the real scaled-down range
+
+    def test_train_flow_autoencoder_saves_model_sha256_and_threshold(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)  # so the hardcoded "models/autoencoder_flow.pt" never touches the real tracked model
+        monkeypatch.setattr("inference.train_model.generate_benign_flow_dataset", self._tiny_dataset)
+        train_flow_autoencoder()  # must not raise, and must terminate within its own 100-epoch cap
+
+        model_path = tmp_path / "models" / "autoencoder_flow.pt"
+        sha_path = tmp_path / "models" / "autoencoder_flow.pt.sha256"
+        threshold_path = tmp_path / "models" / "autoencoder_flow.pt.threshold"
+        assert model_path.exists()
+        assert sha_path.exists()
+        assert threshold_path.exists()
+
+        with open(model_path, "rb") as f:
+            expected_hash = hashlib.sha256(f.read()).hexdigest()
+        assert sha_path.read_text().strip() == expected_hash
+
+        threshold = float(threshold_path.read_text().strip())
+        assert threshold > 0.0  # a real, positive reconstruction-error bound, not a placeholder
+
+        # The saved file must actually be loadable TorchScript, not a bare
+        # state_dict -- the exact defect this whole feature was fixing:
+        # torch.save(model.state_dict(), ...) can't be torch.jit.load()ed.
+        loaded = torch.jit.load(str(model_path))
+        loaded.eval()
+        with torch.no_grad():
+            out = loaded(torch.zeros((1, 5), dtype=torch.float32))
+        assert out.shape == (1, 5)

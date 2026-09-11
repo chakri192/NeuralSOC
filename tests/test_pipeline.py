@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import fakeredis
 
-from inference.models import DeepLearningEngine
+from inference.models import DeepLearningEngine, FlowAnomalyEngine
 from inference.correlation import IncidentCorrelator
 from inference.enrichment import ThreatEnricher
 from api.deps import _validate_ip, _is_trusted_proxy, get_remote_address
@@ -89,6 +89,41 @@ class TestSOCPipelineSecurity(unittest.TestCase):
         is_dga, prob, _ = engine.predict({}, "google.com")
         self.assertFalse(is_dga)
         self.assertIsInstance(prob, float)
+
+    def test_flow_anomaly_engine_loads_and_scores_a_normal_flow_as_not_anomalous(self):
+        engine = FlowAnomalyEngine()
+        self.assertIsNotNone(engine.model)
+        self.assertIsInstance(engine.threshold, float)
+
+        # Shape matches inference/train_model.py's generate_benign_flow_dataset()
+        # training ranges -- a modest request, a larger response, sub-10s
+        # duration, tens to hundreds of packets.
+        is_anomalous, mse, threshold = engine.score(orig_bytes=1200, resp_bytes=50000, duration=2.0, orig_pkts=100)
+        self.assertFalse(is_anomalous)
+        self.assertIsInstance(mse, float)
+        self.assertEqual(threshold, engine.threshold)
+
+    def test_flow_anomaly_engine_flags_an_exfiltration_shaped_flow(self):
+        engine = FlowAnomalyEngine()
+        # Wildly asymmetric byte ratio (huge upload, almost nothing back)
+        # and packet count -- nothing in training ever looked like this.
+        is_anomalous, mse, _ = engine.score(orig_bytes=50_000_000, resp_bytes=500, duration=5.0, orig_pkts=40000)
+        self.assertTrue(is_anomalous)
+        self.assertGreater(mse, engine.threshold)
+
+    def test_flow_anomaly_engine_scoring_never_raises_on_bad_input(self):
+        engine = FlowAnomalyEngine()
+        # Negative/garbage input shouldn't crash the stream processor --
+        # matches DeepLearningEngine.predict()'s own fail-closed-to-"not
+        # flagged" posture on any scoring error.
+        is_anomalous, mse, _ = engine.score(orig_bytes=-1, resp_bytes=float("nan"), duration=-5, orig_pkts=-1)
+        self.assertIsInstance(is_anomalous, bool)
+        self.assertIsInstance(mse, float)
+
+    def test_flow_anomaly_engine_fails_closed_on_sha256_mismatch(self):
+        with patch("inference.models.secrets.compare_digest", return_value=False):
+            with self.assertRaises(RuntimeError):
+                FlowAnomalyEngine()
 
     def test_correlator_multi_alert_aggregation(self):
         correlator = self._make_correlator()
@@ -1181,6 +1216,7 @@ class TestSOCPipelineSecurity(unittest.TestCase):
         async def _run():
             with patch.object(sp, "extract_features", return_value={}), \
                  patch.object(sp, "evaluate_rules", return_value=[detection]), \
+                 patch.object(sp.flow_engine, "score", return_value=(False, 0.0, 1.0)), \
                  patch.object(sp, "validate_alert", return_value=(True, None)), \
                  patch.object(sp.enricher, "enrich", new=AsyncMock(side_effect=lambda a: a)), \
                  patch.object(sp.alerts_topic, "send", new=AsyncMock(return_value=None)) as alerts_send, \
@@ -1205,6 +1241,7 @@ class TestSOCPipelineSecurity(unittest.TestCase):
         async def _run():
             with patch.object(sp, "extract_features", return_value={}), \
                  patch.object(sp, "evaluate_rules", return_value=[detection]), \
+                 patch.object(sp.flow_engine, "score", return_value=(False, 0.0, 1.0)), \
                  patch.object(sp, "validate_alert", return_value=(False, "missing field")), \
                  patch.object(sp.enricher, "enrich", new=AsyncMock(side_effect=lambda a: a)), \
                  patch.object(sp.alerts_topic, "send", new=AsyncMock(return_value=None)) as alerts_send, \
@@ -1226,6 +1263,7 @@ class TestSOCPipelineSecurity(unittest.TestCase):
         async def _run():
             with patch.object(sp, "extract_features", return_value={}), \
                  patch.object(sp, "evaluate_rules", return_value=[detection]), \
+                 patch.object(sp.flow_engine, "score", return_value=(False, 0.0, 1.0)), \
                  patch.object(sp, "validate_alert", return_value=(True, None)), \
                  patch.object(sp.enricher, "enrich", new=AsyncMock(side_effect=lambda a: a)), \
                  patch.object(sp.alerts_topic, "send", new=AsyncMock(side_effect=asyncio.TimeoutError())), \
@@ -1249,6 +1287,7 @@ class TestSOCPipelineSecurity(unittest.TestCase):
         async def _run():
             with patch.object(sp, "extract_features", return_value={}), \
                  patch.object(sp, "evaluate_rules", return_value=[detection]), \
+                 patch.object(sp.flow_engine, "score", return_value=(False, 0.0, 1.0)), \
                  patch.object(sp, "validate_alert", return_value=(True, None)), \
                  patch.object(sp.enricher, "enrich", new=AsyncMock(side_effect=lambda a: a)), \
                  patch.object(sp.alerts_topic, "send", new=AsyncMock(return_value=None)) as alerts_send, \
@@ -1262,6 +1301,39 @@ class TestSOCPipelineSecurity(unittest.TestCase):
             alerts_send.assert_awaited_once()
             dlq.assert_awaited_once()
             self.assertIn("RedisUnavailable", dlq.call_args.args[2])
+
+        asyncio.run(_run())
+
+    def test_process_traffic_publishes_a_second_alert_when_the_flow_looks_anomalous(self):
+        """A conn event can trip both a rule (evaluate_rules) and the flow
+        autoencoder independently -- confirms the new detection actually
+        reaches Kafka as its own alert, not silently dropped or merged."""
+        import inference.stream_processor_faust as sp
+
+        event = {"event_type": "conn", "id.orig_h": "10.0.0.5", "id.resp_h": "10.0.0.9", "uid": "C6", "orig_pkts": 40000}
+        rule_detection = {"threat_class": "Port Scanning", "severity": "medium", "confidence": 0.8, "rule_id": "TEST_RULE"}
+
+        async def _run():
+            with patch.object(sp, "extract_features", return_value={"orig_bytes": 50_000_000, "resp_bytes": 500, "duration": 5.0}), \
+                 patch.object(sp, "evaluate_rules", return_value=[rule_detection]), \
+                 patch.object(sp.flow_engine, "score", return_value=(True, 0.5, 0.04)), \
+                 patch.object(sp, "validate_alert", return_value=(True, None)), \
+                 patch.object(sp.enricher, "enrich", new=AsyncMock(side_effect=lambda a: a)), \
+                 patch.object(sp.alerts_topic, "send", new=AsyncMock(return_value=None)) as alerts_send, \
+                 patch.object(sp.correlator, "add_alert", return_value=None), \
+                 patch.object(sp, "_send_dlq_safely", new=AsyncMock()) as dlq:
+                await sp.process_traffic.fun(self._fake_stream([event]))
+
+            self.assertEqual(alerts_send.await_count, 2)
+            published_classes = {c.kwargs["value"].get("threat_class") for c in alerts_send.await_args_list}
+            self.assertIn("Port Scanning", published_classes)
+            self.assertIn("Anomalous Flow", published_classes)
+            anomalous_alert = next(
+                c.kwargs["value"] for c in alerts_send.await_args_list if c.kwargs["value"].get("threat_class") == "Anomalous Flow"
+            )
+            self.assertEqual(anomalous_alert["model_name"], "DL_AUTOENCODER_FLOW_ANOMALY")
+            self.assertIn("reconstruction_mse", anomalous_alert["evidence"])
+            dlq.assert_not_awaited()
 
         asyncio.run(_run())
 

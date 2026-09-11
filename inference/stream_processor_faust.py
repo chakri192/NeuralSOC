@@ -18,15 +18,16 @@ from prometheus_client import CONTENT_TYPE_LATEST, Gauge, generate_latest
 from opentelemetry import propagate
 from opentelemetry.trace import set_span_in_context
 
-from inference.features import extract_features
+from inference.features import extract_features, safe_int
 from inference.rules import evaluate_rules
-from inference.models import DeepLearningEngine
+from inference.models import DeepLearningEngine, FlowAnomalyEngine
 from inference.correlation import IncidentCorrelator
 from inference.enrichment import ThreatEnricher
 from inference.schemas import validate_alert
 from shared.tracing import init_tracing
 
 dl_engine = DeepLearningEngine()
+flow_engine = FlowAnomalyEngine()
 correlator = IncidentCorrelator()
 enricher = ThreatEnricher()
 
@@ -210,6 +211,49 @@ async def process_traffic(stream):
                     logger.warning("DL inference timed out for domain; skipping")
                 except Exception as e:
                     logger.error(f"DL inference failed: {e}")
+
+            # 3b. Deep-learning inference (flow anomaly) -- same bounded
+            # cpu_executor/semaphores as the DGA CNN above, since both
+            # compete for the same 4 worker threads. Complements the
+            # signature-shaped rules in evaluate_rules(): FlowAnomalyEngine
+            # doesn't check for a *specific* known-bad pattern, it flags a
+            # connection whose overall shape doesn't resemble the traffic
+            # it was trained to consider normal.
+            if event.get("event_type") == "conn":
+                try:
+                    orig_pkts = safe_int(event.get("orig_pkts", 0))
+                    async with _infer_pending_sem:
+                        async with _infer_sem:
+                            deadline = time.time() + 5.0
+                            flow_future = asyncio.get_running_loop().run_in_executor(
+                                cpu_executor,
+                                functools.partial(
+                                    flow_engine.score,
+                                    features.get("orig_bytes", 0),
+                                    features.get("resp_bytes", 0),
+                                    features.get("duration", 0.0),
+                                    orig_pkts,
+                                ),
+                            )
+                            with _futures_lock:
+                                _submitted_cpu_futures.add(flow_future)
+                            try:
+                                is_anomalous, mse, threshold = await asyncio.wait_for(flow_future, timeout=5.0)
+                            finally:
+                                with _futures_lock:
+                                    _submitted_cpu_futures.discard(flow_future)
+                    if is_anomalous:
+                        detections.append({
+                            "threat_class": "Anomalous Flow",
+                            "severity": "medium",
+                            "confidence": min(0.99, mse / (threshold * 2)) if threshold else 0.5,
+                            "rule_id": "DL_AUTOENCODER_FLOW_ANOMALY",
+                            "evidence": {"reconstruction_mse": mse, "threshold": threshold},
+                        })
+                except asyncio.TimeoutError:
+                    logger.warning("Flow anomaly inference timed out; skipping")
+                except Exception as e:
+                    logger.error(f"Flow anomaly inference failed: {e}")
 
             # Extract or initialize distributed W3C trace context. When
             # tracing is configured (OTEL_EXPORTER_OTLP_ENDPOINT set), this

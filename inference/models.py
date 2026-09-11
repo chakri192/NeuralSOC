@@ -2,6 +2,7 @@ import torch
 import os
 import io
 import hashlib
+import math
 import unicodedata
 import idna
 import logging
@@ -19,43 +20,54 @@ MODEL_INFERENCE_DURATION = Histogram(
     'Wall time of DeepLearningEngine.predict(), including every early-exit guard clause',
 )
 
+
+def _load_verified_torchscript_model(artifact_path: str) -> Tuple[torch.jit.ScriptModule, str]:
+    """Loads and validates a TorchScript model from disk against its
+    .sha256 sidecar. Returns (model, sha). Shared by DeepLearningEngine
+    (the DGA CNN) and FlowAnomalyEngine (the flow autoencoder) below --
+    factored out so this security-relevant integrity check has exactly
+    one implementation to audit, not two copies that could drift.
+    """
+    sha_path = artifact_path + ".sha256"
+
+    # Prevent unbounded memory reads from malicious/corrupted files
+    MAX_MODEL_SIZE_BYTES = int(os.getenv("MAX_MODEL_SIZE_BYTES", str(50 * 1024 * 1024)))
+    if os.path.exists(artifact_path):
+        file_size = os.path.getsize(artifact_path)
+        if file_size > MAX_MODEL_SIZE_BYTES:
+            raise RuntimeError(f"Integrity Error: Model file exceeds maximum allowed size ({file_size} > {MAX_MODEL_SIZE_BYTES})")
+
+    with open(sha_path, 'r', encoding='utf-8') as f_sha:
+        expected_sha = f_sha.read(1024).strip()  # strict full hash required; reject truncated.strip()
+
+    with open(artifact_path, 'rb') as f_bin:
+        model_bytes = f_bin.read()
+
+    computed_sha = hashlib.sha256(model_bytes).hexdigest()
+    if not secrets.compare_digest(computed_sha, expected_sha):
+        raise RuntimeError(f"Integrity Error: SHA-256 mismatch (got {computed_sha}, expected {expected_sha})")
+
+    # Load TorchScript model directly from validated in-memory buffer.
+    # B614 (unsafe torch load) previously "suppressed" only in this
+    # comment's prose, never with a real `# nosec` directive -- bandit
+    # was never actually told to ignore this, it just never appeared
+    # in any report because the CI gate only surfaces HIGH severity
+    # and this is MEDIUM. Real justification, now actually applied:
+    # the SHA-256 comparison two lines above already ran and raised on
+    # any mismatch before these bytes ever reach torch.jit.load, and
+    # this is the one-time, immutable startup load path, not a
+    # runtime endpoint accepting arbitrary model files.
+    model_buffer = io.BytesIO(model_bytes)
+    model = torch.jit.load(model_buffer, map_location=torch.device('cpu'))  # nosec B614
+    model.eval()
+    return model, computed_sha
+
+
 class DeepLearningEngine:
     def _load_model_from_disk(self) -> Tuple[torch.jit.ScriptModule, str]:
         """Loads and validates model from disk. Returns (model, sha)."""
         artifact_path = os.getenv("MODEL_PATH", "models/cnn_dga.pt")
-        sha_path = artifact_path + ".sha256"
-
-        # Prevent unbounded memory reads from malicious/corrupted files
-        MAX_MODEL_SIZE_BYTES = int(os.getenv("MAX_MODEL_SIZE_BYTES", str(50 * 1024 * 1024)))
-        if os.path.exists(artifact_path):
-            file_size = os.path.getsize(artifact_path)
-            if file_size > MAX_MODEL_SIZE_BYTES:
-                raise RuntimeError(f"Integrity Error: Model file exceeds maximum allowed size ({file_size} > {MAX_MODEL_SIZE_BYTES})")
-
-        with open(sha_path, 'r', encoding='utf-8') as f_sha:
-            expected_sha = f_sha.read(1024).strip()  # strict full hash required; reject truncated.strip()
-
-        with open(artifact_path, 'rb') as f_bin:
-            model_bytes = f_bin.read()
-
-        computed_sha = hashlib.sha256(model_bytes).hexdigest()
-        if not secrets.compare_digest(computed_sha, expected_sha):
-            raise RuntimeError(f"Integrity Error: SHA-256 mismatch (got {computed_sha}, expected {expected_sha})")
-
-        # Load TorchScript model directly from validated in-memory buffer.
-        # B614 (unsafe torch load) previously "suppressed" only in this
-        # comment's prose, never with a real `# nosec` directive -- bandit
-        # was never actually told to ignore this, it just never appeared
-        # in any report because the CI gate only surfaces HIGH severity
-        # and this is MEDIUM. Real justification, now actually applied:
-        # the SHA-256 comparison two lines above already ran and raised on
-        # any mismatch before these bytes ever reach torch.jit.load, and
-        # this is the one-time, immutable startup load path, not a
-        # runtime endpoint accepting arbitrary model files.
-        model_buffer = io.BytesIO(model_bytes)
-        model = torch.jit.load(model_buffer, map_location=torch.device('cpu'))  # nosec B614
-        model.eval()
-        return model, computed_sha
+        return _load_verified_torchscript_model(artifact_path)
 
     def __init__(self, start_verifier: bool = True, verify_interval: int = 60):
         self.model = None
@@ -226,6 +238,76 @@ class DeepLearningEngine:
         except Exception as e:
             logger.error(f"Prediction Error: {e}")
             return False, 0.0, 0.0
+
+
+FLOW_FEATURE_SCALE = (15.0, 15.0, 10.0, 10.0, 10.0)
+
+
+def flow_feature_vector(orig_bytes: float, resp_bytes: float, duration: float, orig_pkts: float) -> "torch.Tensor":
+    """The exact 5-feature vector (log1p'd byte/duration/packet counts plus
+    the response:origin byte ratio, each divided by a fixed scale) the flow
+    autoencoder was trained on -- inference/train_model.py's
+    generate_benign_flow_dataset() builds training data the same way, so
+    a drift between the two would silently make every reconstruction
+    look anomalous (or none look anomalous) without either side raising
+    an error."""
+    ratio = resp_bytes / max(1.0, orig_bytes)
+    raw = [
+        math.log1p(max(0.0, orig_bytes)),
+        math.log1p(max(0.0, resp_bytes)),
+        math.log1p(max(0.0, duration)),
+        math.log1p(max(0.0, orig_pkts)),
+        math.log1p(max(0.0, ratio)),
+    ]
+    return torch.tensor([[v / s for v, s in zip(raw, FLOW_FEATURE_SCALE)]], dtype=torch.float32)
+
+
+class FlowAnomalyEngine:
+    """Flags a network flow whose shape doesn't match ordinary traffic --
+    unlike every rule in inference/rules.py, this isn't "matches a known
+    bad pattern," it's "doesn't look like anything the model was trained
+    to recognize as normal." Complements the DGA CNN above rather than
+    duplicating it: that one classifies domain names, this one classifies
+    connection shape (bytes/duration/packets), so it can catch a
+    behaviorally unusual flow that never touches DNS at all.
+
+    Trained only on synthetic benign traffic (inference/train_model.py's
+    train_flow_autoencoder()) -- like the CNN, it has never been
+    validated against real-world attack traffic, only the shape of this
+    repo's own simulator. Its anomaly threshold is fixed at training
+    time (mean + 4 standard deviations of validation reconstruction
+    error), not adaptive to a specific deployment's traffic mix.
+    """
+
+    def __init__(self):
+        self.model = None
+        self.threshold = None
+        try:
+            artifact_path = os.getenv("FLOW_MODEL_PATH", "models/autoencoder_flow.pt")
+            self.model, self._expected_sha = _load_verified_torchscript_model(artifact_path)
+            with open(artifact_path + ".threshold", "r", encoding="utf-8") as f:
+                self.threshold = float(f.read().strip())
+        except Exception as e:
+            logger.error(f"FlowAnomalyEngine initialization failure: {e}")
+            raise
+
+    def score(self, orig_bytes: float, resp_bytes: float, duration: float, orig_pkts: float) -> Tuple[bool, float, float]:
+        """Returns (is_anomalous, reconstruction_mse, threshold). Never
+        raises -- a scoring failure degrades to "not anomalous" (logged),
+        the same fail-open-on-error posture DeepLearningEngine.predict()
+        already uses for the DGA CNN, since a broken detector shouldn't
+        itself become a denial-of-service on the pipeline."""
+        if self.model is None:
+            return False, 0.0, self.threshold or 0.0
+        try:
+            x = flow_feature_vector(orig_bytes, resp_bytes, duration, orig_pkts)
+            with torch.no_grad():
+                reconstructed = self.model(x)
+                mse = float(torch.mean((reconstructed - x) ** 2).item())
+            return mse > self.threshold, mse, self.threshold
+        except Exception as e:
+            logger.error(f"Flow anomaly scoring error: {e}")
+            return False, 0.0, self.threshold or 0.0
 
 
 class ThreatModelOrchestrator:

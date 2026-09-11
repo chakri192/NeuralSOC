@@ -19,10 +19,10 @@ To solve the payload-blindness constraint, the system uses a hybrid mix of **Dee
 * **Threat:** Hackers exfiltrate data or find C2 servers using randomized domain names.
 * **Solution:** We trained a **PyTorch 1D Convolutional Neural Network (CNN)**. Instead of just looking at entropy, the CNN reads the sequence of characters to catch advanced "Dictionary DGAs" that trick traditional ML algorithms.
 
-### 2. Zero-Day Data Exfiltration (Statistical rule live today; Deep Learning trained, not yet wired in)
-* **Threat:** A compromised insider machine starts uploading a database to an unknown IP.
-* **What's live:** A rule flags any connection sending more than 5MB out while receiving less than 10KB back — an asymmetric, one-directional transfer.
-* **What's built for the next iteration:** A PyTorch Deep Autoencoder, trained purely on benign traffic to learn what "normal" looks like, so a flow it fails to reconstruct well (a high Mean Squared Error) would flag as anomalous. It exists and trains successfully but the live stream processor doesn't call it yet — an honest gap, not a hidden one.
+### 2. Zero-Day Data Exfiltration & Behavioral Anomalies (Statistical rule + Deep Learning, both live)
+* **Threat:** A compromised insider machine starts uploading a database to an unknown IP -- or any flow that simply doesn't look like the rest of the traffic on this network.
+* **The rule:** Flags any connection sending more than 5MB out while receiving less than 10KB back — an asymmetric, one-directional transfer.
+* **The model:** A PyTorch Deep Autoencoder, trained purely on benign traffic to learn what "normal" looks like (bytes, duration, packet count), flags any flow it reconstructs badly (Mean Squared Error above a threshold fixed at training time). Runs on every connection event alongside the rule, in the same bounded inference pool as the DGA CNN. The two catch different things: the rule needs the specific "big upload, tiny reply" shape; the autoencoder catches anything behaviorally unusual, rule or no rule.
 
 ### 3. Botnet C2 Beaconing (Statistical detection)
 * **Threat:** Malware quietly "calls home" to a hacker's command server every few minutes.

@@ -30,8 +30,7 @@ If the judges ask "How does your AI actually work?", use these explanations:
 
 ### B. Zero-Day Data Exfiltration
 * **The Threat:** An insider or unknown malware uploads a massive database to a random server.
-* **What's live today:** A statistical rule flags any single connection that sends more than 5MB out while receiving less than 10KB back — a large, one-directional transfer that doesn't look like ordinary request/response traffic.
-* **What's built but not wired in yet:** A PyTorch Deep Autoencoder (`models/autoencoder_flow.pt`) is fully trained (`scripts/train_dl_models.py`) on normal-only traffic — it would flag anything it reconstructs badly (a high Mean Squared Error). Be upfront if asked: it's a real, trained model, just not yet called by the live stream processor. Today's live exfiltration detection is the rule above, not the autoencoder.
+* **What's live today, two layers:** A statistical rule flags any single connection sending more than 5MB out while receiving less than 10KB back. Alongside it, a PyTorch Deep Autoencoder (`models/autoencoder_flow.pt`, trained via `inference/train_model.py`'s `train_flow_autoencoder()`) scores the shape of every connection — bytes, duration, packet count — against what it learned as "normal," and flags anything it reconstructs badly (Mean Squared Error above a fixed threshold, computed from held-out validation data at training time). The two are independent and complementary: the rule catches the specific "big upload, tiny response" shape; the autoencoder catches anything that looks behaviorally off, including flows the rule alone would miss.
 
 ### C. Botnet C2 Beaconing
 * **The Threat:** Malware quietly "calls home" every few minutes.
@@ -51,7 +50,7 @@ If the judges ask "How does your AI actually work?", use these explanations:
 > **A:** "It can absolutely handle raw traffic. We wrote a bridging script in our repository called `pcap_ingester.py` which uses the `scapy` library to read raw bytes off a wire, reassemble the TCP flows, and push them into our Kafka pipeline. We are only using the JSON simulator today to generate enough live volume for the visual demo."
 
 **Q: "If I put this in my company today, will it work out-of-the-box?"**
-> **A:** "The rule-based and CNN detection run out of the box today. The Deep Autoencoder for behavioral anomaly detection is trained and ready (`train_dl_models.py` lets a client learn their own network baseline, the same 'Learning Mode' idea enterprise tools like Darktrace use) — but it isn't wired into the live pipeline yet, so I won't claim it's active today. That's the next integration step, not a finished feature."
+> **A:** "The rule-based detection, the DGA CNN, and the flow autoencoder all run out of the box today. The honest caveat is what they were trained on: all three learned from this repo's own synthetic simulator, not a real customer's network. `inference/train_model.py`'s `train_flow_autoencoder()` lets a client retrain the autoencoder on their own baseline traffic — the same 'Learning Mode' idea enterprise tools like Darktrace use — which is the real next step before trusting it against novel behavior on someone else's network."
 
 **Q: "Why did you use Kafka/Redpanda? Why not just have Python read the logs directly?"**
 > **A:** "Because of DDoS attacks. If an attacker floods the network with a million packets a second, a standard Python script will run out of memory and crash, blinding the security team. Kafka acts as a high-speed buffer (a shock absorber) that holds the logs safely until the AI engine can evaluate them."
