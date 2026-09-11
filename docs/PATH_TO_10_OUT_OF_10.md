@@ -17,11 +17,14 @@ covers most of Phases 5-6 with zero new data-sourcing — a deliberate
 choice: reuse what's already been paid for in download time before going
 back to the well for a new dataset.
 
-**Phases 5 and 6 are done** (6 partially — JA4 still needs new data). Both
-found real, previously-unmeasured gaps, not false alarms: Phase 5's DNS
-burst detector had a 100%-reproducible false-positive bug; Phase 6 found
-that only 1 of 4 newly-validated rules actually works well against real
-attack traffic. See each phase below for the numbers.
+**Phases 5, 6, and 7 are done** (6 partially — JA4 still needs new data).
+5 and 6 found real, previously-unmeasured gaps, not false alarms: Phase
+5's DNS burst detector had a 100%-reproducible false-positive bug; Phase
+6 found that only 1 of 4 newly-validated rules actually works well
+against real attack traffic. Phase 7 makes sure neither regresses
+silently: every validated detector (DGA, flow anomaly, and the 4 rules)
+now has the same CI-enforced real-world regression gate. See each phase
+below for the numbers.
 
 ---
 
@@ -95,16 +98,27 @@ against JA4s extracted from a real malware pcap. Confirm Abuse.ch's
 terms permit this use before starting, the same diligence already
 applied to CTU-13/baderj's repo.
 
-## Phase 7 — CI gate parity (cheap, mechanical, currently a real gap)
+## Phase 7 — CI gate parity
 
-The DGA model has a CI regression gate (`.github/workflows/ci.yml`'s "DGA
-model real-world regression gate" step, added this session). **The flow
-autoencoder's real 100%/99.8%/0.00% result has no equivalent CI
-protection** — nothing stops a future retrain from silently regressing it
-back toward the ~98% FPR it started at. This is a same-day fix once Phase
-6's other evaluators exist: add one CI step per validated detector, each
-failing the build on a real-world regression. Effort: an hour, most of it
-just wiring up what Phase 5/6 will have already built.
+**Status: done.** Every validated detector now has the same protection
+the DGA model already did. Added `--update-baseline`/regression-check
+logic (mirroring the DGA gate exactly) to both
+`scripts/evaluate_flow_autoencoder_against_real_data.py` and
+`scripts/evaluate_rules_against_real_data.py`, wrote the current real
+numbers as `benchmarks/flow_autoencoder_baseline.json` and
+`benchmarks/rule_validation_baseline.json`, and added both as CI steps
+in `.github/workflows/ci.yml`. Verified both gates the same way the DGA
+one was verified originally: pass cleanly against themselves, and
+correctly fail (exit 1) on a simulated regression — the flow gate
+against a mocked 0%-recall model, the rules gate against a mocked
+Reconnaissance rule that stops firing.
+
+Worth being explicit about what this gate does and doesn't claim for the
+three weak rules (DDoS, C2, Exfil): it protects today's real, already-
+weak baseline from getting *worse* without anyone noticing — it is not a
+claim that 0.2-0.5% recall is acceptable. Fixing those is a separate,
+deliberate decision (Phase 6's own note on why they weren't retuned
+yet), not something this gate makes for you.
 
 ## Phase 8 — Composite, per-incident scoring instead of independent alerts
 
@@ -174,8 +188,10 @@ Not a bigger model, again — a system where:
    first — and it was real, not hypothetical: 100% false-positive rate
    at the original threshold, confirmed with 200 real-domain trials
    (Phase 5).
-3. A future regression in *any* validated detector — not just the DGA
-   model — is caught by CI before merge (Phase 7).
+3. ✅ A future regression in *any* validated detector — not just the DGA
+   model — is caught by CI before merge: verified by simulating a real
+   regression against each new gate and confirming it fails the build
+   (Phase 7).
 4. An incident's reported confidence reflects how many independent
    signals corroborate it, not just whichever detector happened to fire
    first (Phase 8).
@@ -185,8 +201,7 @@ Not a bigger model, again — a system where:
 6. Today's real numbers are shown to hold up across many real scenarios,
    not one lucky benchmark each (Phase 10).
 
-Phases 5 and 6 are done (6 partially). Effort for the rest if picked up
-in order: Phase 7 is an hour now that Phase 6's evaluators exist. Phase 8
+Phases 5, 6, and 7 are done (6 partially). Effort for the rest: Phase 8
 is the real project-sized piece here, similar scope to the original
 roadmap's Phase 2. Phase 9 is a real infrastructure/cost decision to
 raise with whoever owns that call, not a solo coding task. Phase 10 is

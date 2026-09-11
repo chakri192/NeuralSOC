@@ -41,10 +41,24 @@ here -- CTU-13's flow records have no TLS handshake data at all. That
 needs a genuinely different real dataset (a real malicious JA3/JA4
 fingerprint feed, e.g. Abuse.ch), not something already on disk.
 
+Also acts as a regression gate, mirroring the DGA and flow-autoencoder
+evaluators' own baseline comparison:
+benchmarks/rule_validation_baseline.json records each rule's
+precision/recall/FPR as of the last check, and every run compares
+against it, exiting non-zero if any rule's recall/precision drops or FPR
+rises by more than REGRESSION_THRESHOLD_POINTS. This protects today's
+real (if weak, for 3 of 4 rules) baseline from silently getting worse --
+it is NOT a claim that today's numbers are good enough, see SECURITY.md
+for that honest assessment. Pass --update-baseline to accept new numbers
+after a deliberate, evidence-based change to a rule.
+
 Usage:
     PYTHONPATH=. venv/bin/python3 scripts/evaluate_rules_against_real_data.py
+    PYTHONPATH=. venv/bin/python3 scripts/evaluate_rules_against_real_data.py --update-baseline
 """
+import argparse
 import csv
+import json
 import os
 import sys
 from collections import defaultdict
@@ -54,6 +68,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from inference.rules import evaluate_rules
 
 DATASET_PATH = os.path.join(os.path.dirname(__file__), "..", "benchmarks", "real_rule_validation_dataset.csv")
+BASELINE_PATH = os.path.join(os.path.dirname(__file__), "..", "benchmarks", "rule_validation_baseline.json")
+REGRESSION_THRESHOLD_POINTS = 5.0
 
 # Only rules this dataset can actually exercise -- see module docstring
 # for why JA4/DGA aren't here (JA4 needs different data; DGA is a "dns"
@@ -103,7 +119,26 @@ def _confusion(tp, fp, tn, fn):
     return {"accuracy": accuracy, "precision": precision, "recall": recall, "fpr": fpr}
 
 
+def _load_baseline():
+    if not os.path.exists(BASELINE_PATH):
+        return None
+    with open(BASELINE_PATH, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _write_baseline(metrics_by_rule):
+    with open(BASELINE_PATH, "w", encoding="utf-8") as f:
+        json.dump(metrics_by_rule, f, indent=2, sort_keys=True)
+        f.write("\n")
+
+
 def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--update-baseline", action="store_true",
+                         help="Overwrite benchmarks/rule_validation_baseline.json with this run's numbers "
+                              "(only after a deliberate, evidence-based rule change)")
+    args = parser.parse_args()
+
     print(f"[*] Loading {DATASET_PATH}...")
     rows = _load_dataset()
     n_botnet = sum(1 for r in rows if r["is_botnet"])
@@ -134,9 +169,11 @@ def main():
     print("=" * 72)
     print("RESULTS -- rule-based detectors against real CTU-13 botnet/normal flows")
     print("=" * 72)
+    metrics_by_rule = {}
     for rule_id, threat_class in RULE_TO_THREAT_CLASS.items():
         c = counts[rule_id]
         m = _confusion(c["tp"], c["fp"], c["tn"], c["fn"])
+        metrics_by_rule[rule_id] = m
         print(f"\n{rule_id} ({threat_class})")
         print(f"  Accuracy:  {m['accuracy']:.1%}")
         print(f"  Precision: {m['precision']:.1%}   (of what it flagged, how much was really Botnet)")
@@ -175,6 +212,49 @@ def main():
           "real botnet-infected host traffic and real confirmed-clean host traffic, not this "
           "project's own simulator.")
 
+    if args.update_baseline:
+        _write_baseline(metrics_by_rule)
+        print(f"\n[+] Baseline updated: {BASELINE_PATH}")
+        return 0
+
+    baseline = _load_baseline()
+    if baseline is None:
+        print(f"\n[!] No baseline found at {BASELINE_PATH} -- run with --update-baseline to create one. "
+              "Skipping regression check.")
+        return 0
+
+    print("\n" + "-" * 72)
+    print(f"REGRESSION CHECK vs. baseline (fails if any rule's precision/recall drops or FPR rises "
+          f"by more than {REGRESSION_THRESHOLD_POINTS:.0f} points)")
+    print("-" * 72)
+    regressions = []
+    for rule_id, m in metrics_by_rule.items():
+        b = baseline.get(rule_id)
+        if b is None:
+            print(f"  {rule_id:<25} (new rule, no baseline yet)")
+            continue
+        precision_delta = (m["precision"] - b["precision"]) * 100
+        recall_delta = (m["recall"] - b["recall"]) * 100
+        fpr_delta = (m["fpr"] - b["fpr"]) * 100
+        print(f"  {rule_id:<25} precision={precision_delta:+6.1f}pts  recall={recall_delta:+6.1f}pts  fpr={fpr_delta:+6.1f}pts")
+        if precision_delta < -REGRESSION_THRESHOLD_POINTS:
+            regressions.append(f"{rule_id}: precision dropped {abs(precision_delta):.1f} points")
+        if recall_delta < -REGRESSION_THRESHOLD_POINTS:
+            regressions.append(f"{rule_id}: recall dropped {abs(recall_delta):.1f} points")
+        if fpr_delta > REGRESSION_THRESHOLD_POINTS:
+            regressions.append(f"{rule_id}: FPR rose {fpr_delta:.1f} points")
+
+    if regressions:
+        print(f"\n[!] {len(regressions)} regression(s) beyond {REGRESSION_THRESHOLD_POINTS:.0f} points:")
+        for r in regressions:
+            print(f"    {r}")
+        print("[!] If this is expected (a deliberate, evidence-based rule change), "
+              "re-run with --update-baseline to accept it.")
+        return 1
+
+    print("\n[+] No regressions beyond threshold.")
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

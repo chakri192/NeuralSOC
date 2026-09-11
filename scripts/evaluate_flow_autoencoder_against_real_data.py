@@ -32,12 +32,22 @@ disclosed, not hidden, and is the single biggest source of feature
 mismatch between what this script measures and production's exact
 feature computation.
 
+Also acts as a regression gate, mirroring
+scripts/evaluate_against_real_dga_dataset.py's own baseline comparison:
+benchmarks/flow_autoencoder_baseline.json records precision/recall/FPR
+as of the last deliberate retrain, and every run compares against it,
+exiting non-zero if recall/precision drop or FPR rises by more than
+REGRESSION_THRESHOLD_POINTS. Pass --update-baseline after a deliberate
+retrain to accept new numbers as the baseline going forward.
+
 Usage:
     PYTHONPATH=. venv/bin/python3 scripts/evaluate_flow_autoencoder_against_real_data.py
     PYTHONPATH=. venv/bin/python3 scripts/evaluate_flow_autoencoder_against_real_data.py --limit 2000
+    PYTHONPATH=. venv/bin/python3 scripts/evaluate_flow_autoencoder_against_real_data.py --update-baseline
 """
 import argparse
 import csv
+import json
 import os
 import sys
 
@@ -46,6 +56,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from inference.models import FlowAnomalyEngine
 
 DATASET_PATH = os.path.join(os.path.dirname(__file__), "..", "benchmarks", "real_flow_dataset_test.csv")
+BASELINE_PATH = os.path.join(os.path.dirname(__file__), "..", "benchmarks", "flow_autoencoder_baseline.json")
+REGRESSION_THRESHOLD_POINTS = 5.0
 
 
 def _load_dataset(limit=None):
@@ -73,9 +85,25 @@ def _confusion(tp, fp, tn, fn):
     return {"accuracy": accuracy, "precision": precision, "recall": recall, "fpr": fpr}
 
 
+def _load_baseline():
+    if not os.path.exists(BASELINE_PATH):
+        return None
+    with open(BASELINE_PATH, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _write_baseline(metrics):
+    with open(BASELINE_PATH, "w", encoding="utf-8") as f:
+        json.dump(metrics, f, indent=2, sort_keys=True)
+        f.write("\n")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--limit", type=int, default=None, help="Only evaluate the first N rows (default: all)")
+    parser.add_argument("--update-baseline", action="store_true",
+                         help="Overwrite benchmarks/flow_autoencoder_baseline.json with this run's numbers "
+                              "(only after a deliberate retrain, not to silence a real regression)")
     args = parser.parse_args()
 
     print(f"[*] Loading {DATASET_PATH}...")
@@ -111,6 +139,48 @@ def main():
           "CVUT, CC-BY, https://www.stratosphereips.org/datasets-ctu13) -- real botnet-infected host "
           "traffic and real confirmed-clean host traffic, not this project's own simulator.")
 
+    if args.update_baseline:
+        _write_baseline(metrics)
+        print(f"\n[+] Baseline updated: {BASELINE_PATH}")
+        print(f"    precision={metrics['precision']:.1%} recall={metrics['recall']:.1%} fpr={metrics['fpr']:.2%}")
+        return 0
+
+    baseline = _load_baseline()
+    if baseline is None:
+        print(f"\n[!] No baseline found at {BASELINE_PATH} -- run with --update-baseline to create one. "
+              "Skipping regression check.")
+        return 0
+
+    print("\n" + "-" * 72)
+    print(f"REGRESSION CHECK vs. baseline (fails if precision/recall drop or FPR rises "
+          f"by more than {REGRESSION_THRESHOLD_POINTS:.0f} points)")
+    print("-" * 72)
+    precision_delta = (metrics["precision"] - baseline["precision"]) * 100
+    recall_delta = (metrics["recall"] - baseline["recall"]) * 100
+    fpr_delta = (metrics["fpr"] - baseline["fpr"]) * 100
+    print(f"  precision: baseline={baseline['precision']:.1%}  current={metrics['precision']:.1%}  delta={precision_delta:+.1f}pts")
+    print(f"  recall:    baseline={baseline['recall']:.1%}  current={metrics['recall']:.1%}  delta={recall_delta:+.1f}pts")
+    print(f"  fpr:       baseline={baseline['fpr']:.2%}  current={metrics['fpr']:.2%}  delta={fpr_delta:+.1f}pts")
+
+    regressions = []
+    if precision_delta < -REGRESSION_THRESHOLD_POINTS:
+        regressions.append(f"precision dropped {abs(precision_delta):.1f} points")
+    if recall_delta < -REGRESSION_THRESHOLD_POINTS:
+        regressions.append(f"recall dropped {abs(recall_delta):.1f} points")
+    if fpr_delta > REGRESSION_THRESHOLD_POINTS:
+        regressions.append(f"FPR rose {fpr_delta:.1f} points")
+
+    if regressions:
+        print(f"\n[!] Regression(s) beyond {REGRESSION_THRESHOLD_POINTS:.0f} points:")
+        for r in regressions:
+            print(f"    {r}")
+        print("[!] If this is expected (a deliberate trade-off from a real retrain), "
+              "re-run with --update-baseline to accept it.")
+        return 1
+
+    print("\n[+] No regression beyond threshold.")
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

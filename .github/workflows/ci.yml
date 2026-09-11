@@ -105,6 +105,32 @@ jobs:
         # own --help), not something CI should silently wave through.
         run: PYTHONPATH=. python3 scripts/evaluate_against_real_dga_dataset.py
 
+      - name: Flow autoencoder real-world regression gate
+        # Same idea as the DGA gate above, for the other validated DL
+        # detector. The autoencoder was synthetic-only until this session
+        # found it measured a ~98% false-positive rate against real
+        # CTU-13 traffic (SECURITY.md's "Flow autoencoder validation
+        # against real-world data" section) -- retrained on real data,
+        # it now measures 100% precision / 99.8% recall / 0.00% FPR
+        # against a real held-out scenario. This is what stops a future
+        # retrain from silently sliding back toward that ~98% number
+        # without anyone noticing until a real deployment does.
+        run: PYTHONPATH=. python3 scripts/evaluate_flow_autoencoder_against_real_data.py
+
+      - name: Rule-based detector real-world regression gate
+        # 4 of evaluate_rules()'s 6 rules had never been run against real
+        # attack data until this session (SECURITY.md's "Rule-based
+        # detector validation against real-world data" section) --
+        # Reconnaissance genuinely works on real CTU-13 traffic (99.8%
+        # precision / 48.5% recall); DDoS, C2 Beaconing, and Data
+        # Exfiltration barely fire at all (0.2-0.5% recall each), a real,
+        # disclosed, NOT-yet-fixed gap (retuning them against the same
+        # single dataset that measured the gap would be circular, not a
+        # real fix -- see the doc for why). This gate doesn't claim those
+        # three are good; it only protects today's real baseline, weak as
+        # it is for three of the four, from getting silently worse.
+        run: PYTHONPATH=. python3 scripts/evaluate_rules_against_real_data.py
+
       - name: Model provenance (real Sigstore keyless sign + verify)
         # Previously conditional on a COSIGN_PUBLIC_KEY secret that was
         # never configured, so this step only ever printed a warning that
