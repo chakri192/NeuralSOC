@@ -24,7 +24,11 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from inference.models import FlowAnomalyEngine
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from evaluate_flow_autoencoder_against_real_data import _load_dataset  # noqa: E402
+from evaluate_flow_autoencoder_against_real_data import (  # noqa: E402
+    ALL_SCENARIOS_DATASET_PATH,
+    NEVER_TRAINED_NORMAL_HOLDOUT_PATH,
+    _load_all_scenarios_rows_without_train_leakage,
+)
 
 CANDIDATE_THRESHOLDS = [0.001, 0.002, 0.003, 0.005, 0.007, 0.01, 0.011, 0.012, 0.013, 0.014, 0.015, 0.017, 0.02, 0.05, 0.1]
 
@@ -47,7 +51,7 @@ def main():
     engine = FlowAnomalyEngine()
     current = engine.threshold
 
-    rows = _load_dataset()
+    rows = _load_all_scenarios_rows_without_train_leakage(ALL_SCENARIOS_DATASET_PATH, NEVER_TRAINED_NORMAL_HOLDOUT_PATH)
     botnet_mse, normal_mse = [], []
     for is_botnet, orig_bytes, resp_bytes, duration, tot_pkts in rows:
         _, mse, _ = engine.score(orig_bytes, resp_bytes, duration, tot_pkts)

@@ -33,6 +33,29 @@ from inference.models import LEX_DIM, lexical_features, sanitize_domain_chars
 #      an independent signal that doesn't depend on having seen the exact
 #      character sequence before, unlike the embedding+conv path alone.
 class DGA_HybridModel(nn.Module):
+    """A bidirectional-LSTM branch (max-pooled over every timestep, to
+    avoid a final-hidden-state summary washing out signal from early
+    words in a long sequence) was tried and genuinely root-caused +
+    fixed one real weakness -- the `matsnu` family (long, 3-6+
+    dictionary words concatenated with no separator, e.g.
+    "brothernerveplacebringconsult.com", averaging 30.5 characters and
+    sometimes exceeding this model's fixed 35-character window
+    entirely) regressed hard under a naive final-hidden-state LSTM
+    (38.4% baseline recall -> ~20%, reproduced across 2 retrains) and
+    recovered once pooled over every timestep instead (~35-40%,
+    reproduced across 3 further retrains). But validated against BOTH
+    real independent datasets across 5 total retrains, the change as a
+    whole never delivered a clean win: every run traded some real
+    family/group's recall for another's, including a -38.3-point
+    collapse on one UMUDGA group in the best-looking run by aggregate
+    numbers, and no run cleared both datasets' per-family regression
+    gates simultaneously. Reverted for that reason -- a real,
+    disclosed negative result, not a refusal to try. Full investigation,
+    numbers, and the matsnu root-cause are in
+    docs/DGA_MODEL_ROADMAP.md's "CNN+BiLSTM hybrid (investigated, not
+    shipped)" entry.
+    """
+
     def __init__(self, vocab_size=39, embed_dim=32, lex_dim=LEX_DIM, num_classes=1):
         super(DGA_HybridModel, self).__init__()
         self.embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
@@ -474,14 +497,22 @@ _REAL_FLOW_TRAIN_PATH = os.path.join(os.path.dirname(__file__), "..", "benchmark
 
 def _load_real_benign_flow_rows():
     """Real confirmed-clean flows from CTU-13 (Stratosphere IPS / CVUT,
-    CC-BY, https://www.stratosphereips.org/datasets-ctu13), scenarios
-    5/7/12 -- held out entirely from
-    benchmarks/real_flow_dataset_test.csv's scenario 11, the same
-    train/test separation benchmarks/real_dga_domains.csv follows for
-    the DGA model. Without this, the autoencoder was trained only on a
-    narrow synthetic range (orig_bytes uniform 500-2000, duration
-    uniform 0.1-10s, etc.) that doesn't resemble real traffic's actual
-    variance -- confirmed empirically:
+    CC-BY, https://www.stratosphereips.org/datasets-ctu13). Originally
+    just scenarios 5/7/12 (13,944 real rows); broadened to all 12
+    non-held-out scenarios (281,892 real rows, an 80% split of each
+    scenario's real Normal flows -- the remaining 20%, held back per
+    scenario BEFORE this file was written, lives in
+    benchmarks/real_flow_dataset_normal_holdout.csv for an honest,
+    non-leaked post-training FPR check) after the all-13-scenario
+    real-data gate (benchmarks/flow_autoencoder_all_scenarios_baseline.json)
+    found the original 3-scenario training set generalized far worse
+    (36.9% recall) than its own narrow scenario-11 holdout (99.8%)
+    suggested. Scenario 11 itself stays entirely held out from training,
+    the same train/test separation benchmarks/real_dga_domains.csv
+    follows for the DGA model. Without ANY real data, the autoencoder
+    was trained only on a narrow synthetic range (orig_bytes uniform
+    500-2000, duration uniform 0.1-10s, etc.) that doesn't resemble real
+    traffic's actual variance -- confirmed empirically:
     scripts/evaluate_flow_autoencoder_against_real_data.py measured a
     ~98% false-positive rate against real CTU-13 flows, and unlike the
     DGA CNN, no threshold recalibration fixed it -- real Normal and
@@ -540,8 +571,19 @@ def generate_benign_flow_dataset(num_samples=28000):
 
 
 def train_flow_autoencoder():
-    print("\n[*] Generating Benign Flow Dataset for Autoencoder (28,000 samples: real CTU-13 + synthetic)...")
-    X = generate_benign_flow_dataset(28000)
+    # Sized off the real data pool itself (2x len(real_rows), so
+    # generate_benign_flow_dataset's num_real = min(num_samples // 2,
+    # len(real_rows)) resolves to ALL available real rows) rather than a
+    # fixed constant -- with the broadened 12-scenario real training set
+    # (benchmarks/real_flow_dataset_train.csv, 281,892 rows vs. the
+    # original 3-scenario/13,944-row set), a hardcoded 28,000 would have
+    # silently used only 14,000 of the real rows and thrown away the
+    # rest of the newly-prepared data.
+    num_real_available = len(_load_real_benign_flow_rows())
+    num_samples = max(28000, num_real_available * 2)
+    print(f"\n[*] Generating Benign Flow Dataset for Autoencoder ({num_samples:,} samples: "
+          f"{num_real_available:,} real CTU-13 + {num_samples - num_real_available:,} synthetic)...")
+    X = generate_benign_flow_dataset(num_samples)
     split_idx = int(len(X) * 0.8)
     X_train, X_val = X[:split_idx], X[split_idx:]
 

@@ -5,7 +5,7 @@ against the same real held-out benchmark
 scripts/evaluate_against_real_dga_dataset.py uses.
 
 The threshold is a config value (env var DGA_CLASSIFICATION_THRESHOLD,
-default 0.85), not something that requires retraining to change. This
+default 0.97), not something that requires retraining to change. This
 script exists so picking a different operating point -- more recall,
 tolerating more false positives; or more precision, tolerating missed
 detections -- is an informed choice against real measured numbers, not a
@@ -71,7 +71,7 @@ def main():
         if (i + 1) % 2000 == 0:
             print(f"    ...{i + 1}/{len(rows)}")
 
-    current = float(os.getenv("DGA_CLASSIFICATION_THRESHOLD", "0.85"))
+    current = float(os.getenv("DGA_CLASSIFICATION_THRESHOLD", "0.97"))
     print(f"\nCurrently configured DGA_CLASSIFICATION_THRESHOLD: {current}")
     print(f"(set the env var and re-run this script to see a different value's real cost/benefit)\n")
 

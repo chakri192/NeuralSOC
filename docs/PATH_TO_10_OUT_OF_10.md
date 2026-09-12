@@ -8,12 +8,16 @@ detector once single-flow tuning proved structurally incapable.
 Detectors now combine into one calibrated per-incident score instead of
 firing independently, and that combination is itself measured against
 real data: all seven detectors together (including the three windowed
-ones) catch 52.5% of real botnet connections at 98.8% precision — a real
-+7.3-point improvement over the best single detector alone (45.1%, the
-flow autoencoder). The flow autoencoder and DGA CNN are now each
-validated against a second, independent real dataset too — see Phase 10
-— though the rule-based detectors still only have one real dataset
-(CTU-13) behind it.
+ones) catch 53.0% of real botnet connections at 98.3% precision. The flow
+autoencoder was later retrained on a much broader real dataset (12 CTU-13
+scenarios instead of 3), which raised its own real, leak-free
+generalization recall from 36.9% to 54.5% — high enough that the
+composite's lead over the best single detector alone shrank from +7.3
+points to +0.4, since the flow autoencoder alone now catches almost
+everything the rule-based detectors used to add on top of it (see Phase
+10.5). The flow autoencoder and DGA CNN are now each validated against a
+second, independent real dataset too — see Phase 10 — though the
+rule-based detectors still only have one real dataset (CTU-13) behind it.
 
 Ordered by how directly each phase closes a *named* gap from the honest
 assessment above, cheapest first. CTU-13 (already downloaded, CC-BY,
@@ -204,6 +208,17 @@ modest (52.1% → 52.5%): many of the real flows it independently catches
 were already caught by the flow autoencoder or another detector on the
 same underlying attack.
 
+**Re-measured again after Phase 10.5's flow-autoencoder retrain**
+(broadened from 3 real training scenarios to 12 — see Phase 10.5 below):
+**53.0% recall at 98.3% precision, 1.16% FPR**. Composite's lead over the
+best single detector alone shrank from +7.3 points to +0.4 (flow
+autoencoder alone now measures 52.6% recall on this script's own
+dataset) — a real, disclosed trade-off, not a regression: the flow
+autoencoder's own recall genuinely improved, which is why the rule-based
+detectors have less *incremental* headroom left to add on top of it.
+Composite FPR rose from 0.80% to 1.16% for the same reason, tracking the
+flow autoencoder's own FPR increase.
+
 **A second real bug, found while wiring this in:**
 `IncidentCorrelator.add_alert()`'s `threshold` parameter had been dead
 code — accepted, never read — so no risk-score filter existed at all
@@ -350,11 +365,13 @@ one-off finding buried inside the composite-scoring evaluator with no
 baseline of its own — formalized this session as its own independent,
 CI-gated check
 (`scripts/evaluate_flow_autoencoder_against_real_data.py`,
-`benchmarks/flow_autoencoder_all_scenarios_baseline.json`): 36.9% recall
-across all 13 scenarios versus 99.8% on the single held-out scenario it
-was originally validated against — a real, now permanently-guarded gap
-between "validated against one real botnet campaign" and "validated
-across a real, diverse set of them." See
+`benchmarks/flow_autoencoder_all_scenarios_baseline.json`): originally
+36.9% recall across all 13 scenarios versus 99.8% on the single
+held-out scenario it was originally validated against — a real, now
+permanently-guarded gap between "validated against one real botnet
+campaign" and "validated across a real, diverse set of them." That gap
+was later substantially closed, not just guarded, by broadening
+training itself — see Phase 10.5. See
 [SECURITY.md](../SECURITY.md#flow-autoencoder-validation-against-real-world-data)
 for the full writeup and the regression-catch verification.
 
@@ -398,6 +415,44 @@ smaller transfers (`RULE_EXFIL_BYTE_VOLUME`, 22.2% recall at ~100%
 precision). No genuinely different network-flow rule in this project
 still needs a second dataset before a real fix can be validated.
 
+## Phase 10.5 — Broaden the flow autoencoder's real training data (enterprise-grade push)
+
+**Status: done.** Phase 10's all-13-scenario gate found the flow
+autoencoder trained on only 3 of CTU-13's 13 scenarios (5/7/12, 13,944
+real rows) generalized far worse (36.9% recall) than its own narrow
+scenario-11 holdout (99.8%) suggested. Rather than leaving that gap
+permanently guarded, closed it directly: retrained on real Normal flows
+from all 12 non-held-out scenarios (281,892 rows, a 20x increase),
+splitting each scenario's rows 80/20 *before* combining so the withheld
+20% (`benchmarks/real_flow_dataset_normal_holdout.csv`) could still
+measure real, non-leaked FPR.
+
+Broadening training this way created a real, structural problem for the
+Phase 10 all-scenarios gate itself: most of `real_rule_validation_dataset.csv`'s
+Normal rows (every scenario but 11) are now the same rows the model was
+fit to, which would have made that gate's own FPR quietly optimistic
+going forward. Fixed by changing what the gate measures FPR against —
+only scenario 11's Normal rows plus the withheld 20% holdout file, both
+genuinely never seen during training — while recall still uses every
+real Botnet row across all 13 scenarios (never at risk, since Botnet
+rows are never part of training regardless of scenario or split).
+
+A fine threshold sweep against this leak-free real dataset (mirroring
+every other threshold decision in this project) found a sharp cliff in
+the real Botnet reconstruction-error distribution around 0.00086-0.00088,
+and settled on **0.0008** (`FLOW_ANOMALY_THRESHOLD`) — replacing the
+prior 0.013.
+
+**Result:** all-13-scenario recall **36.9% → 54.5%** (+17.6 points),
+precision 99.3% → 95.8% (-3.5 points), FPR 0.21% → 0.63% (+0.42 points).
+The scenario-11 holdout gate stayed effectively unchanged (100%/99.8%/
+0.11%). Composite's own numbers moved to 53.0% recall / 98.3% precision
+/ 1.16% FPR, and composite's lead over the best single detector shrank
+from +7.3 points to +0.4 — a disclosed, expected consequence of the
+flow autoencoder itself getting meaningfully better, not a regression.
+Full writeup:
+[SECURITY.md](../SECURITY.md#broadened-retrain-3-scenarios-to-12-real-held-out-fpr-still-enforced).
+
 ---
 
 ## What "10/10" actually means, concretely
@@ -422,9 +477,10 @@ Not a bigger model, again — a system where:
 4. ✅ An incident's reported confidence reflects how many independent
    signals corroborate it, not just whichever detector happened to fire
    first — and combining them measurably catches more real attacks
-   (52.5% vs. 45.1% recall for the best single detector, now across all
+   (53.0% vs. 52.6% recall for the best single detector, now across all
    seven detectors including the windowed DDoS-rate/C2-periodicity/
-   exfil-byte-volume trio), not just a reshuffled number (Phase 8).
+   exfil-byte-volume trio), not just a reshuffled number (Phase 8, later
+   re-measured after Phase 10.5's flow-autoencoder retrain).
 5. ✅ The one remaining hard problem (dictionary DGA) has a built,
    live-verified answer, not a vague "needs more research" or an untested
    industry generalization — real RDAP lookups against the real Lumma

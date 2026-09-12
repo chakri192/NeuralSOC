@@ -46,19 +46,38 @@ alone measures 100%/99.8%/0.00%, but the model was trained with scenario
 11's own neighbors (5/7/12) folded in as augmentation data -- a real but
 narrow test of generalization. benchmarks/real_rule_validation_dataset.csv
 (the same real CTU-13 extract evaluate_rules_against_real_data.py uses,
-with every field this model needs) spans all 13 real scenarios, most of
-which contributed no training data at all. Run against that broader set,
-the same model catches only ~37% of real botnet flows -- a materially
-more honest picture of single-model generalization than the holdout
-number alone. That number was previously only ever printed once, buried
-inside the composite-scoring script's output, with no baseline of its
-own -- meaning a future retrain could quietly regress broad
-generalization while still acing the narrow scenario-11 holdout, and
-nothing would catch it. benchmarks/flow_autoencoder_all_scenarios_baseline.json
-closes that gap: both gates are independent (either one failing fails
-the build), because they answer different questions -- "did this regress
-against its own exact eval split" vs. "did this regress against real
-traffic it never specifically prepared for."
+with every field this model needs) spans all 13 real scenarios. Run
+against that broader set, the same model caught only ~37% of real
+botnet flows -- a materially more honest picture of single-model
+generalization than the holdout number alone. That number was
+previously only ever printed once, buried inside the composite-scoring
+script's output, with no baseline of its own -- meaning a future
+retrain could quietly regress broad generalization while still acing
+the narrow scenario-11 holdout, and nothing would catch it.
+benchmarks/flow_autoencoder_all_scenarios_baseline.json closes that
+gap: both gates are independent (either one failing fails the build),
+because they answer different questions -- "did this regress against
+its own exact eval split" vs. "did this regress against real traffic it
+never specifically prepared for."
+
+Training was later broadened from 3 scenarios (5/7/12) to 12
+(everything except scenario 11) -- see
+benchmarks/real_flow_dataset_train.csv and
+inference/train_model.py's _load_real_benign_flow_rows(). That makes
+most of real_rule_validation_dataset.csv's Normal rows (every scenario
+but 11) the SAME rows the model was fit to, which would make this
+gate's FPR falsely optimistic if left as-is. To keep this an honest,
+non-leaked generalization check, the all-scenarios FPR is measured
+against real Normal flows the model never trained on instead: scenario
+11's Normal rows (never trained on regardless) plus
+benchmarks/real_flow_dataset_normal_holdout.csv, the 20% of each other
+scenario's real Normal rows that was split off and withheld from
+training specifically for this purpose (see
+inference/train_model.py's _load_real_benign_flow_rows() docstring).
+Recall is unaffected by any of this and still uses every real Botnet
+row across all 13 scenarios, since the autoencoder's unsupervised
+training never sees Botnet-labeled rows regardless of scenario or
+split.
 
 Usage:
     PYTHONPATH=. venv/bin/python3 scripts/evaluate_flow_autoencoder_against_real_data.py
@@ -81,6 +100,8 @@ ALL_SCENARIOS_DATASET_PATH = os.path.join(
     os.path.dirname(__file__), "..", "benchmarks", "real_rule_validation_dataset.csv")
 ALL_SCENARIOS_BASELINE_PATH = os.path.join(
     os.path.dirname(__file__), "..", "benchmarks", "flow_autoencoder_all_scenarios_baseline.json")
+NEVER_TRAINED_NORMAL_HOLDOUT_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "benchmarks", "real_flow_dataset_normal_holdout.csv")
 REGRESSION_THRESHOLD_POINTS = 5.0
 
 
@@ -96,6 +117,37 @@ def _load_dataset(path, limit=None):
                 float(row["duration"]),
                 float(row["tot_pkts"]),
             ))
+    if limit:
+        rows = rows[:limit]
+    return rows
+
+
+def _load_all_scenarios_rows_without_train_leakage(dataset_path, holdout_path, limit=None):
+    """All real Botnet rows (every scenario -- never trained on regardless)
+    plus only the real Normal rows the flow autoencoder never trained on:
+    scenario 11's (the dataset's own held-out scenario) and the 20%
+    per-scenario holdout split for every other scenario. See this
+    module's docstring for why the OTHER ~80% of each scenario's Normal
+    rows in dataset_path must be excluded here.
+    """
+    botnet_rows = []
+    clean_normal_rows = []
+    with open(dataset_path, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            fields = (float(row["orig_bytes"]), float(row["resp_bytes"]), float(row["duration"]), float(row["tot_pkts"]))
+            if row["label"] == "botnet":
+                botnet_rows.append((True,) + fields)
+            elif row["label"] == "normal" and row["scenario"] == "11":
+                clean_normal_rows.append((False,) + fields)
+
+    with open(holdout_path, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            clean_normal_rows.append((
+                False,
+                float(row["orig_bytes"]), float(row["resp_bytes"]), float(row["duration"]), float(row["tot_pkts"]),
+            ))
+
+    rows = botnet_rows + clean_normal_rows
     if limit:
         rows = rows[:limit]
     return rows
@@ -214,17 +266,20 @@ def main():
         holdout_metrics, holdout_confusion, BASELINE_PATH, args.update_baseline,
     )
 
-    print(f"\n[*] Loading {ALL_SCENARIOS_DATASET_PATH}...")
-    all_scenarios_rows = _load_dataset(ALL_SCENARIOS_DATASET_PATH, args.limit)
+    print(f"\n[*] Loading {ALL_SCENARIOS_DATASET_PATH} (Botnet rows) + {NEVER_TRAINED_NORMAL_HOLDOUT_PATH} "
+          f"(Normal rows never trained on)...")
+    all_scenarios_rows = _load_all_scenarios_rows_without_train_leakage(
+        ALL_SCENARIOS_DATASET_PATH, NEVER_TRAINED_NORMAL_HOLDOUT_PATH, args.limit)
     n_botnet = sum(1 for is_botnet, *_ in all_scenarios_rows if is_botnet)
     print(f"[*] {len(all_scenarios_rows)} real flows loaded ({n_botnet} real Botnet, "
-          f"{len(all_scenarios_rows) - n_botnet} real Normal)")
+          f"{len(all_scenarios_rows) - n_botnet} real Normal, none of it seen during training)")
     all_scenarios_metrics, all_scenarios_confusion = _evaluate(engine, all_scenarios_rows)
     all_scenarios_exit = _report_and_gate(
         "flow autoencoder against ALL 13 real CTU-13 scenarios (broad generalization, not just its own eval split)",
-        "benchmarks/real_rule_validation_dataset.csv (CTU-13, all 13 scenarios, Stratosphere IPS / CVUT, "
-        "CC-BY, https://www.stratosphereips.org/datasets-ctu13) -- most of these scenarios contributed no "
-        "training data to this model at all, unlike scenario 11's own neighbors (5/7/12) above.",
+        "Botnet rows from benchmarks/real_rule_validation_dataset.csv (all 13 scenarios) + Normal rows from "
+        "scenario 11 and benchmarks/real_flow_dataset_normal_holdout.csv (CTU-13, Stratosphere IPS / CVUT, "
+        "CC-BY, https://www.stratosphereips.org/datasets-ctu13) -- every Normal row here was withheld from "
+        "training specifically so this FPR measurement stays honest even though training now spans 12 scenarios.",
         all_scenarios_metrics, all_scenarios_confusion, ALL_SCENARIOS_BASELINE_PATH, args.update_baseline,
     )
 

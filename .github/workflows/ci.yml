@@ -136,11 +136,24 @@ jobs:
         # (benchmarks/flow_autoencoder_all_scenarios_baseline.json): the
         # 99.8% figure above is against one held-out scenario whose own
         # neighbors trained the model; run against real traffic from all
-        # 13 real CTU-13 scenarios instead, the same model catches only
-        # ~37% of real botnet flows. Without this second gate, a future
-        # retrain could keep acing the narrow scenario-11 holdout while
-        # silently regressing broad generalization and nothing would
-        # catch it -- both baselines must hold for this step to pass.
+        # 13 real CTU-13 scenarios instead, the model originally caught
+        # only ~37% of real botnet flows. Without this second gate, a
+        # future retrain could keep acing the narrow scenario-11 holdout
+        # while silently regressing broad generalization and nothing
+        # would catch it -- both baselines must hold for this step to
+        # pass.
+        #
+        # Later broadened training itself from 3 real scenarios (5/7/12)
+        # to 12 (everything but scenario 11), closing that gap directly:
+        # all-13-scenario recall rose 36.9% -> 54.5% (precision 99.3% ->
+        # 95.8%, FPR 0.21% -> 0.63%, threshold retuned 0.013 -> 0.0008
+        # via a fresh real-data sweep). The all-scenarios gate's OWN FPR
+        # measurement had to change too -- most of its dataset is now the
+        # same real rows the model trains on, so FPR there is measured
+        # only against real Normal rows the model never saw
+        # (benchmarks/real_flow_dataset_normal_holdout.csv + scenario
+        # 11) instead of the full all-13-scenario file. See
+        # SECURITY.md's "Broadened retrain" section for the full writeup.
         run: PYTHONPATH=. python3 scripts/evaluate_flow_autoencoder_against_real_data.py
 
       - name: Rule-based detector real-world regression gate
@@ -210,6 +223,14 @@ jobs:
         # capped dataset) for this reason, not because anything
         # regressed -- see docs/PATH_TO_10_OUT_OF_10.md for the full
         # before/after.
+        #
+        # Re-measured again after the flow autoencoder's own broadened
+        # retrain (3 real training scenarios -> 12): 98.3% precision /
+        # 53.0% recall / 1.16% FPR. Composite's lead over the best single
+        # detector shrank to +0.4 points (52.6%) because the flow
+        # autoencoder alone got meaningfully better, not because
+        # corroboration stopped working -- see SECURITY.md's "Composite
+        # incident scoring" section for the full before/after.
         run: PYTHONPATH=. python3 scripts/evaluate_composite_scoring_against_real_data.py
 
       - name: Model provenance (real Sigstore keyless sign + verify)

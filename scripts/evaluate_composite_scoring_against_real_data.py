@@ -33,16 +33,31 @@ truth.
 
 This script is also what originally discovered a real, disclosed nuance
 about the flow autoencoder's generalization: scripts/evaluate_flow_autoencoder_against_real_data.py's
-100%/99.8%/0.00% numbers are against ONE held-out scenario (11). Across
-ALL 13 real scenarios (most of which contributed no training data at
-all, unlike scenario 11's neighbors 5/7/12), the flow autoencoder alone
-catches only ~37% of real botnet flows -- a materially different, more
-honest picture of single-model generalization, and the concrete
-motivation for combining it with the rule-based detectors rather than
-relying on it alone. That finding is now formalized as its own gated,
-CI-enforced baseline directly in evaluate_flow_autoencoder_against_real_data.py
+100%/99.8%/0.00% numbers are against ONE held-out scenario (11). Against
+a broader real slice, the flow autoencoder alone caught far fewer real
+botnet flows -- a materially different, more honest picture of
+single-model generalization, and the concrete motivation for combining
+it with the rule-based detectors rather than relying on it alone. That
+finding is now formalized as its own gated, CI-enforced baseline
+directly in evaluate_flow_autoencoder_against_real_data.py
 (benchmarks/flow_autoencoder_all_scenarios_baseline.json) rather than
 only ever surfacing here.
+
+Real, disclosed limitation of the "flow_autoencoder" line specifically
+in this script's own "Solo detector performance" table below: training
+was later broadened from 3 scenarios (5/7/12) to 12 (everything except
+scenario 11) -- see benchmarks/real_flow_dataset_train.csv -- so most
+of THIS script's own DATASET_PATH (every scenario but 11) is now the
+same real Normal data the flow autoencoder was fit to. That makes this
+script's own flow_autoencoder precision/FPR numbers optimistic (recall
+is unaffected -- Botnet rows are never part of training regardless of
+scenario). The authoritative, leak-free flow_autoencoder number lives
+in evaluate_flow_autoencoder_against_real_data.py's all-scenarios gate
+instead, which measures FPR only against real Normal rows the model
+never trained on (benchmarks/real_flow_dataset_normal_holdout.csv +
+scenario 11). This script's composite (union) recall number is not
+affected by this caveat -- it's driven by which Botnet connections get
+flagged by ANY detector, and Botnet ground truth was never leaked.
 
 Also acts as a regression gate, mirroring the other real-data
 evaluators: benchmarks/composite_scoring_baseline.json records the

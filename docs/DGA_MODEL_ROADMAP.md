@@ -247,6 +247,84 @@ from-scratch investigation like this session's.
 
 ---
 
+## Phase 5 — CNN+BiLSTM hybrid (investigated, not shipped)
+
+**Status: real investigation, real fix for one root cause, honest negative
+result on the architecture as a whole. Reverted.**
+
+Part of a broader "make every model enterprise-grade" push: could a genuinely
+different architecture, not just more tuning, push the DGA CNN's real
+precision/recall/FPR trade-off further? The character-CNN-only model has a
+hard, measured ceiling: no threshold on it simultaneously reaches >95%
+precision, 55-65% recall, and <1% FPR against real data (confirmed via a
+fine sweep — at the FPR level needed for <1%, recall tops out around 34-41%;
+at the recall level needed for 55%+, FPR is 2%+).
+
+**What was tried:** added a bidirectional LSTM branch reading the same
+character embeddings as a genuine sequence, alongside the existing CNN
+branches — a well-established pattern in DGA-detection literature
+(Woodbridge et al. 2016 and later hybrids), motivated by the CNN's complete
+blindness to character *order* beyond a single kernel's fixed window.
+
+**First real finding: a severe, reproducible regression.** The textbook
+default — reading only the LSTM's final hidden state — genuinely hurt one
+specific real family, `matsnu`, across two independent retrains (38.4%
+baseline recall → 19.7%, then 21.7% — confirmed reproducible, not training
+noise, by retraining twice with the identical unseeded code). Root-caused by
+reading matsnu's own real domains: it's the one family built from many
+(3-6+) dictionary words concatenated with **no separator at all**
+(`brothernerveplacebringconsult.com`), averaging 30.5 characters and
+sometimes exceeding the model's fixed 35-character window entirely — exactly
+the shape where a final-hidden-state summary is most likely to wash out
+signal from words seen early in a long, boundary-less sequence.
+
+**Fix, and it worked for that specific problem:** max-pooling over every
+LSTM timestep's output instead of just the final state (the same "strongest
+signal anywhere in the sequence" principle the CNN branches already use via
+`AdaptiveMaxPool1d`) recovered matsnu to 34-40% across three further
+retrains — no longer a regression.
+
+**But validated against real data as a whole, the architecture change never
+delivered a clean win.** Five total retrains (training is unseeded, so each
+is a genuinely independent draw), evaluated against both real datasets this
+project maintains:
+
+| Run | Dataset 1 (Cucchiarelli) recall | Dataset 1 regressions (>10pt) | UMUDGA recall | UMUDGA regressions (>10pt) |
+|---|---|---|---|---|
+| Original (shipped, CNN-only) | 77.2% | — | 75.8% | — |
+| Run 3 (max-pool fix) | 76.4% | pushdo -10.5 | 74.5% | umudga_group_09 -19.0 |
+| Run 4 (max-pool fix) | 75.0% | none | (not run) | (not run) |
+| Run 5 (max-pool fix) | 78.3% | none | 75.9% | umudga_group_07 -38.3, group_32 -13.3, group_35 -11.7 |
+
+No run cleared both datasets' per-family regression gates at once. Run 5 —
+the best-looking run by aggregate numbers on BOTH datasets (beats the
+original on precision/recall/FPR on dataset 1, essentially flat on UMUDGA
+recall) — still collapsed one UMUDGA group by 38 points, a family the
+architecture had no trouble with in run 3. This is the real signature of the
+problem: the LSTM branch adds real, substantial run-to-run variance that
+redistributes which specific real malware families/groups get caught well,
+without a validated net improvement that holds across both independent
+datasets simultaneously. Investigating *why* `umudga_group_07`'s domains
+(short random prefix + a long, near-constant templated suffix — a shape no
+training generator produces) are this unstable across runs would be a
+reasonable next step, but that's future work, not something to ship on a
+hunch.
+
+**Reverted.** `inference/train_model.py`'s `DGA_HybridModel` and
+`models/cnn_dga.pt` are back to the original, shipped CNN-only
+architecture — confirmed byte-for-byte via SHA-256 and a re-run of the
+real-data gate showing exactly 0.0-point deltas on every one of the 25
+families. The matsnu root-cause and its fix remain documented here in case
+a future architecture attempt wants to avoid rediscovering the same
+final-hidden-state pitfall; the training data (`_load_real_dga_augment_domains()`
+etc.) and thresholds are untouched. This is the same honesty standard this
+project applied to the JA4 investigation elsewhere in this codebase: real
+technical work, a real fix for a real sub-problem, and a plain "this
+specific approach isn't ready to deploy" when the full picture doesn't hold
+up — not a forced win.
+
+---
+
 ## What "goated" actually looks like, concretely
 
 Not a single bigger model — a system where:
