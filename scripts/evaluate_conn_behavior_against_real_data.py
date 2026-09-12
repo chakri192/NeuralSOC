@@ -19,14 +19,22 @@ silently destroy the exact bursts and regular intervals being measured).
 CTU-13's own "Background" bucket (unlabeled ambient noise, not confirmed
 benign) is excluded, matching every other real-data evaluator here.
 
-Runs the exact same ConnBehaviorTracker class production code hits
-(inference/stream_processor_faust.py's wiring), against fakeredis, in
-real chronological order per scenario -- record_connection() then
-immediately is_ddos_volumetric()/is_c2_beacon()/is_bulk_exfil(), the
-same record-then-check sequence the live stream processor uses. A real
-"connection event" from CTU-13 gets counted as a true positive the
-moment any check fires while replaying a real Botnet-labeled row, and a
-false positive the moment any fires on a real Normal-labeled row.
+Runs _fast_conn_behavior.py's FastConnBehaviorTracker -- a pure-Python
+stand-in for the real, Redis-backed ConnBehaviorTracker production code
+hits (inference/stream_processor_faust.py's wiring), verified in
+tests/unit/test_fast_conn_behavior.py to make identical decisions on real
+data. Built because the real, fakeredis-backed tracker's per-call cost
+scales with how much history a busy pair has accumulated, and became
+impractically slow (30+ minutes for this ~800k-row real dataset) once
+BEACON_WINDOW_SECONDS was widened from 30 minutes to 6 hours to catch real
+C2 beacons that fire on that timescale -- see _fast_conn_behavior.py's own
+docstring for the full story. Real chronological order per scenario --
+record_connection() then immediately is_ddos_volumetric()/is_c2_beacon()/
+is_bulk_exfil(), the same record-then-check sequence the live stream
+processor uses. A real "connection event" from CTU-13 gets counted as a
+true positive the moment any check fires while replaying a real
+Botnet-labeled row, and a false positive the moment any fires on a real
+Normal-labeled row.
 
 This is a genuinely two-tier signal, real-data calibrated (see
 inference/conn_behavior.py's own module docstring for the full story):
@@ -52,11 +60,9 @@ import os
 import sys
 from collections import defaultdict
 
-import fakeredis
-
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from inference.conn_behavior import ConnBehaviorTracker
+from _fast_conn_behavior import FastConnBehaviorTracker  # noqa: E402
 
 DATASET_PATH = os.path.join(os.path.dirname(__file__), "..", "benchmarks", "real_composite_dataset.csv")
 BASELINE_PATH = os.path.join(os.path.dirname(__file__), "..", "benchmarks", "conn_behavior_baseline.json")
@@ -107,12 +113,12 @@ def main():
                               "(only after a deliberate, evidence-based threshold change)")
     args = parser.parse_args()
 
-    print(f"[*] Loading {DATASET_PATH}...")
+    print(f"[*] Loading {DATASET_PATH}...", flush=True)
     by_scenario = _load_dataset()
     total_rows = sum(len(rows) for rows in by_scenario.values())
     total_botnet = sum(1 for rows in by_scenario.values() for is_botnet, *_ in rows if is_botnet)
     print(f"[*] {total_rows} real connections loaded across {len(by_scenario)} real CTU-13 scenarios "
-          f"({total_botnet} real Botnet, {total_rows - total_botnet} real confirmed-clean Normal)\n")
+          f"({total_botnet} real Botnet, {total_rows - total_botnet} real confirmed-clean Normal)\n", flush=True)
 
     counts = {
         "RULE_DDOS_CONN_RATE": {"tp": 0, "fp": 0, "tn": 0, "fn": 0},
@@ -121,8 +127,8 @@ def main():
     }
 
     for scenario, rows in sorted(by_scenario.items(), key=lambda kv: int(kv[0])):
-        print(f"[*] Replaying scenario {scenario} ({len(rows)} connections) in real chronological order...")
-        tracker = ConnBehaviorTracker(fakeredis.FakeRedis(server=fakeredis.FakeServer(), decode_responses=True))
+        print(f"[*] Replaying scenario {scenario} ({len(rows)} connections) in real chronological order...", flush=True)
+        tracker = FastConnBehaviorTracker()
         for is_botnet, src, dst, ts, orig_bytes in rows:
             tracker.record_connection(src, dst, ts, orig_bytes)
             is_flood, _ = tracker.is_ddos_volumetric(src, dst, ts)

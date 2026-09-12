@@ -991,6 +991,32 @@ gate) rather than any new false-positive source. The composite baseline
 was re-seeded against this measurement for the same reason as before —
 the underlying detector changed, not because anything broke.
 
+**Re-measured a third time after the `RULE_C2_BEACON_PERIODIC` window-size
+fix** (see [Windowed connection-behavior detection](#windowed-connection-behavior-detection-ddos-rate-c2-periodicity--bulk-exfil)
+above): **98.3% precision / 53.0% recall / 1.15% FPR** — essentially
+unchanged from the prior measurement (a genuine, not rounded-away,
+0.01-point FPR move). This is a disclosed, expected finding, not a
+missed opportunity: the beacon fix's own recall gain (0.27% → 2.92%) is
+real, but small in absolute terms next to composite's ~800k-row real
+connection population, and what it does catch mostly overlaps with what
+the flow autoencoder or another detector already flags on the same
+underlying attack — the same "corroboration compounds, it doesn't
+simply add" pattern already seen when bulk-exfil was folded in.
+
+This re-measurement also validated a real infrastructure fix: both
+`scripts/evaluate_conn_behavior_against_real_data.py` and this script
+used to take 30+ minutes to replay this project's ~800k-row real dataset
+once `BEACON_WINDOW_SECONDS` widened to 6 hours (the real, Redis-backed
+`ConnBehaviorTracker`'s per-call cost scales with how much history a busy
+pair has accumulated). `scripts/_fast_conn_behavior.py`'s
+`FastConnBehaviorTracker` — a pure-Python stand-in using incremental
+sliding-window state instead of recomputing statistics from scratch per
+call, verified to make identical decisions via
+`tests/unit/test_fast_conn_behavior.py`'s real-data parity test — cut
+both evaluators to under 35 seconds combined. Production
+(`inference/stream_processor_faust.py`) is unaffected; this is an
+evaluation-only optimization.
+
 ## Domain-age enrichment
 
 [inference/domain_age.py](inference/domain_age.py)'s `DomainAgeLookup`

@@ -496,6 +496,21 @@ window makes that per-call cost meaningfully more likely to matter for
 busy pairs. Full writeup:
 [SECURITY.md](../SECURITY.md#windowed-connection-behavior-detection-ddos-rate-c2-periodicity--bulk-exfil).
 
+**Composite re-measured with this fix folded in:** 98.3% precision /
+53.0% recall / 1.15% FPR — essentially unchanged from before the fix (a
+genuine, disclosed finding: the beacon detector's own recall gain is
+real but small next to composite's ~800k-row real population, and mostly
+overlaps what other detectors already catch on the same attacks). Also
+fixed the real infrastructure problem this fix exposed while validating
+it: both real-data evaluators for this section took 30+ minutes once
+`BEACON_WINDOW_SECONDS` widened to 6 hours (the real, Redis-backed
+tracker's per-call cost scales with a busy pair's accumulated history).
+`scripts/_fast_conn_behavior.py`'s pure-Python stand-in — verified to
+make identical decisions via a real-data parity test
+(`tests/unit/test_fast_conn_behavior.py`) — cut both evaluators to under
+35 seconds combined, unblocking fast iteration for every future
+detector-tuning workstream.
+
 ## Phase 10.7 — DGA CNN+BiLSTM architecture (investigated, reverted)
 
 **Status: real investigation, honest negative result.** Also tried,

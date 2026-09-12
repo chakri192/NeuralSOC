@@ -78,12 +78,11 @@ import os
 import sys
 from collections import defaultdict
 
-import fakeredis
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from inference.conn_behavior import ConnBehaviorTracker
+from _fast_conn_behavior import FastConnBehaviorTracker
 from inference.models import FlowAnomalyEngine
 from inference.risk import calculate_risk_score
 from inference.rules import evaluate_rules
@@ -215,12 +214,12 @@ def main():
     parser.add_argument("--update-baseline", action="store_true")
     args = parser.parse_args()
 
-    print(f"[*] Loading {DATASET_PATH}...")
+    print(f"[*] Loading {DATASET_PATH}...", flush=True)
     by_scenario = _load_dataset()
     total_rows = sum(len(rows) for rows in by_scenario.values())
     n_botnet = sum(1 for rows in by_scenario.values() for r in rows if r["label"] == "botnet")
     print(f"[*] {total_rows} real connections loaded across {len(by_scenario)} real CTU-13 scenarios "
-          f"({n_botnet} real Botnet, {total_rows - n_botnet} real Normal)\n")
+          f"({n_botnet} real Botnet, {total_rows - n_botnet} real Normal)\n", flush=True)
 
     print("[*] Loading the live flow autoencoder...")
     engine = FlowAnomalyEngine()
@@ -231,8 +230,8 @@ def main():
     composite_counts = {"tp": 0, "fp": 0, "tn": 0, "fn": 0}
 
     for scenario, rows in sorted(by_scenario.items(), key=lambda kv: int(kv[0])):
-        print(f"[*] Replaying scenario {scenario} ({len(rows)} connections) in real chronological order...")
-        tracker = ConnBehaviorTracker(fakeredis.FakeRedis(server=fakeredis.FakeServer(), decode_responses=True))
+        print(f"[*] Replaying scenario {scenario} ({len(rows)} connections) in real chronological order...", flush=True)
+        tracker = FastConnBehaviorTracker()
         for row in rows:
             is_botnet = row["label"] == "botnet"
             orig_bytes, resp_bytes = float(row["orig_bytes"]), float(row["resp_bytes"])
