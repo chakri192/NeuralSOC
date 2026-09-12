@@ -380,6 +380,48 @@ existing sources wouldn't fix; closing it for real would need sourcing
 domains matching that specific shape, not a broader ensemble or a
 bigger pile of the same kind of data already in hand.
 
+**A fourth attempt, targeting that exact gap directly, made it worse.**
+`umudga_group_07`'s real domains are a short random alphabetic prefix
+(4 chars observed) concatenated with one near-constant ~15-character
+tail (`kmulerionirkutskagl.com`, `ogmnerionirkutskagl.com`, ...) — a
+shape no existing generator produced. Added `_generate_fixed_tail_dga()`:
+a short random prefix concatenated with one tail drawn from a small
+pool of invented (never the real group's literal content) near-constant
+strings, mirroring exactly the technique that already fixed
+conficker/pushdo/vawtrak in Phase 1. Retrained and validated against
+both real datasets: `umudga_group_07` recall **dropped further, to
+2.3%** (worse than the ensemble's complete 0% in relative terms — this
+is now the fourth technique to fail on this specific group), and three
+*additional* real families/groups regressed beyond 10 points that
+hadn't in any prior attempt (`matsnu`, `nymaim`, `pykspa` on the first
+dataset; `umudga_group_05`, `umudga_group_08`, `umudga_group_30` on the
+second) — more collateral damage than any single earlier attempt.
+
+The likely mechanism: a small, fixed pool of invented tail strings (8
+entries) gives the model something concrete enough to memorize as "these
+8 specific strings," not the abstract "an unusually long near-zero-entropy
+tail is suspicious" principle that would generalize to the real group's
+own, different literal tail — the same shape of failure this project's
+own history already named once (`_load_benign_domains()`'s docstring:
+10 hardcoded benign domains taught "matches one of these 10 exact
+strings," not a general notion of legitimacy). Reverted both the model
+and the generator code (confirmed clean via `git checkout`, model
+byte-identical via SHA-256 to the shipped version).
+
+**Four independent techniques — a second architecture, an ensemble, and
+now a shape-matched synthetic generator, on top of the original
+single-model baseline — have now all been tried against this one real
+UMUDGA group, and none improved it; the last one made it measurably
+worse while damaging unrelated families along the way.** This is a
+strong, well-evidenced stopping point: the DGA CNN's real ceiling on
+this specific gap is not moving with the techniques and data reasonably
+available to this project right now, and further attempts of the same
+general shape (retrain, re-architect, re-generate) are unlikely to
+behave differently. The honest, current state is the original shipped
+model's own numbers (84.6%/77.2%/13.9% and 86.3%/75.8%/12.0%), a solid
+B grade with a real, now thoroughly-documented ceiling — not a claimed
+improvement that later attempts would have to explain away.
+
 ---
 
 ## What "goated" actually looks like, concretely

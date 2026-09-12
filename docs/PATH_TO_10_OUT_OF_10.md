@@ -611,12 +611,29 @@ because its synthetic generators never produce anything shaped like it
 — not something architecture changes or ensembling can fix.
 
 **Not shipped.** `models/cnn_dga.pt` reverted to the original shipped
-weights (confirmed byte-identical via SHA-256). This closes out
-Workstream 2's DGA CNN avenues for this round — the honest state is a
-solid, twice-independently-validated B-grade model with a real,
-now-well-understood ceiling, not a model artificially pushed higher by
-an aggregate number that would have hidden a real regression. Full
-writeup:
+weights (confirmed byte-identical via SHA-256).
+
+**A fourth attempt, after pivoting from modeling to targeted synthetic
+data, made it worse.** `umudga_group_07`'s real domains turned out to
+follow one specific shape: a short random prefix concatenated with one
+near-constant ~15-character tail — a pattern no existing generator
+produced. Added a new generator matching that structural shape (never
+reusing the real group's own literal content) and retrained, using the
+same technique that already fixed conficker/pushdo/vawtrak earlier in
+this project. It made the target group *worse* (47.0% → 2.3%, the worst
+of any of the four attempts) and newly regressed three families on the
+first dataset and two more UMUDGA groups on the second — more collateral
+damage than any prior attempt. Likely cause: a small, fixed pool of
+invented tail strings gave the model something narrow to memorize
+rather than the general "long near-zero-entropy tail" principle that
+would transfer to the real group's own different literal content.
+Reverted both the model and the generator code.
+
+**Four independent techniques have now failed on this one real gap —
+this is a genuine, well-evidenced stopping point**, not a string of
+unlucky attempts worth a fifth try. The honest state is the original
+shipped model's own numbers (84.6%/77.2%/13.9% and 86.3%/75.8%/12.0%), a
+solid B grade with a thoroughly-documented ceiling. Full writeup:
 [docs/DGA_MODEL_ROADMAP.md](DGA_MODEL_ROADMAP.md#phase-6--small-ensemble-of-the-proven-cnn-only-architecture-investigated-not-shipped).
 
 ---
