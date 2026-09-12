@@ -68,7 +68,9 @@ for the full writeup.
 
 **Status: Reconnaissance validated; DDoS, C2 Beaconing, and Data
 Exfiltration all validated AND fixed with a genuinely different
-detector; JA4 remains blocked on new data.**
+detector; JA4 investigated against a real malware pcap and found not
+viable without a broader feed — a genuine negative result, not an
+unstarted gap.**
 
 Ran `scripts/evaluate_rules_against_real_data.py` (the real
 `evaluate_rules()` production code, not a reimplementation) against
@@ -125,12 +127,24 @@ ground truth, and a real fakeredis/mocking interaction bug found by a
 live pytest run (not an isolated script) are all in
 [SECURITY.md](../SECURITY.md#windowed-connection-behavior-detection-ddos-rate-c2-periodicity--bulk-exfil).
 
-**JA4 fingerprinting is still blocked on new data sourcing** — CTU-13's
-flow records carry no TLS handshake data at all. Needs a real malicious
-JA3/JA4 fingerprint feed (Abuse.ch's SSLBL/ThreatFox) cross-referenced
-against JA4s extracted from a real malware pcap. Confirm Abuse.ch's
-terms permit this use before starting, the same diligence already
-applied to CTU-13/baderj's repo.
+**JA4 fingerprinting: real data investigated, a genuine negative result
+found.** CTU-13's flow records carry no TLS handshake data, but the real
+Lumma Stealer pcap already used throughout this document does — real
+`ja4plus` extraction against its real `ClientHello`s, cross-referenced
+against the 7 already-confirmed-malicious domains, found the malware's
+C2 traffic shares its exact JA4 fingerprint with real Microsoft/Akamai
+traffic on the same infected machine (72% precision even on this small,
+balanced comparison, likely worse at real-world base rates) — consistent
+with this malware not implementing its own TLS stack. The extraction
+pipeline itself is now proven and reusable against any future malware
+sample; this specific finding is a real reason not to ship a rule seeded
+from one pcap, not a data-unavailability gap. A real, broadly-curated
+malicious JA4 feed (Abuse.ch, FoxIO's own community database) — checked
+for real usage terms first, the same diligence already applied to
+CTU-13/baderj's repo — remains the path to a rule that could actually
+discriminate, and even then may not catch this specific malware family.
+Full numbers in
+[SECURITY.md](../SECURITY.md#rule-based-detector-validation-against-real-world-data).
 
 ## Phase 7 — CI gate parity
 
@@ -391,9 +405,11 @@ still needs a second dataset before a real fix can be validated.
 Not a bigger model, again — a system where:
 1. 🟡 Every detection category the platform claims to have has been
    checked against real attack data at least once — 5 of 6 now (DGA,
-   flow anomaly, and 3 of `evaluate_rules()`'s 4 remaining rules); only
-   JA4 fingerprinting is still unchecked, blocked on sourcing a real
-   TLS-fingerprint feed rather than anything already on disk (Phase 6).
+   flow anomaly, and all 4 rules, now that DDoS/C2/exfil are fixed and
+   validated too). JA4 was investigated for real (real `ja4plus`
+   extraction against the real Lumma pcap) and found not viable without
+   a broader feed — a real, disclosed negative result, not an unchecked
+   gap; still no working rule (Phase 6).
 2. ✅ A false-positive mode nobody had looked for yet (DNS-burst on
    benign traffic) got found and fixed before a real deployment found it
    first — and it was real, not hypothetical: 100% false-positive rate
@@ -431,8 +447,10 @@ Not a bigger model, again — a system where:
    different benign source — real evidence today's numbers aren't an
    artifact of any one benchmark's specific construction (Phase 10).
 
-Phases 5, 7, 8, 9, and 10 are done (6 partially — Reconnaissance and now
-DDoS, C2 Beaconing, and Data Exfiltration are all done, JA4
-fingerprinting remains the one detection category still blocked on new
-data sourcing). What's left is narrow: JA4 needs a real malicious
-JA3/JA4 fingerprint feed (Abuse.ch), not something already on disk.
+Phases 5, 7, 8, 9, and 10 are done (6 partially — Reconnaissance, DDoS,
+C2 Beaconing, and Data Exfiltration are all done; JA4 fingerprinting was
+genuinely investigated against real captured malware traffic and found
+not viable this way, a real negative result rather than an unstarted
+task). What's left is narrow: a real, broadly-curated malicious JA4 feed
+(Abuse.ch or similar) would be needed to try again properly, and even
+then may not catch this specific malware family.

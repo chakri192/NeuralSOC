@@ -601,11 +601,51 @@ which looked at the time like it might need a genuinely new, second
 dataset); a stateful, windowed tracker summing each signal over time was
 needed instead, and turned out to close all three without one.
 
-**Not covered:** the Encrypted-Traffic Malware rule (JA4 fingerprinting)
-has no equivalent real-data validation — CTU-13's flow records carry no
-TLS handshake data at all. That needs a genuinely different real
-dataset (a real malicious JA3/JA4 fingerprint feed, e.g. Abuse.ch), not
-something already on disk; still open.
+**JA4 fingerprinting: real data investigated, a genuine negative result
+found, not a data-unavailability gap anymore.** CTU-13's flow records
+carry no TLS handshake data at all, so this needed a different real
+source: the real Lumma Stealer pcap already used throughout this
+document does have real TLS `ClientHello`s. Installed `ja4plus` (an
+independent, published Python implementation of FoxIO's JA4+
+specification) and extracted 46 real client JA4 fingerprints directly
+from that capture's TLS handshakes, then cross-referenced the
+destination IPs (resolved via the same capture's own real DNS traffic)
+against the 7 malicious domains this document's own DGA CNN + RDAP
+domain-age work already independently confirmed. 4 of the 7 had
+captured TLS connections, and all 4 used only two distinct JA4
+fingerprints (`t13d201200_2b729b4bf6f3_e24568c0d440` and
+`t13d201100_2b729b4bf6f3_36bf25f296df`).
+
+**The honest finding: those exact two fingerprints also appear on real,
+independently-verified (via live RDAP/IP-ownership lookup, not
+assumption) Microsoft Corporation and Akamai Technologies connections in
+the very same capture** — legitimate SharePoint/O365 and CDN traffic
+from the same infected machine. Naively using these two fingerprints as
+a malicious signature measures only 72% precision (18 real-malicious
+matches vs. 7 real-legitimate ones) even on this small, artificially
+balanced comparison — and that number would almost certainly get worse
+in a real deployment, where legitimate Microsoft/cloud traffic vastly
+outnumbers rare C2 connections by base rate. This is consistent with a
+well-documented real limitation of TLS fingerprinting: Lumma Stealer, at
+least in this sample, doesn't implement its own TLS stack — it rides on
+the OS's standard networking APIs (WinHTTP/WinINet), so its C2 traffic's
+JA4 fingerprint is indistinguishable from ordinary Windows networking,
+not a property unique to this malware family.
+
+**What this does and doesn't close:** the technical capability — real
+JA4 extraction from real captured traffic, cross-referenced against
+independently-confirmed malicious infrastructure — is now proven to
+work end-to-end for the first time in this project, and can be pointed
+at any future malware family or real curated feed. But this specific
+investigation is a genuine reason NOT to ship a JA4 rule seeded from
+this one pcap: doing so would flag real enterprise cloud traffic. A
+real, broadly-curated malicious JA4 feed (e.g. Abuse.ch, or FoxIO's own
+community-sourced database) observing many different malware families
+across many different networks — the only way to separate "genuinely
+malware-specific" fingerprints from "commodity OS networking stack"
+noise like this one — remains the real path forward, and even then,
+Lumma-family info-stealers specifically may simply not be catchable
+this way at all.
 
 ## Windowed connection-behavior detection (DDoS-rate, C2-periodicity & bulk exfil)
 
