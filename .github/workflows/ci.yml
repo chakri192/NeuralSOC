@@ -161,19 +161,22 @@ jobs:
       - name: Connection-behavior detector real-world regression gate
         # inference/conn_behavior.py's ConnBehaviorTracker is the fix for
         # the structural gap the step above discloses: a real volumetric
-        # flood or periodic C2 beacon is a pattern across MANY
-        # connections over time, not any single connection's byte/packet
-        # count. Calibrated against the raw CTU-13 .binetflow files
-        # (real SrcAddr/DstAddr/StartTime, not
+        # flood, periodic C2 beacon, or bulk exfil transfer is a pattern
+        # across MANY connections over time, not any single connection's
+        # byte/packet count. Calibrated against the raw CTU-13 .binetflow
+        # files (real SrcAddr/DstAddr/StartTime, not
         # benchmarks/real_rule_validation_dataset.csv's already-sampled
         # extract) and measured against the exact same production
         # tracker class in real chronological order per scenario:
         # RULE_DDOS_CONN_RATE reaches 100% precision / 11.3% recall /
-        # 0.00% FPR (versus the single-flow rule's 55.3%/0.2%/0.14%
-        # above -- a real, dramatic improvement on every axis, not a
-        # trade-off). RULE_C2_BEACON_PERIODIC is real but standalone-
-        # weaker (20.5% precision / 0.9% recall / 4.20% FPR) -- which is
-        # exactly why its confidence is set below 0.5 in
+        # 0.00% FPR and RULE_EXFIL_BYTE_VOLUME reaches ~100% precision /
+        # 22.2% recall / 0.01% FPR (versus the single-flow rules'
+        # 55.3%/0.2%/0.14% and 100%/0.3%/0.00% above -- real, dramatic
+        # improvements on every axis, not trade-offs). RULE_C2_BEACON_PERIODIC
+        # is real but standalone-weaker (37.0% precision / 0.3% recall /
+        # 0.58% FPR -- a fine threshold sweep found its recall is a flat
+        # ceiling no threshold moves) -- which is exactly why its
+        # confidence is set below 0.5 in
         # inference/stream_processor_faust.py, so a lone firing can never
         # by itself cross calculate_risk_score()'s incident threshold; it
         # corroborates, it doesn't stand alone.
@@ -191,21 +194,22 @@ jobs:
         # the best single detector (26.3% recall) until a real threshold
         # sweep found 50 instead.
         #
-        # Now combines all SIX detectors (folded in the windowed
-        # RULE_DDOS_CONN_RATE and RULE_C2_BEACON_PERIODIC, previously
-        # excluded because the rules dataset had no real IP/timestamp
-        # fields for them to key a window on -- see
-        # benchmarks/real_composite_dataset.csv), replayed against the
-        # FULL real Botnet/Normal set from all 13 scenarios (not the
-        # earlier 2,000-per-scenario capped sample -- a windowed check
-        # needs each pair's complete, temporally continuous sequence).
-        # Measured directly: 98.8% precision / 52.1% recall / 0.80% FPR,
-        # a real +6.9-point recall improvement over the best single
-        # detector (45.1%, the flow autoencoder) -- corroboration still
-        # measurably works. The baseline itself moved from the prior
-        # measurement (53.7% recall on the smaller, capped dataset) for
-        # this reason, not because anything regressed -- see
-        # docs/PATH_TO_10_OUT_OF_10.md for the full before/after.
+        # Now combines all SEVEN detectors (folded in the windowed
+        # RULE_DDOS_CONN_RATE, RULE_C2_BEACON_PERIODIC, and
+        # RULE_EXFIL_BYTE_VOLUME, previously excluded because the rules
+        # dataset had no real IP/timestamp fields for them to key a
+        # window on -- see benchmarks/real_composite_dataset.csv),
+        # replayed against the FULL real Botnet/Normal set from all 13
+        # scenarios (not the earlier 2,000-per-scenario capped sample --
+        # a windowed check needs each pair's complete, temporally
+        # continuous sequence). Measured directly: 98.8% precision /
+        # 52.5% recall / 0.80% FPR, a real +7.3-point recall improvement
+        # over the best single detector (45.1%, the flow autoencoder) --
+        # corroboration still measurably works. The baseline itself moved
+        # from the prior measurement (53.7% recall on the smaller,
+        # capped dataset) for this reason, not because anything
+        # regressed -- see docs/PATH_TO_10_OUT_OF_10.md for the full
+        # before/after.
         run: PYTHONPATH=. python3 scripts/evaluate_composite_scoring_against_real_data.py
 
       - name: Model provenance (real Sigstore keyless sign + verify)

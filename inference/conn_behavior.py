@@ -1,22 +1,25 @@
-"""Per-(source, destination)-pair connection-rate and periodicity
-tracking -- a genuinely different signal shape from
-inference/rules.py's RULE_DDOS_VOLUMETRIC and RULE_C2_HEARTBEAT, which
-both look at ONE connection in isolation.
+"""Per-(source, destination)-pair connection-rate, periodicity, and
+byte-volume tracking -- a genuinely different signal shape from
+inference/rules.py's RULE_DDOS_VOLUMETRIC, RULE_C2_HEARTBEAT, and
+RULE_CONN_EXFIL, which all look at ONE connection in isolation.
 
-Real-data investigation (docs/PATH_TO_10_OUT_OF_10.md) found those two
+Real-data investigation (docs/PATH_TO_10_OUT_OF_10.md) found those three
 rules structurally can't work well against real traffic: a volumetric
 flood is many small connections arriving fast, not one connection with a
-huge packet count, and periodic C2 beaconing is a REGULAR INTERVAL
-between many connections to the same destination, not any single
-connection's byte size. Exhaustive real threshold sweeps against CTU-13
-confirmed hard recall ceilings (~3% for DDoS, ~7.6% for C2) no amount of
-single-flow threshold tuning could clear -- the same reason
+huge packet count; periodic C2 beaconing is a REGULAR INTERVAL between
+many connections to the same destination, not any single connection's
+byte size; and bulk exfiltration is real total bytes moved to one
+destination OVER TIME, not necessarily any single connection's own byte
+count. Exhaustive real threshold sweeps against CTU-13 confirmed hard
+recall ceilings (~3% for DDoS, ~7.6% for C2, ~1.5% for exfil) no amount
+of single-flow threshold tuning could clear -- the same reason
 RULE_DNS_QUERY_BURST (inference/dns_behavior.py) had to become a
 windowed, stateful tracker instead of a per-query check. This module is
-that same fix applied to connection-rate and periodicity, calibrated
-against the real, raw CTU-13 .binetflow files (with real SrcAddr/DstAddr/
-StartTime -- fields benchmarks/real_rule_validation_dataset.csv's already-
-sampled extract doesn't carry).
+that same fix applied to connection-rate, periodicity, and byte volume,
+calibrated against the real, raw CTU-13 .binetflow files (with real
+SrcAddr/DstAddr/StartTime -- fields
+benchmarks/real_rule_validation_dataset.csv's already-sampled extract
+doesn't carry).
 
 Both signals below are scoped to a (source, destination) PAIR, not a
 source alone. A per-source-alone rate check was tried first and found a
@@ -65,6 +68,13 @@ uses):
   It's a real, disclosed, weak corroborating signal, not a standalone
   verdict -- the same posture inference/domain_age.py already takes for
   a young-but-legitimate domain.
+- Bulk exfiltration: a clean, strong signal, the same real "many small
+  events add up to one attack" shape as DDoS-rate. Summing orig_bytes
+  per (source, destination) pair over EXFIL_WINDOW_SECONDS instead of
+  checking any one connection's own byte count: EXFIL_BYTES_THRESHOLD
+  (1,000,000) measures 100% precision / 22.2% recall / 0.008% FPR --
+  roughly 74x the single-flow rule's real recall (~0.3%), at higher
+  precision and comparably negligible FPR.
 
 Reuses the caller's already-configured Redis connection
 (inference/correlation.py's IncidentCorrelator already enforces
@@ -83,9 +93,10 @@ doesn't require waiting for the real capture duration to elapse. A
 sorted set per (source, destination) pair (score = timestamp) implements
 the window: entries older than `timestamp - window_seconds` are evicted
 on every write, so window membership is a query against real, recorded
-event times, not against Redis's own clock. The DDoS-rate and C2-
-periodicity checks share this ONE sorted set (querying different trailing
-windows of it) rather than maintaining two separate structures per pair.
+event times, not against Redis's own clock. All three checks share this
+ONE sorted set (querying different trailing windows of it, and for
+bulk-exfil, summing a byte count encoded into each member) rather than
+maintaining three separate structures per pair.
 """
 import ipaddress
 import itertools
@@ -132,6 +143,19 @@ BEACON_MIN_OBSERVATIONS = 5
 BEACON_MAX_COEFFICIENT_OF_VARIATION = 0.008
 BEACON_MIN_INTERVAL_SECONDS = 5.0
 
+# Real-data calibrated: the existing single-flow RULE_CONN_EXFIL (one
+# connection's own orig_bytes > 5,000,000) measured only ~1.5% recall at
+# any real threshold sweep -- bulk exfiltration in real traffic is
+# rarely one giant flow, it's the SAME total moved across many smaller
+# ones over time, the same "many small events, not one big one" shape
+# DDoS-rate already fixed for floods. Summing orig_bytes per
+# (source, destination) pair over a real 10-minute trailing window finds
+# it: 1,000,000 bytes measured 100% precision / 22.2% recall / 0.008%
+# FPR against real CTU-13 traffic -- roughly 74x the single-flow rule's
+# real recall, at higher precision and comparably negligible FPR.
+EXFIL_WINDOW_SECONDS = 600.0
+EXFIL_BYTES_THRESHOLD = 1_000_000.0
+
 
 def _validate_ip(raw_ip) -> Optional[str]:
     """Same discipline as inference/dns_behavior.py's
@@ -159,6 +183,8 @@ class ConnBehaviorTracker:
         beacon_min_observations: int = BEACON_MIN_OBSERVATIONS,
         beacon_max_cv: float = BEACON_MAX_COEFFICIENT_OF_VARIATION,
         beacon_min_interval_seconds: float = BEACON_MIN_INTERVAL_SECONDS,
+        exfil_window_seconds: float = EXFIL_WINDOW_SECONDS,
+        exfil_bytes_threshold: float = EXFIL_BYTES_THRESHOLD,
     ):
         self.redis = redis_client
         self.ddos_window_seconds = ddos_window_seconds
@@ -167,25 +193,36 @@ class ConnBehaviorTracker:
         self.beacon_min_observations = beacon_min_observations
         self.beacon_max_cv = beacon_max_cv
         self.beacon_min_interval_seconds = beacon_min_interval_seconds
-        # The set is pruned to whichever window is longer, since both
-        # checks share it -- pruning to the shorter DDoS window would
-        # discard history the beacon check still needs.
-        self._retention_seconds = max(ddos_window_seconds, beacon_window_seconds)
+        self.exfil_window_seconds = exfil_window_seconds
+        self.exfil_bytes_threshold = exfil_bytes_threshold
+        # The set is pruned to whichever window is longest, since all
+        # three checks share it -- pruning to a shorter window would
+        # discard history a longer-window check still needs.
+        self._retention_seconds = max(ddos_window_seconds, beacon_window_seconds, exfil_window_seconds)
 
     def _pair_key(self, safe_src: str, safe_dst: str) -> str:
         return f"{{{safe_src}}}:conn_pair:{safe_dst}"
 
-    def record_connection(self, source_ip: str, dest_ip: str, timestamp: float) -> None:
+    def record_connection(self, source_ip: str, dest_ip: str, timestamp: float, orig_bytes: float = 0.0) -> None:
         """Call once per outbound connection (event_type == "conn") seen
-        for source_ip. Feeds both the DDoS rate window and the C2
-        periodicity window for this (source, destination) pair."""
+        for source_ip. Feeds the DDoS rate window, the C2 periodicity
+        window, and the bulk-exfil byte-sum window, all for this
+        (source, destination) pair. orig_bytes is encoded into the
+        sorted-set member itself (score stays the timestamp, so time-
+        range queries are unaffected) -- the simplest way to let
+        is_bulk_exfil() recover each entry's byte count without a
+        second data structure to keep in sync."""
         safe_src = _validate_ip(source_ip)
         safe_dst = _validate_ip(dest_ip)
         if not safe_src or not safe_dst or timestamp is None:
             return
         try:
+            safe_bytes = max(0.0, float(orig_bytes))
+        except (TypeError, ValueError):
+            safe_bytes = 0.0
+        try:
             pair_key = self._pair_key(safe_src, safe_dst)
-            member = f"{timestamp}:{next(_counter)}"
+            member = f"{timestamp}:{next(_counter)}:{safe_bytes}"
             pipe = self.redis.pipeline()
             pipe.zadd(pair_key, {member: timestamp})
             pipe.zremrangebyscore(pair_key, "-inf", timestamp - self._retention_seconds)
@@ -222,10 +259,9 @@ class ConnBehaviorTracker:
         intervals, near-zero variance) would look "perfectly regular"
         and false-positive as a beacon. Fails closed on any error.
 
-        This signal is real but standalone-weak (see module docstring:
-        ~12-19% real precision alone) -- callers should assign this a
-        correspondingly low confidence, not treat a lone firing as a
-        confirmed verdict."""
+        This signal is real but standalone-weak (see module docstring)
+        -- callers should assign this a correspondingly low confidence,
+        not treat a lone firing as a confirmed verdict."""
         safe_src = _validate_ip(source_ip)
         safe_dst = _validate_ip(dest_ip)
         if not safe_src or not safe_dst:
@@ -255,3 +291,37 @@ class ConnBehaviorTracker:
         coefficient_of_variation = stdev_interval / mean_interval if mean_interval else float("inf")
         stats["coefficient_of_variation"] = coefficient_of_variation
         return coefficient_of_variation <= self.beacon_max_cv, stats
+
+    def is_bulk_exfil(self, source_ip: str, dest_ip: str, timestamp: float):
+        """Returns (is_exfil: bool, stats: dict). Sums orig_bytes across
+        every connection in the window instead of looking at any one
+        connection alone -- the real fix for the same "many small events
+        add up to one big pattern" shape is_ddos_volumetric() already
+        handles for connection counts, applied to bytes moved instead.
+        Fails closed on any error."""
+        safe_src = _validate_ip(source_ip)
+        safe_dst = _validate_ip(dest_ip)
+        if not safe_src or not safe_dst:
+            return False, {"total_bytes": 0.0}
+        try:
+            pair_key = self._pair_key(safe_src, safe_dst)
+            members = self.redis.zrangebyscore(pair_key, timestamp - self.exfil_window_seconds, timestamp)
+            total_bytes = 0.0
+            for member in members:
+                try:
+                    # A Redis client configured for decode_responses=True
+                    # should always hand back str, but this defends
+                    # against a client (or client-mocking interaction, as
+                    # found in this project's own test suite) that
+                    # returns bytes instead -- bytes.rsplit() requires a
+                    # bytes separator, not the str one used below.
+                    if isinstance(member, bytes):
+                        member = member.decode("utf-8", errors="ignore")
+                    total_bytes += float(member.rsplit(":", 1)[1])
+                except (IndexError, ValueError):
+                    continue
+            stats = {"total_bytes": total_bytes, "window_seconds": self.exfil_window_seconds}
+            return total_bytes >= self.exfil_bytes_threshold, stats
+        except Exception as e:
+            logger.error(f"ConnBehaviorTracker.is_bulk_exfil failed: {e}")
+            return False, {"total_bytes": 0.0}

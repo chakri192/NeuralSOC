@@ -1437,21 +1437,23 @@ class TestSOCPipelineSecurity(unittest.TestCase):
         asyncio.run(_run())
 
     def test_conn_behavior_tracker_records_every_conn_event(self):
-        """Every real connection must feed the windowed rate/periodicity
-        tracker, regardless of whether either check fires -- otherwise a
-        real flood or beacon spread across many events would never
-        accumulate enough state to be detected at all."""
+        """Every real connection must feed the windowed rate/periodicity/
+        byte-volume tracker, regardless of whether any check fires --
+        otherwise a real flood, beacon, or slow exfil transfer spread
+        across many events would never accumulate enough state to be
+        detected at all."""
         import inference.stream_processor_faust as sp
 
         event = {"event_type": "conn", "id.orig_h": "10.0.0.5", "id.resp_h": "10.0.0.9", "uid": "C-REC"}
 
         async def _run():
-            with patch.object(sp, "extract_features", return_value={}), \
+            with patch.object(sp, "extract_features", return_value={"orig_bytes": 12345}), \
                  patch.object(sp, "evaluate_rules", return_value=[]), \
                  patch.object(sp.flow_engine, "score", return_value=(False, 0.0, 1.0)), \
                  patch.object(sp.conn_behavior_tracker, "record_connection", return_value=None) as record_connection, \
                  patch.object(sp.conn_behavior_tracker, "is_ddos_volumetric", return_value=(False, {})), \
                  patch.object(sp.conn_behavior_tracker, "is_c2_beacon", return_value=(False, {})), \
+                 patch.object(sp.conn_behavior_tracker, "is_bulk_exfil", return_value=(False, {})), \
                  patch.object(sp, "_send_dlq_safely", new=AsyncMock()):
                 await sp.process_traffic.fun(self._fake_stream([event]))
 
@@ -1459,6 +1461,7 @@ class TestSOCPipelineSecurity(unittest.TestCase):
             call_args = record_connection.call_args.args
             self.assertEqual(call_args[0], "10.0.0.5")
             self.assertEqual(call_args[1], "10.0.0.9")
+            self.assertEqual(call_args[3], 12345)
 
         asyncio.run(_run())
 
@@ -1478,6 +1481,7 @@ class TestSOCPipelineSecurity(unittest.TestCase):
                  patch.object(sp.conn_behavior_tracker, "record_connection", return_value=None), \
                  patch.object(sp.conn_behavior_tracker, "is_ddos_volumetric", return_value=(True, flood_stats)), \
                  patch.object(sp.conn_behavior_tracker, "is_c2_beacon", return_value=(False, {})), \
+                 patch.object(sp.conn_behavior_tracker, "is_bulk_exfil", return_value=(False, {})), \
                  patch.object(sp, "validate_alert", return_value=(True, None)), \
                  patch.object(sp.enricher, "enrich", new=AsyncMock(side_effect=lambda a: a)), \
                  patch.object(sp.alerts_topic, "send", new=AsyncMock(return_value=None)) as alerts_send, \
@@ -1497,11 +1501,10 @@ class TestSOCPipelineSecurity(unittest.TestCase):
 
     def test_conn_behavior_publishes_a_low_confidence_beacon_alert(self):
         """RULE_C2_BEACON_PERIODIC is a real but standalone-weak signal
-        (~12-19% real precision alone, per inference/conn_behavior.py's
-        module docstring) -- confidence is deliberately kept below 0.5 so
-        a lone firing can never by itself cross
-        inference/risk.py's calculate_risk_score() incident threshold;
-        it's meant to corroborate, not stand alone."""
+        (per inference/conn_behavior.py's module docstring) -- confidence
+        is deliberately kept below 0.5 so a lone firing can never by
+        itself cross inference/risk.py's calculate_risk_score() incident
+        threshold; it's meant to corroborate, not stand alone."""
         import inference.stream_processor_faust as sp
 
         event = {"event_type": "conn", "id.orig_h": "10.0.0.5", "id.resp_h": "203.0.113.9", "uid": "C-BEACON"}
@@ -1514,6 +1517,7 @@ class TestSOCPipelineSecurity(unittest.TestCase):
                  patch.object(sp.conn_behavior_tracker, "record_connection", return_value=None), \
                  patch.object(sp.conn_behavior_tracker, "is_ddos_volumetric", return_value=(False, {})), \
                  patch.object(sp.conn_behavior_tracker, "is_c2_beacon", return_value=(True, beacon_stats)), \
+                 patch.object(sp.conn_behavior_tracker, "is_bulk_exfil", return_value=(False, {})), \
                  patch.object(sp, "validate_alert", return_value=(True, None)), \
                  patch.object(sp.enricher, "enrich", new=AsyncMock(side_effect=lambda a: a)), \
                  patch.object(sp.alerts_topic, "send", new=AsyncMock(return_value=None)) as alerts_send, \
@@ -1531,7 +1535,43 @@ class TestSOCPipelineSecurity(unittest.TestCase):
 
         asyncio.run(_run())
 
-    def test_conn_behavior_neither_alert_fires_on_ordinary_traffic(self):
+    def test_conn_behavior_publishes_a_high_confidence_exfil_alert_on_bulk_transfer(self):
+        """RULE_EXFIL_BYTE_VOLUME is real-data calibrated to 100%
+        precision at its threshold (summing orig_bytes per pair over a
+        window catches the real "many small transfers, not one big one"
+        shape the old single-flow RULE_CONN_EXFIL structurally missed) --
+        confidence reflects that."""
+        import inference.stream_processor_faust as sp
+
+        event = {"event_type": "conn", "id.orig_h": "10.0.0.5", "id.resp_h": "203.0.113.9", "uid": "C-EXFIL"}
+        exfil_stats = {"total_bytes": 1_200_000.0, "window_seconds": 600.0}
+
+        async def _run():
+            with patch.object(sp, "extract_features", return_value={}), \
+                 patch.object(sp, "evaluate_rules", return_value=[]), \
+                 patch.object(sp.flow_engine, "score", return_value=(False, 0.0, 1.0)), \
+                 patch.object(sp.conn_behavior_tracker, "record_connection", return_value=None), \
+                 patch.object(sp.conn_behavior_tracker, "is_ddos_volumetric", return_value=(False, {})), \
+                 patch.object(sp.conn_behavior_tracker, "is_c2_beacon", return_value=(False, {})), \
+                 patch.object(sp.conn_behavior_tracker, "is_bulk_exfil", return_value=(True, exfil_stats)), \
+                 patch.object(sp, "validate_alert", return_value=(True, None)), \
+                 patch.object(sp.enricher, "enrich", new=AsyncMock(side_effect=lambda a: a)), \
+                 patch.object(sp.alerts_topic, "send", new=AsyncMock(return_value=None)) as alerts_send, \
+                 patch.object(sp.correlator, "add_alert", return_value=None), \
+                 patch.object(sp, "_send_dlq_safely", new=AsyncMock()):
+                await sp.process_traffic.fun(self._fake_stream([event]))
+
+            alerts_send.assert_awaited_once()
+            sent_alert = alerts_send.call_args.kwargs["value"]
+            self.assertEqual(sent_alert["model_name"], "RULE_EXFIL_BYTE_VOLUME")
+            self.assertEqual(sent_alert["threat_class"], "Data Exfiltration")
+            self.assertEqual(sent_alert["confidence_score"], 0.95)
+            self.assertEqual(sent_alert["evidence"]["total_bytes"], 1_200_000.0)
+            self.assertEqual(sent_alert["evidence"]["destination_ip"], "203.0.113.9")
+
+        asyncio.run(_run())
+
+    def test_conn_behavior_no_alert_fires_on_ordinary_traffic(self):
         import inference.stream_processor_faust as sp
 
         event = {"event_type": "conn", "id.orig_h": "10.0.0.5", "id.resp_h": "10.0.0.9", "uid": "C-ORDINARY"}
@@ -1543,6 +1583,7 @@ class TestSOCPipelineSecurity(unittest.TestCase):
                  patch.object(sp.conn_behavior_tracker, "record_connection", return_value=None), \
                  patch.object(sp.conn_behavior_tracker, "is_ddos_volumetric", return_value=(False, {})), \
                  patch.object(sp.conn_behavior_tracker, "is_c2_beacon", return_value=(False, {})), \
+                 patch.object(sp.conn_behavior_tracker, "is_bulk_exfil", return_value=(False, {})), \
                  patch.object(sp.alerts_topic, "send", new=AsyncMock(return_value=None)) as alerts_send, \
                  patch.object(sp, "_send_dlq_safely", new=AsyncMock()) as dlq:
                 await sp.process_traffic.fun(self._fake_stream([event]))
@@ -1632,6 +1673,9 @@ class TestSOCPipelineSecurity(unittest.TestCase):
             with patch.object(sp, "extract_features", return_value={}), \
                  patch.object(sp, "evaluate_rules", return_value=[detection]), \
                  patch.object(sp.flow_engine, "score", return_value=(False, 0.0, 1.0)), \
+                 patch.object(sp.conn_behavior_tracker, "is_ddos_volumetric", return_value=(False, {})), \
+                 patch.object(sp.conn_behavior_tracker, "is_c2_beacon", return_value=(False, {})), \
+                 patch.object(sp.conn_behavior_tracker, "is_bulk_exfil", return_value=(False, {})), \
                  patch.object(sp, "validate_alert", return_value=(True, None)), \
                  patch.object(sp.enricher, "enrich", new=AsyncMock(side_effect=lambda a: a)), \
                  patch.object(sp.alerts_topic, "send", new=AsyncMock(return_value=None)) as alerts_send, \
@@ -1651,16 +1695,29 @@ class TestSOCPipelineSecurity(unittest.TestCase):
     def test_process_traffic_publishes_a_second_alert_when_the_flow_looks_anomalous(self):
         """A conn event can trip both a rule (evaluate_rules) and the flow
         autoencoder independently -- confirms the new detection actually
-        reaches Kafka as its own alert, not silently dropped or merged."""
+        reaches Kafka as its own alert, not silently dropped or merged.
+
+        Uses a real orig_bytes of 50MB (to look flow-anomalous) on a
+        destination IP not reused by any other test -- conn_behavior_tracker
+        is a module-level singleton shared by fakeredis across this whole
+        test session, so a real 50MB write on the "10.0.0.9" pair every
+        other test uses would otherwise permanently push that pair's
+        cumulative exfil-window byte sum past RULE_EXFIL_BYTE_VOLUME's
+        threshold for the rest of the suite -- found by this exact
+        contamination breaking two unrelated, later-alphabetized tests
+        the first time this detector was added."""
         import inference.stream_processor_faust as sp
 
-        event = {"event_type": "conn", "id.orig_h": "10.0.0.5", "id.resp_h": "10.0.0.9", "uid": "C6", "orig_pkts": 40000}
+        event = {"event_type": "conn", "id.orig_h": "10.0.0.5", "id.resp_h": "10.0.0.199", "uid": "C6", "orig_pkts": 40000}
         rule_detection = {"threat_class": "Port Scanning", "severity": "medium", "confidence": 0.8, "rule_id": "TEST_RULE"}
 
         async def _run():
             with patch.object(sp, "extract_features", return_value={"orig_bytes": 50_000_000, "resp_bytes": 500, "duration": 5.0}), \
                  patch.object(sp, "evaluate_rules", return_value=[rule_detection]), \
                  patch.object(sp.flow_engine, "score", return_value=(True, 0.5, 0.04)), \
+                 patch.object(sp.conn_behavior_tracker, "is_ddos_volumetric", return_value=(False, {})), \
+                 patch.object(sp.conn_behavior_tracker, "is_c2_beacon", return_value=(False, {})), \
+                 patch.object(sp.conn_behavior_tracker, "is_bulk_exfil", return_value=(False, {})), \
                  patch.object(sp, "validate_alert", return_value=(True, None)), \
                  patch.object(sp.enricher, "enrich", new=AsyncMock(side_effect=lambda a: a)), \
                  patch.object(sp.alerts_topic, "send", new=AsyncMock(return_value=None)) as alerts_send, \

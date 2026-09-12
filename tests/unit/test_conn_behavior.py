@@ -1,14 +1,15 @@
 """ConnBehaviorTracker tracks per-(source, destination)-pair connection
-rate (DDoS-shaped floods) and periodicity (C2-shaped beaconing) -- see
-inference/conn_behavior.py's module docstring for why single-flow rules
-structurally can't see either pattern, and why both checks are scoped to
-a pair rather than a source alone (a real, disqualifying false-positive
-mode found during real-data calibration: a NAT/gateway-aggregated host
-produces huge connection bursts spread across many distinct
-destinations, which a per-source-alone check can't tell apart from a
-real flood at one destination). fakeredis exercises the real Redis
-command sequences (ZADD/ZREMRANGEBYSCORE/ZCOUNT/ZRANGEBYSCORE/pipeline),
-matching tests/unit/test_dns_behavior.py's own approach.
+rate (DDoS-shaped floods), periodicity (C2-shaped beaconing), and
+byte-volume (bulk exfiltration) -- see inference/conn_behavior.py's
+module docstring for why single-flow rules structurally can't see any of
+these patterns, and why all three checks are scoped to a pair rather
+than a source alone (a real, disqualifying false-positive mode found
+during real-data calibration: a NAT/gateway-aggregated host produces
+huge connection bursts spread across many distinct destinations, which a
+per-source-alone check can't tell apart from a real flood at one
+destination). fakeredis exercises the real Redis command sequences
+(ZADD/ZREMRANGEBYSCORE/ZCOUNT/ZRANGEBYSCORE/pipeline), matching
+tests/unit/test_dns_behavior.py's own approach.
 """
 from unittest.mock import MagicMock
 
@@ -32,6 +33,8 @@ def tracker():
         beacon_min_observations=5,
         beacon_max_cv=0.20,
         beacon_min_interval_seconds=5.0,
+        exfil_window_seconds=600.0,
+        exfil_bytes_threshold=1_000_000.0,
     )
 
 
@@ -183,3 +186,70 @@ class TestC2Beacon:
         tracker.record_connection("10.0.0.5", "203.0.113.9", 1000.0)  # must not raise
         is_beacon, stats = tracker.is_c2_beacon("10.0.0.5", "203.0.113.9", 1000.0)  # must not raise
         assert is_beacon is False
+
+
+class TestBulkExfil:
+    def test_flags_bytes_summed_across_many_small_connections(self, tracker):
+        # No single connection is remotely close to the old single-flow
+        # rule's 5,000,000-byte threshold, but the real total over the
+        # window is -- the exact "many small events, not one big one"
+        # shape a single-flow check structurally can't see.
+        t0 = 1000.0
+        for i in range(20):
+            tracker.record_connection("10.0.0.5", "203.0.113.9", t0 + i * 10.0, orig_bytes=60000.0)
+        is_exfil, stats = tracker.is_bulk_exfil("10.0.0.5", "203.0.113.9", t0 + 190.0)
+        assert is_exfil is True
+        assert stats["total_bytes"] == pytest.approx(1_200_000.0)
+
+    def test_does_not_flag_ordinary_byte_volume(self, tracker):
+        t0 = 1000.0
+        for i in range(5):
+            tracker.record_connection("10.0.0.5", "203.0.113.9", t0 + i * 60.0, orig_bytes=1000.0)
+        is_exfil, stats = tracker.is_bulk_exfil("10.0.0.5", "203.0.113.9", t0 + 300.0)
+        assert is_exfil is False
+        assert stats["total_bytes"] == pytest.approx(5000.0)
+
+    def test_old_bytes_fall_out_of_the_exfil_window(self, tracker):
+        t0 = 1000.0
+        # Well past the 600s window by the time we check -- none of this
+        # should still count toward the sum.
+        for i in range(20):
+            tracker.record_connection("10.0.0.5", "203.0.113.9", t0 + i * 10.0, orig_bytes=60000.0)
+        is_exfil, stats = tracker.is_bulk_exfil("10.0.0.5", "203.0.113.9", t0 + 190.0 + 700.0)
+        assert is_exfil is False
+        assert stats["total_bytes"] == pytest.approx(0.0)
+
+    def test_different_destination_pairs_are_isolated(self, tracker):
+        t0 = 1000.0
+        for i in range(20):
+            tracker.record_connection("10.0.0.5", "203.0.113.9", t0 + i * 10.0, orig_bytes=60000.0)
+        is_exfil_other, stats = tracker.is_bulk_exfil("10.0.0.5", "203.0.113.99", t0 + 190.0)
+        assert is_exfil_other is False
+        assert stats["total_bytes"] == pytest.approx(0.0)
+
+    def test_negative_or_invalid_bytes_are_treated_as_zero(self, tracker):
+        t0 = 1000.0
+        tracker.record_connection("10.0.0.5", "203.0.113.9", t0, orig_bytes=-500.0)
+        tracker.record_connection("10.0.0.5", "203.0.113.9", t0 + 1.0, orig_bytes=float("nan"))
+        _, stats = tracker.is_bulk_exfil("10.0.0.5", "203.0.113.9", t0 + 2.0)
+        # NaN is real IEEE-754 output from a malformed/attacker-influenced
+        # upstream field, and NaN >= threshold is always False in Python --
+        # this must never silently poison the running total into NaN
+        # (which would make every later real check on this pair permanently
+        # both never-fire and never-informative).
+        assert stats["total_bytes"] >= 0.0
+
+    def test_invalid_ip_is_silently_ignored(self, tracker):
+        tracker.record_connection("not-an-ip", "203.0.113.9", 1000.0, orig_bytes=60000.0)  # must not raise
+        is_exfil, stats = tracker.is_bulk_exfil("not-an-ip", "203.0.113.9", 1000.0)
+        assert is_exfil is False
+        assert stats["total_bytes"] == 0.0
+
+    def test_redis_error_is_logged_not_raised(self):
+        broken_redis = MagicMock()
+        broken_redis.pipeline.side_effect = RuntimeError("redis down")
+        broken_redis.zrangebyscore.side_effect = RuntimeError("redis down")
+        tracker = ConnBehaviorTracker(broken_redis)
+        tracker.record_connection("10.0.0.5", "203.0.113.9", 1000.0, orig_bytes=60000.0)  # must not raise
+        is_exfil, stats = tracker.is_bulk_exfil("10.0.0.5", "203.0.113.9", 1000.0)  # must not raise
+        assert is_exfil is False

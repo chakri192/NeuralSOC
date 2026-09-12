@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """evaluate_conn_behavior_against_real_data.py -- does
-inference/conn_behavior.py's ConnBehaviorTracker (windowed DDoS-rate and
-C2-periodicity detection) actually catch real attacks, and at what real
-cost?
+inference/conn_behavior.py's ConnBehaviorTracker (windowed DDoS-rate,
+C2-periodicity, and bulk-exfil byte-volume detection) actually catch
+real attacks, and at what real cost?
 
 benchmarks/real_composite_dataset.csv (shared with
 scripts/evaluate_composite_scoring_against_real_data.py, which needs the
@@ -22,18 +22,18 @@ benign) is excluded, matching every other real-data evaluator here.
 Runs the exact same ConnBehaviorTracker class production code hits
 (inference/stream_processor_faust.py's wiring), against fakeredis, in
 real chronological order per scenario -- record_connection() then
-immediately is_ddos_volumetric()/is_c2_beacon(), the same
-record-then-check sequence the live stream processor uses. A real
+immediately is_ddos_volumetric()/is_c2_beacon()/is_bulk_exfil(), the
+same record-then-check sequence the live stream processor uses. A real
 "connection event" from CTU-13 gets counted as a true positive the
-moment either check fires while replaying a real Botnet-labeled row, and
-a false positive the moment either fires on a real Normal-labeled row.
+moment any check fires while replaying a real Botnet-labeled row, and a
+false positive the moment any fires on a real Normal-labeled row.
 
 This is a genuinely two-tier signal, real-data calibrated (see
 inference/conn_behavior.py's own module docstring for the full story):
-DDoS-rate is strong (100% precision at its threshold); C2-periodicity is
-real but weak alone (~12-19% precision), which is why it's fed into
-inference/risk.py's log-odds pooling at low confidence rather than
-trusted standalone.
+DDoS-rate and bulk-exfil are both strong (100% precision at their
+thresholds); C2-periodicity is real but weak alone, which is why it's
+fed into inference/risk.py's log-odds pooling at low confidence rather
+than trusted standalone.
 
 Also acts as a regression gate, mirroring every other real-data
 evaluator in this project: benchmarks/conn_behavior_baseline.json
@@ -72,6 +72,7 @@ def _load_dataset():
                 row["src_addr"],
                 row["dst_addr"],
                 float(row["timestamp"]),
+                float(row["orig_bytes"]),
             ))
     for scenario_rows in by_scenario.values():
         scenario_rows.sort(key=lambda r: r[3])
@@ -116,21 +117,25 @@ def main():
     counts = {
         "RULE_DDOS_CONN_RATE": {"tp": 0, "fp": 0, "tn": 0, "fn": 0},
         "RULE_C2_BEACON_PERIODIC": {"tp": 0, "fp": 0, "tn": 0, "fn": 0},
+        "RULE_EXFIL_BYTE_VOLUME": {"tp": 0, "fp": 0, "tn": 0, "fn": 0},
     }
 
     for scenario, rows in sorted(by_scenario.items(), key=lambda kv: int(kv[0])):
         print(f"[*] Replaying scenario {scenario} ({len(rows)} connections) in real chronological order...")
         tracker = ConnBehaviorTracker(fakeredis.FakeRedis(server=fakeredis.FakeServer(), decode_responses=True))
-        for is_botnet, src, dst, ts in rows:
-            tracker.record_connection(src, dst, ts)
+        for is_botnet, src, dst, ts, orig_bytes in rows:
+            tracker.record_connection(src, dst, ts, orig_bytes)
             is_flood, _ = tracker.is_ddos_volumetric(src, dst, ts)
             is_beacon, _ = tracker.is_c2_beacon(src, dst, ts)
+            is_exfil, _ = tracker.is_bulk_exfil(src, dst, ts)
             if is_botnet:
                 counts["RULE_DDOS_CONN_RATE"]["tp" if is_flood else "fn"] += 1
                 counts["RULE_C2_BEACON_PERIODIC"]["tp" if is_beacon else "fn"] += 1
+                counts["RULE_EXFIL_BYTE_VOLUME"]["tp" if is_exfil else "fn"] += 1
             else:
                 counts["RULE_DDOS_CONN_RATE"]["fp" if is_flood else "tn"] += 1
                 counts["RULE_C2_BEACON_PERIODIC"]["fp" if is_beacon else "tn"] += 1
+                counts["RULE_EXFIL_BYTE_VOLUME"]["fp" if is_exfil else "tn"] += 1
 
     print("\n" + "=" * 72)
     print("RESULTS -- windowed connection-behavior detectors against real CTU-13 traffic")

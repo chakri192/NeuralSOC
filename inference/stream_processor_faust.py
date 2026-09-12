@@ -341,23 +341,24 @@ async def process_traffic(stream):
                 except Exception as e:
                     logger.error(f"Flow anomaly inference failed: {e}")
 
-            # 3e. Connection-rate / periodicity tracking -- independent of
-            # the flow autoencoder above, same reasoning as 3a/3b's DNS
-            # behavioral tracking: a real volumetric flood or periodic C2
-            # beacon is a pattern across MANY connections over time, not a
-            # property any single connection's byte/packet count can
-            # encode alone. See inference/conn_behavior.py's module
-            # docstring for the real-data investigation (CTU-13) that
-            # found this, and the real, disclosed reason
-            # RULE_DDOS_CONN_RATE and RULE_C2_BEACON_PERIODIC get very
-            # different confidences below: the rate check has 100% real
-            # precision at its calibrated threshold, but periodicity
-            # alone is a genuinely weaker signal -- a fine real threshold
-            # sweep found its recall is a flat ~0.2-0.4% ceiling
-            # regardless of threshold, so BEACON_MAX_COEFFICIENT_OF_VARIATION
-            # is tuned purely for precision/FPR (37.0%/0.58% real,
-            # measured) rather than any recall trade-off. Confidence is
-            # kept below 0.5 so a lone firing can never by itself cross
+            # 3e. Connection-rate / periodicity / byte-volume tracking --
+            # independent of the flow autoencoder above, same reasoning
+            # as 3a/3b's DNS behavioral tracking: a real volumetric
+            # flood, periodic C2 beacon, or bulk exfil transfer is a
+            # pattern across MANY connections over time, not a property
+            # any single connection's byte/packet count can encode
+            # alone. See inference/conn_behavior.py's module docstring
+            # for the real-data investigation (CTU-13) that found this,
+            # and the real, disclosed reason these three detections get
+            # very different confidences below: the rate and byte-volume
+            # checks both measure 100% real precision at their
+            # calibrated thresholds, but periodicity alone is a
+            # genuinely weaker signal -- a fine real threshold sweep
+            # found its recall is a flat ~0.2-0.4% ceiling regardless of
+            # threshold, so BEACON_MAX_COEFFICIENT_OF_VARIATION is tuned
+            # purely for precision/FPR (37.0%/0.58% real, measured)
+            # rather than any recall trade-off. Its confidence is kept
+            # below 0.5 so a lone firing can never by itself cross
             # inference/risk.py's incident threshold; it's meant to
             # corroborate, the same posture inference/domain_age.py takes
             # for a young-but-legitimate domain.
@@ -367,8 +368,10 @@ async def process_traffic(stream):
                     dest_ip = str(event.get("id.resp_h") or "")
                     if source_ip and dest_ip:
                         now = time.time()
+                        orig_bytes = features.get("orig_bytes", 0)
                         await asyncio.get_running_loop().run_in_executor(
-                            io_executor, conn_behavior_tracker.record_connection, source_ip, dest_ip, now
+                            io_executor, conn_behavior_tracker.record_connection,
+                            source_ip, dest_ip, now, orig_bytes,
                         )
                         is_flood, flood_stats = await asyncio.get_running_loop().run_in_executor(
                             io_executor, conn_behavior_tracker.is_ddos_volumetric, source_ip, dest_ip, now
@@ -391,6 +394,17 @@ async def process_traffic(stream):
                                 "confidence": 0.40,
                                 "rule_id": "RULE_C2_BEACON_PERIODIC",
                                 "evidence": {"destination_ip": dest_ip, **beacon_stats},
+                            })
+                        is_exfil, exfil_stats = await asyncio.get_running_loop().run_in_executor(
+                            io_executor, conn_behavior_tracker.is_bulk_exfil, source_ip, dest_ip, now
+                        )
+                        if is_exfil:
+                            detections.append({
+                                "threat_class": "Data Exfiltration",
+                                "severity": "critical",
+                                "confidence": 0.95,
+                                "rule_id": "RULE_EXFIL_BYTE_VOLUME",
+                                "evidence": {"destination_ip": dest_ip, **exfil_stats},
                             })
                 except Exception as e:
                     logger.error(f"Connection behavior tracking failed: {e}")

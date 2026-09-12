@@ -585,24 +585,21 @@ partly reflect that bulk exfiltration is a late-stage, comparatively
 rare behavior even within real botnet traffic dominated by routine C2
 and reconnaissance — not necessarily that the rule's shape is wrong.
 
-**DDoS and C2 Beaconing specifically: not retuned, replaced with a
-genuinely different detector** (see
-[Windowed connection-behavior detection](#windowed-connection-behavior-detection-ddos-rate--c2-periodicity)
-below) — an exhaustive real threshold sweep found these two rules'
+**All three specifically: not retuned, replaced with a genuinely
+different detector** (see
+[Windowed connection-behavior detection](#windowed-connection-behavior-detection-ddos-rate-c2-periodicity--bulk-exfil)
+below) — an exhaustive real threshold sweep found all three rules'
 near-zero recall isn't a threshold problem at all: a real volumetric
-flood is many connections arriving fast, and real C2 beaconing is a
-regular interval between many connections, neither of which a single
-flow's own fields can encode. Retuning a single-flow threshold could
-never have closed this; a stateful, windowed tracker was needed instead.
-**Data Exfiltration remains genuinely unfixed** — an exhaustive sweep
-(orig_bytes thresholds from 5,000,000 down to 10,000) found recall caps
-around 1.5% before precision collapses, meaning bulk-exfiltration-shaped
-traffic is simply rare in this dataset's real botnet behavior; retuning
-its threshold using only this one dataset would be circular (the same
-single-dataset caution
-[docs/PATH_TO_10_OUT_OF_10.md](docs/PATH_TO_10_OUT_OF_10.md) raises
-about the DGA/flow models), and no genuinely different detector shape
-has been built for it yet.
+flood is many connections arriving fast, real C2 beaconing is a regular
+interval between many connections, and real bulk exfiltration is a real
+total moved across many smaller transfers over time — none of these is
+a property any single flow's own fields can encode. Retuning a
+single-flow threshold could never have closed this (Data Exfiltration's
+own initial sweep, `orig_bytes` thresholds from 5,000,000 down to
+10,000, found recall capped around 1.5% before precision collapsed,
+which looked at the time like it might need a genuinely new, second
+dataset); a stateful, windowed tracker summing each signal over time was
+needed instead, and turned out to close all three without one.
 
 **Not covered:** the Encrypted-Traffic Malware rule (JA4 fingerprinting)
 has no equivalent real-data validation — CTU-13's flow records carry no
@@ -610,17 +607,18 @@ TLS handshake data at all. That needs a genuinely different real
 dataset (a real malicious JA3/JA4 fingerprint feed, e.g. Abuse.ch), not
 something already on disk; still open.
 
-## Windowed connection-behavior detection (DDoS-rate & C2-periodicity)
+## Windowed connection-behavior detection (DDoS-rate, C2-periodicity & bulk exfil)
 
-The single-flow `RULE_DDOS_VOLUMETRIC` and `RULE_C2_HEARTBEAT` rules
-above stayed in place unchanged (they still catch the rare case where
-one connection genuinely is that large or that oddly-shaped), but the
-real fix for their near-zero recall needed a different signal shape
-entirely:
+The single-flow `RULE_DDOS_VOLUMETRIC`, `RULE_C2_HEARTBEAT`, and
+`RULE_CONN_EXFIL` rules above stayed in place unchanged (they still
+catch the rare case where one connection genuinely is that large or
+that oddly-shaped), but the real fix for their near-zero recall needed a
+different signal shape entirely:
 [inference/conn_behavior.py](inference/conn_behavior.py)'s
-`ConnBehaviorTracker` tracks connection RATE and INTERVAL REGULARITY per
-(source, destination) pair over time — the same "stateful window instead
-of a single-event check" fix `RULE_DNS_QUERY_BURST`
+`ConnBehaviorTracker` tracks connection RATE, INTERVAL REGULARITY, and
+BYTE VOLUME per (source, destination) pair over time — the same
+"stateful window instead of a single-event check" fix
+`RULE_DNS_QUERY_BURST`
 ([inference/dns_behavior.py](inference/dns_behavior.py)) already applies
 to DNS bursts.
 
@@ -664,6 +662,26 @@ checks — are regular enough to look similar at looser thresholds; one
 background pair measured CV=0.000, a perfectly regular ~hourly
 legitimate check-in).
 
+**Bulk exfiltration: a real, clean signal, the same "many small events
+add up to one attack" shape as DDoS-rate.** The old single-flow
+`RULE_CONN_EXFIL` (one connection's own `orig_bytes > 5,000,000`)
+measured only ~1.5% real recall at any threshold sweep — genuine bulk
+exfiltration is rarely one giant flow, it's the same total moved across
+many smaller ones over time. Summing `orig_bytes` per
+(source, destination) pair over a real 10-minute trailing window
+(`EXFIL_WINDOW_SECONDS`) finds it: `EXFIL_BYTES_THRESHOLD = 1,000,000`
+measures ~100% precision / 22.2% recall / 0.01% FPR against real CTU-13
+traffic — roughly 74x the single-flow rule's real recall, at higher
+precision and comparably negligible FPR. Found and fixed one real bug
+along the way while building this: the byte count has to be encoded
+into each sorted-set member string (Redis sorted sets don't natively sum
+values in a score range), and a live pytest run — not an isolated script
+— surfaced that a client already mocked elsewhere in the test suite
+(`redis.Redis`, globally patched by an existing session-scoped fixture)
+can make a *separately created* `fakeredis.FakeRedis(decode_responses=True)`
+instance return raw bytes instead of decoded strings for this specific
+call shape; `is_bulk_exfil()` now defensively decodes either.
+
 **Measured against the real production tracker class itself** (not a
 reimplementation — `scripts/evaluate_conn_behavior_against_real_data.py`
 replays `benchmarks/real_composite_dataset.csv` — every real
@@ -679,14 +697,17 @@ temporally continuous sequence — through the exact same
 | `RULE_DDOS_VOLUMETRIC` (old, single-flow) | 55.3% | 0.2% | 0.14% |
 | `RULE_C2_BEACON_PERIODIC` (new, windowed) | 37.0% | 0.3% | 0.58% |
 | `RULE_C2_HEARTBEAT` (old, single-flow) | 74.8% | 0.5% | 0.12% |
+| `RULE_EXFIL_BYTE_VOLUME` (new, windowed) | 100.0% | 22.2% | 0.01% |
+| `RULE_CONN_EXFIL` (old, single-flow) | 100.0% | 0.3% | 0.00% |
 
-DDoS-rate is a clean, dramatic improvement on every axis at once — not a
-trade-off. C2-periodicity trades a small amount of the old single-flow
-rule's already-tiny recall for a real, measured improvement in how much
-that recall can be trusted (37.0% vs. the old rule's 74.8% precision is
-still a real cost, but far better than a looser CV threshold's real
-alternative — 0.20 measured only 20.5% precision at 4.20% FPR, over 7x
-the noise for barely any more recall). Confidence is set to `0.40` in
+DDoS-rate and bulk-exfil are both clean, dramatic improvements on every
+axis at once — not a trade-off. C2-periodicity trades a small amount of
+the old single-flow rule's already-tiny recall for a real, measured
+improvement in how much that recall can be trusted (37.0% vs. the old
+rule's 74.8% precision is still a real cost, but far better than a
+looser CV threshold's real alternative — 0.20 measured only 20.5%
+precision at 4.20% FPR, over 7x the noise for barely any more recall).
+Confidence is set to `0.40` in
 [inference/stream_processor_faust.py](inference/stream_processor_faust.py)
 regardless — deliberately below 0.5, so a lone firing can never by
 itself cross [inference/risk.py](inference/risk.py)'s
@@ -694,11 +715,14 @@ itself cross [inference/risk.py](inference/risk.py)'s
 reduces to its own confidence). It's meant to corroborate other evidence
 via log-odds pooling, the same posture
 [inference/domain_age.py](inference/domain_age.py) already takes for a
-young-but-legitimate domain — not a standalone verdict.
+young-but-legitimate domain — not a standalone verdict. DDoS-rate and
+bulk-exfil, in contrast, are confident enough alone (`0.95`) to stand as
+their own high-confidence signal, same as the DGA CNN's own confidence
+scale for an unambiguous case.
 
 Gated the same way as every other real-data check in this document:
-`benchmarks/conn_behavior_baseline.json` records both detectors'
-precision/recall/FPR, and CI fails if either regresses by more than 5
+`benchmarks/conn_behavior_baseline.json` records all three detectors'
+precision/recall/FPR, and CI fails if any regresses by more than 5
 points.
 
 ## Composite incident scoring
@@ -764,28 +788,35 @@ detector alone (26.3% vs. 48.5% recall, since no individual rule's fixed
 confidence — Reconnaissance's 0.75, e.g. — clears 80 without
 corroboration); 50 sits at the safe edge of a wide, flat, real plateau.
 
-**Re-measured after folding in the two windowed connection-behavior
-detectors** (`RULE_DDOS_CONN_RATE`, `RULE_C2_BEACON_PERIODIC` — see
-[Windowed connection-behavior detection](#windowed-connection-behavior-detection-ddos-rate--c2-periodicity)
+**Re-measured after folding in the three windowed connection-behavior
+detectors** (`RULE_DDOS_CONN_RATE`, `RULE_C2_BEACON_PERIODIC`,
+`RULE_EXFIL_BYTE_VOLUME` — see
+[Windowed connection-behavior detection](#windowed-connection-behavior-detection-ddos-rate-c2-periodicity--bulk-exfil)
 above), which the original measurement couldn't include: it used a
 dataset with no real IP/timestamp fields for a windowed check to key a
 window on. `benchmarks/real_composite_dataset.csv` is a new,
-comprehensive extract carrying every field all six detectors need —
+comprehensive extract carrying every field all seven detectors need —
 keeping every real Botnet/Normal connection whole and in real
 chronological order rather than the earlier 2,000-per-scenario cap,
 since a windowed check needs each pair's complete, temporally continuous
 sequence (it's the same dataset
 `scripts/evaluate_conn_behavior_against_real_data.py` reads, one real
 extract shared by both evaluators). Measured against
-all six detectors on this fuller, uncapped real dataset: **98.8%
-precision / 52.1% recall / 0.80% FPR**, a real **+6.9-point** recall
+all seven detectors on this fuller, uncapped real dataset: **98.8%
+precision / 52.5% recall / 0.80% FPR**, a real **+7.3-point** recall
 improvement over the best single detector alone (45.1%, the flow
-autoencoder) — corroboration still measurably works. The precise
-recall number moved from the original 53.7% for a real, disclosed
-reason that isn't a regression: it now reflects the full, naturally-
-weighted real CTU-13 population (large scenarios like 9 and 10
-contributing proportionally more rows) rather than an equal-per-scenario
-capped sample — a different, arguably more representative measurement,
+autoencoder) — corroboration still measurably works, though the
+incremental gain from adding bulk-exfil specifically was modest (52.1%
+→ 52.5%): many of the real flows it independently catches were already
+being caught by the flow autoencoder or another detector on the same
+underlying attack, so the union's growth is smaller than its 22.2% solo
+recall alone would suggest — corroboration compounds, it doesn't simply
+add. The precise recall number moved from the original 53.7% for a
+real, disclosed reason that isn't a regression: it now reflects the
+full, naturally-weighted real CTU-13 population (large scenarios like 9
+and 10 contributing proportionally more rows) rather than an
+equal-per-scenario capped sample — a different, arguably more
+representative measurement,
 not a worse one. The composite's own baseline
 (`benchmarks/composite_scoring_baseline.json`) was re-seeded against
 this new measurement rather than compared to the prior one, exactly

@@ -4,19 +4,19 @@ independent detectors' signals into one incident-level score
 (inference/risk.py's calculate_risk_score()) actually catch more real
 attacks than relying on any single detector alone?
 
-Runs all SIX detectors this platform's incident score can combine
+Runs all SEVEN detectors this platform's incident score can combine
 against the SAME real CTU-13 connections, replayed in real
 chronological order per scenario: the flow autoencoder and the 4 rules
 evaluate_rules() can exercise (orig_bytes/resp_bytes/duration/tot_pkts,
 plus dport/state), AND -- folded in as of this version --
-inference/conn_behavior.py's windowed RULE_DDOS_CONN_RATE and
-RULE_C2_BEACON_PERIODIC (real src_addr/dst_addr/timestamp). Earlier
-versions of this script measured only the first four, because
-benchmarks/real_rule_validation_dataset.csv (still used by
-scripts/evaluate_rules_against_real_data.py's own gate) has no real
-IP/timestamp fields a windowed check can key a window on.
+inference/conn_behavior.py's windowed RULE_DDOS_CONN_RATE,
+RULE_C2_BEACON_PERIODIC, and RULE_EXFIL_BYTE_VOLUME (real
+src_addr/dst_addr/timestamp). Earlier versions of this script measured
+only the first four, because benchmarks/real_rule_validation_dataset.csv
+(still used by scripts/evaluate_rules_against_real_data.py's own gate)
+has no real IP/timestamp fields a windowed check can key a window on.
 benchmarks/real_composite_dataset.csv is a single, comprehensive extract
-carrying every field all six detectors need (every real Botnet/Normal-
+carrying every field all seven detectors need (every real Botnet/Normal-
 labeled connection from all 13 real CTU-13 scenarios, kept whole and in
 real chronological order -- no per-class sampling cap, since the
 windowed checks need each (source, destination) pair's complete,
@@ -91,7 +91,9 @@ REGRESSION_THRESHOLD_POINTS = 5.0
 # the right edge of the same kind of plateau (see the module docstring).
 RISK_SCORE_INCIDENT_THRESHOLD = 50.0
 
-ALL_DETECTOR_NAMES = ["flow_autoencoder"] + list(RULE_TO_THREAT_CLASS) + ["RULE_DDOS_CONN_RATE", "RULE_C2_BEACON_PERIODIC"]
+ALL_DETECTOR_NAMES = ["flow_autoencoder"] + list(RULE_TO_THREAT_CLASS) + [
+    "RULE_DDOS_CONN_RATE", "RULE_C2_BEACON_PERIODIC", "RULE_EXFIL_BYTE_VOLUME",
+]
 
 
 def _flow_anomaly_alert(engine, orig_bytes, resp_bytes, duration, tot_pkts):
@@ -129,11 +131,11 @@ def _rule_alerts(dport, state, orig_bytes, resp_bytes, tot_pkts):
     return alerts
 
 
-def _conn_behavior_alerts(tracker, src, dst, ts):
+def _conn_behavior_alerts(tracker, src, dst, ts, orig_bytes):
     """Mirrors inference/stream_processor_faust.py's raw_alert
     construction for the windowed connection-behavior detectors, exactly
-    as they're wired in production: record first, then check both."""
-    tracker.record_connection(src, dst, ts)
+    as they're wired in production: record first, then check all three."""
+    tracker.record_connection(src, dst, ts, orig_bytes)
     alerts = []
     is_flood, _ = tracker.is_ddos_volumetric(src, dst, ts)
     if is_flood:
@@ -150,6 +152,14 @@ def _conn_behavior_alerts(tracker, src, dst, ts):
             "severity": "medium",
             "confidence_score": 0.40,
             "model_name": "RULE_C2_BEACON_PERIODIC",
+        })
+    is_exfil, _ = tracker.is_bulk_exfil(src, dst, ts)
+    if is_exfil:
+        alerts.append({
+            "threat_class": "Data Exfiltration",
+            "severity": "critical",
+            "confidence_score": 0.95,
+            "model_name": "RULE_EXFIL_BYTE_VOLUME",
         })
     return alerts
 
@@ -233,10 +243,10 @@ def main():
                 else:
                     solo_counts[rule_id]["fp" if fired else "tn"] += 1
 
-            conn_alerts = _conn_behavior_alerts(tracker, src, dst, ts)
+            conn_alerts = _conn_behavior_alerts(tracker, src, dst, ts, orig_bytes)
             alerts.extend(conn_alerts)
             fired_conn_ids = {a["model_name"] for a in conn_alerts}
-            for name in ("RULE_DDOS_CONN_RATE", "RULE_C2_BEACON_PERIODIC"):
+            for name in ("RULE_DDOS_CONN_RATE", "RULE_C2_BEACON_PERIODIC", "RULE_EXFIL_BYTE_VOLUME"):
                 fired = name in fired_conn_ids
                 if is_botnet:
                     solo_counts[name]["tp" if fired else "fn"] += 1
@@ -259,7 +269,7 @@ def main():
 
     composite_metrics = _confusion(composite_counts["tp"], composite_counts["fp"], composite_counts["tn"], composite_counts["fn"])
     print("\n" + "=" * 72)
-    print(f"COMPOSITE (calculate_risk_score >= {RISK_SCORE_INCIDENT_THRESHOLD}) -- combining all 6 detectors")
+    print(f"COMPOSITE (calculate_risk_score >= {RISK_SCORE_INCIDENT_THRESHOLD}) -- combining all 7 detectors")
     print("=" * 72)
     print(f"  Accuracy:  {composite_metrics['accuracy']:.1%}")
     print(f"  Precision: {composite_metrics['precision']:.1%}")
