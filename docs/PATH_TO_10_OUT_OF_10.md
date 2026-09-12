@@ -585,6 +585,40 @@ seeding a rule from a single dataset's malware samples, twice over now.
 Full writeup:
 [SECURITY.md](../SECURITY.md#rule-based-detector-validation-against-real-world-data).
 
+## Phase 10.9 — DGA ensembling (investigated, not shipped)
+
+**Status: real investigation, honest negative result.** The last
+Workstream 2 idea: since Phase 10.7's CNN+BiLSTM attempt showed real,
+substantial run-to-run training variance (unseeded training, aggregate
+recall ranging 75.0%-79.5% across 4 retrains of one architecture), try
+averaging predictions across several independent copies of the already-
+proven CNN-only model instead of changing the architecture again.
+
+Trained 2 more independent CNN-only models and combined them with the
+shipped one into a 3-model ensemble. Re-swept the threshold for the
+ensemble specifically (averaging shifts the score distribution, so the
+shipped model's 0.97 doesn't transfer) and found 0.7 looked like a clean
+win in aggregate: recall matched the shipped model almost exactly on
+both real datasets while precision and FPR both improved. The full
+per-family/per-group table said otherwise: `pushdo` regressed 11 points,
+and `umudga_group_07` — the same UMUDGA group that collapsed 38 points
+in Phase 10.7's best-looking CNN+BiLSTM run — **collapsed completely
+(47.0% → 0.0%)** a third time, this time under a technique with no
+recurrent branch involved at all. Three independent techniques now
+converge on the same conclusion: this group's real domains sit on an
+unstable decision boundary for this training pipeline as a whole,
+because its synthetic generators never produce anything shaped like it
+— not something architecture changes or ensembling can fix.
+
+**Not shipped.** `models/cnn_dga.pt` reverted to the original shipped
+weights (confirmed byte-identical via SHA-256). This closes out
+Workstream 2's DGA CNN avenues for this round — the honest state is a
+solid, twice-independently-validated B-grade model with a real,
+now-well-understood ceiling, not a model artificially pushed higher by
+an aggregate number that would have hidden a real regression. Full
+writeup:
+[docs/DGA_MODEL_ROADMAP.md](DGA_MODEL_ROADMAP.md#phase-6--small-ensemble-of-the-proven-cnn-only-architecture-investigated-not-shipped).
+
 ---
 
 ## What "10/10" actually means, concretely

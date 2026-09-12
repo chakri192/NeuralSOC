@@ -325,6 +325,63 @@ up — not a forced win.
 
 ---
 
+## Phase 6 — Small ensemble of the proven CNN-only architecture (investigated, not shipped)
+
+**Status: real investigation, honest negative result.** Phase 5's
+CNN+BiLSTM attempt surfaced a real, substantial run-to-run training
+variance in this model (aggregate recall ranged 75.0%-79.5% across 4
+stochastic retrains of the *same* architecture, since `train_to_max()`
+isn't seeded). A lower-risk idea than another architecture change: train
+several independent copies of the already-proven, currently-shipped
+CNN-only `DGA_HybridModel` and average their predicted probabilities,
+the standard technique for reducing variance-driven error without
+touching a validated architecture.
+
+**What was tried:** trained 2 fresh independent CNN-only models
+(~28-30 minutes each) and combined them with the currently-shipped one
+into a 3-model ensemble, scoring by mean probability. At the shipped
+model's own threshold (0.97), the ensemble looked purely worse (recall
+dropped ~12 points on both real datasets) — expected and uninteresting:
+averaging compresses the score distribution toward the middle, so a
+threshold calibrated for one model's distribution doesn't transfer
+directly. Re-swept thresholds for the ensemble specifically and found a
+genuinely promising point: at 0.7, the ensemble matched the shipped
+model's recall almost exactly (76.9% vs. 77.2%, 75.2% vs. 75.8%) while
+improving precision (+2.5 and +3.6 points) and lowering FPR (-2.6 and
+-3.6 points) on **both** real datasets — by the aggregate numbers alone,
+a clean win.
+
+**The per-family/per-group table said otherwise.** `pushdo` regressed
+11.0 points on the first dataset (55.2% → 44.2%), and five UMUDGA groups
+regressed on the second — most severely `umudga_group_07`, which
+**collapsed completely (47.0% → 0.0%)**. This is the same group that
+collapsed 38 points in Phase 5's best-looking CNN+BiLSTM run. Seeing it
+collapse a *third* time, now under a structurally different technique
+(simple probability-averaging ensembling, no recurrent branch involved
+at all), is strong evidence this specific real UMUDGA group's domains
+sit on an unstable decision boundary for *this training pipeline as a
+whole* — its synthetic generators never produce this group's specific
+shape (a narrow, low-entropy template with a short random prefix), so
+whether any given stochastic run's decision boundary happens to fall on
+the right side of those domains looks close to a coin flip, regardless
+of architecture or how many independently-trained models get averaged
+together.
+
+**Not shipped**, for the same reason regression gates exist: an
+aggregate-only view would have called this a win. Reverted
+`models/cnn_dga.pt` to the original shipped weights (confirmed
+byte-identical via SHA-256). The "more real, non-UMUDGA training data"
+idea (broadening `_load_real_dga_augment_domains()`'s sources, the same
+lever that worked for the flow autoencoder) was not attempted after
+this finding — three independent techniques now point at the same
+uninstrumented gap (this training pipeline has no real examples shaped
+like `umudga_group_07`), which more data volume elsewhere in the
+existing sources wouldn't fix; closing it for real would need sourcing
+domains matching that specific shape, not a broader ensemble or a
+bigger pile of the same kind of data already in hand.
+
+---
+
 ## What "goated" actually looks like, concretely
 
 Not a single bigger model — a system where:
