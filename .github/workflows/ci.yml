@@ -15,7 +15,7 @@ jobs:
       id-token: write  # required for cosign keyless signing (Fulcio/Rekor via this run's OIDC token)
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -310,7 +310,7 @@ jobs:
       packages: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Docker Buildx
         # BuildKit -- required for the per-Dockerfile
@@ -379,7 +379,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -569,7 +569,7 @@ jobs:
       DATABASE_URL: postgresql://drill_user:drill_pass@localhost:5432/tsoc_drill
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install postgresql-client (pg_dump/pg_restore/psql)
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
@@ -632,7 +632,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Python
         uses: actions/setup-python@v5
