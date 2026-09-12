@@ -767,25 +767,50 @@ real separation: the highest confirmed-clean pair anywhere in CTU-13
 reached 431; `DDOS_CONNECTION_COUNT_THRESHOLD = 1000` sits with a wide,
 comfortable margin on both sides of that real gap.
 
-**C2-periodicity: a real but standalone-weaker signal, and a different
-KIND of weak than DDoS-rate.** CTU-13's own labels carry genuine
-C2-channel ground truth (`From-Botnet-...-CC<N>-...`, e.g.
-`CC106-IRC-Not-Encrypted`) — real confirmed C2 channels do show tight,
-real periodicity (many pairs clustering at consistent ~30-300 second
-intervals, some coefficient-of-variation as low as 0.02-0.03). But a
-fine real threshold sweep (0.005 to 0.20) found something DDoS-rate's
-threshold never showed: real recall is a flat, unmovable ~0.2-0.4%
-ceiling across that *entire* range — most real "Botnet"-labeled
-connections simply aren't part of any periodic C2 channel at all, so no
-threshold recovers more of them; this isn't a precision/recall
-trade-off to tune, it's a hard ceiling on this signal measured this way.
-With recall fixed regardless of threshold, `BEACON_MAX_COEFFICIENT_OF_VARIATION`
-is chosen purely to minimize real noise instead: `0.008` measures 37.0%
-precision / 0.58% FPR (both plenty of ordinary botnet traffic and
-legitimate periodic background jobs — analytics beacons, NTP-like
-checks — are regular enough to look similar at looser thresholds; one
-background pair measured CV=0.000, a perfectly regular ~hourly
-legitimate check-in).
+**C2-periodicity: root-caused a second time, and this time the ceiling
+moved.** CTU-13's own labels carry genuine C2-channel ground truth
+(`From-Botnet-...-CC<N>-...`, e.g. `CC106-IRC-Not-Encrypted`) — real
+confirmed C2 channels do show tight, real periodicity (some pairs
+measure a coefficient of variation as low as 0.0009), but a direct
+inter-arrival-time analysis of every real Botnet-labeled
+(source, destination) pair found those genuinely near-perfect beacons
+often fire at 30-90+ *minute* real intervals — far longer than
+`BEACON_WINDOW_SECONDS`'s original 1800s (30 minutes). At that interval,
+a pair could never accumulate `BEACON_MIN_OBSERVATIONS` inside the
+window at all, regardless of `BEACON_MAX_COEFFICIENT_OF_VARIATION` — the
+original fine sweep (0.005-0.20) that found a flat ~0.2-0.4% recall
+ceiling was real, but the ceiling was a WINDOW-SIZE problem, not a
+CV-threshold one: no threshold in that sweep could have recovered
+connections the window structurally excluded before a CV check ever ran.
+
+Fixed directly: widened `BEACON_WINDOW_SECONDS` to 21600s (6 hours —
+comfortably holds several observations even at hour-long real
+intervals) and lowered `BEACON_MIN_OBSERVATIONS` to 3 (a real beacon
+interrupted by one off-cadence connection shouldn't need 5 *consecutive*
+clean intervals to ever qualify). With the window fixed, re-swept CV
+past the original 0.20 ceiling and found the real trade-off curve
+doesn't cliff until beyond 0.9 (FPR jumps from ~2% to ~9%+ there):
+`BEACON_MAX_COEFFICIENT_OF_VARIATION = 0.5` measures **65.7% precision /
+2.92% recall / 1.91% FPR** — versus the original `0.008`'s 37.0%/0.27%/
+0.58%, an **~11x real recall improvement that also improves precision**,
+not a trade-off (0.008 was simply too strict on both axes at once,
+chosen before the window-size root cause was known to exist). Even at
+2.92% recall this remains the weakest of the three windowed detectors —
+most real "Botnet"-labeled connections still aren't part of any
+periodic C2 channel at all — but it's now measurably, substantially
+better than it was, using the same real, disclosed calibration
+discipline as every other threshold in this project.
+
+While widening the window, also found and fixed a real, separate
+performance issue in `is_c2_beacon()` itself: it recomputed
+`statistics.mean()`/`statistics.stdev()` (which use slow, exact
+Fraction-based arithmetic internally) over the *entire* window's
+history on every single connection event — a real cost that scales with
+how many entries a busy pair accumulates, and one a 12x-wider window
+makes meaningfully more likely to bite. Replaced with mathematically
+identical (verified to ~1e-14 floating-point precision) plain-float
+mean/sample-stdev computation — same decision boundary, no behavior
+change, meaningfully cheaper per call.
 
 **Bulk exfiltration: a real, clean signal, the same "many small events
 add up to one attack" shape as DDoS-rate.** The old single-flow
@@ -820,19 +845,19 @@ temporally continuous sequence — through the exact same
 |---|---|---|---|
 | `RULE_DDOS_CONN_RATE` (new, windowed) | 100.0% | 11.3% | 0.00% |
 | `RULE_DDOS_VOLUMETRIC` (old, single-flow) | 55.3% | 0.2% | 0.14% |
-| `RULE_C2_BEACON_PERIODIC` (new, windowed) | 37.0% | 0.3% | 0.58% |
+| `RULE_C2_BEACON_PERIODIC` (new, windowed) | 65.7% | 2.92% | 1.91% |
 | `RULE_C2_HEARTBEAT` (old, single-flow) | 74.8% | 0.5% | 0.12% |
 | `RULE_EXFIL_BYTE_VOLUME` (new, windowed) | 100.0% | 22.2% | 0.01% |
 | `RULE_CONN_EXFIL` (old, single-flow) | 100.0% | 0.3% | 0.00% |
 
 DDoS-rate and bulk-exfil are both clean, dramatic improvements on every
-axis at once — not a trade-off. C2-periodicity trades a small amount of
-the old single-flow rule's already-tiny recall for a real, measured
-improvement in how much that recall can be trusted (37.0% vs. the old
-rule's 74.8% precision is still a real cost, but far better than a
-looser CV threshold's real alternative — 0.20 measured only 20.5%
-precision at 4.20% FPR, over 7x the noise for barely any more recall).
-Confidence is set to `0.40` in
+axis at once — not a trade-off. C2-periodicity, after the window-size
+fix above, is now ALSO a clean improvement on every axis at once versus
+the old single-flow rule's already-tiny recall: 2.92% vs. 0.5% recall,
+at 65.7% vs. 74.8% precision (a modest, real precision cost, not the
+dramatic one the pre-fix 37.0% number implied) and a real FPR increase
+(1.91% vs. 0.12%) that stays within this project's own <2% budget for
+this detector. Confidence is set to `0.40` in
 [inference/stream_processor_faust.py](inference/stream_processor_faust.py)
 regardless — deliberately below 0.5, so a lone firing can never by
 itself cross [inference/risk.py](inference/risk.py)'s

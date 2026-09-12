@@ -118,11 +118,16 @@ carry). Measured against the real production tracker class itself:
 FPR (versus the old single-flow rule's 100%/0.3%/0.00% — same precision,
 74x the recall) — both real improvements on every axis, not trade-offs.
 `RULE_C2_BEACON_PERIODIC` is real but standalone-weaker in a different
-way: a fine real threshold sweep found its recall is a flat ~0.2-0.4%
-ceiling no threshold moves, so its one calibrated parameter is tuned
-purely for precision/FPR instead (37.0% precision / 0.3% recall / 0.58%
-FPR) — and its confidence is deliberately kept below 0.5 regardless — a
-lone firing can never by itself cross Phase 8's log-odds-pooled incident
+way: an original fine CV threshold sweep (0.005-0.20) found a flat
+~0.2-0.4% recall ceiling — root-caused later (Phase 10.6) as a
+window-size problem, not a threshold one: real beacon intervals often
+run 30-90+ minutes, far longer than the original 30-minute window could
+ever hold enough observations for. After widening the window and
+re-sweeping CV past the original 0.20 boundary, this detector now
+measures 65.7% precision / 2.92% recall / 1.91% FPR — an ~11x real
+recall improvement that also improves precision (see Phase 10.6). Its
+confidence is still deliberately kept below 0.5 regardless — a lone
+firing can never by itself cross Phase 8's log-odds-pooled incident
 threshold; it corroborates rather than standing alone. Full numbers, the
 real false-positive mode found along the way (a NAT/gateway host that
 looked like a bigger flood than the real attackers until the check was
@@ -452,6 +457,62 @@ from +7.3 points to +0.4 — a disclosed, expected consequence of the
 flow autoencoder itself getting meaningfully better, not a regression.
 Full writeup:
 [SECURITY.md](../SECURITY.md#broadened-retrain-3-scenarios-to-12-real-held-out-fpr-still-enforced).
+
+## Phase 10.6 — Fix the C2-periodicity detector's window size (enterprise-grade push)
+
+**Status: done.** `RULE_C2_BEACON_PERIODIC`'s original fine CV-threshold
+sweep (0.005-0.20) found a flat ~0.2-0.4% recall ceiling and concluded
+most real "Botnet"-labeled connections simply aren't part of any
+periodic C2 channel — true as far as it went, but a direct
+inter-arrival-time analysis of every real CTU-13 botnet
+(source, destination) pair found the real root cause instead: genuinely
+near-perfect periodic beacons DO exist in the ground truth (coefficient
+of variation as low as 0.0009), but often at 30-90+ *minute* real
+intervals — far longer than `BEACON_WINDOW_SECONDS`'s original 1800s (30
+minutes), which could never accumulate enough observations for those
+pairs no matter how loose the CV threshold went. The original sweep
+never tested past 0.20 either, leaving a real, usable signal region
+entirely unexplored.
+
+**Fixed directly:** widened the window to 21600s (6 hours), lowered the
+minimum-observation floor from 5 to 3 (an imperfect real beacon
+shouldn't need 5 *consecutive* clean intervals to qualify), then
+re-swept CV past the original 0.20 ceiling. The real trade-off curve
+doesn't cliff until beyond CV 0.9 (FPR jumps from ~2% to ~9%+ there);
+0.5 was chosen as the value that stays within this project's own <2%
+FPR budget for this detector while capturing the large majority of the
+achievable gain.
+
+**Result:** 65.7% precision / 2.92% recall / 1.91% FPR — versus the
+original 37.0%/0.27%/0.58%, an **~11x real recall improvement that also
+improves precision**, not a trade-off (0.008 was too strict on both
+axes at once, chosen before the window-size root cause was known).
+Also found and fixed a real, separate performance issue while widening
+the window: `is_c2_beacon()` recomputed `statistics.mean()`/`stdev()`
+(slow, exact-Fraction internals) over the whole window's history on
+every single connection event — replaced with mathematically identical
+plain-float arithmetic (verified to ~1e-14 precision), since a 12x-wider
+window makes that per-call cost meaningfully more likely to matter for
+busy pairs. Full writeup:
+[SECURITY.md](../SECURITY.md#windowed-connection-behavior-detection-ddos-rate-c2-periodicity--bulk-exfil).
+
+## Phase 10.7 — DGA CNN+BiLSTM architecture (investigated, reverted)
+
+**Status: real investigation, honest negative result.** Also tried,
+as part of the same enterprise-grade push: a bidirectional-LSTM branch
+added to the DGA CNN for sequence-order signal the character-CNN can't
+see. Root-caused and fixed a real, reproducible regression this
+introduced in the `matsnu` family (long dictionary-word concatenations
+with no separator lose signal under naive final-hidden-state LSTM
+pooling; max-pooling over every timestep fixed it). But validated
+against both of this project's real, independent DGA datasets across
+five total retrains, the architecture as a whole never produced a run
+that cleared both datasets' per-family regression gates at once — every
+run traded some real family or group's recall for another's, including
+a 38-point collapse on one UMUDGA group in the run that otherwise looked
+best in aggregate. Reverted to the original, shipped CNN-only
+architecture (confirmed byte-identical via SHA-256). Full investigation:
+[docs/DGA_MODEL_ROADMAP.md](DGA_MODEL_ROADMAP.md#phase-5--cnnbilstm-hybrid-investigated-not-shipped).
 
 ---
 

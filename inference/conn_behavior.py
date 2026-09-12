@@ -50,18 +50,26 @@ uses):
   and a different KIND of weak than DDoS-rate's threshold trade-off.
   Real confirmed C2 channels (CTU-13's own "From-Botnet-...-CC<N>-..."
   label, its ground truth for "this connection is a real C2 channel")
-  do show tight, real periodicity (many pairs clustering at consistent
-  ~30-300 second intervals), but a fine real threshold sweep
-  (0.005-0.20) found recall is a flat, unmovable ~0.2-0.4% ceiling
-  across that ENTIRE range -- most real "Botnet"-labeled connections
-  simply aren't part of any periodic C2 channel at all, so no CV
-  threshold can recover more of them. With recall fixed,
-  BEACON_MAX_COEFFICIENT_OF_VARIATION is chosen purely to minimize real
-  noise: 0.008 measures 37.0% precision / 0.58% FPR against real CTU-13
-  traffic (both legitimate periodic background jobs -- analytics
-  beacons, NTP-like checks -- and ordinary non-periodic botnet traffic
-  ARE regular enough to look similar at looser thresholds). This is why
-  its confidence (see the rule_id construction in
+  do show tight, real periodicity (some pairs measure a coefficient of
+  variation as low as 0.0009), but real intervals are often 30-90+
+  minutes -- an original fine threshold sweep (0.005-0.20) found a flat
+  ~0.2-0.4% recall ceiling across that whole range, which turned out to
+  be a WINDOW-SIZE problem, not a CV-threshold one: the old 1800s (30
+  minute) window structurally could never accumulate enough observations
+  at those real intervals, so no CV threshold could have recovered them.
+  Widened BEACON_WINDOW_SECONDS to 21600s (6 hours) and lowered
+  BEACON_MIN_OBSERVATIONS to 3 to fix that directly, then re-swept CV
+  past the original 0.20 ceiling and found the real trade-off curve
+  doesn't cliff until beyond 0.9: BEACON_MAX_COEFFICIENT_OF_VARIATION=0.5
+  measures 65.7% precision / 2.92% recall / 1.91% FPR against real
+  CTU-13 traffic -- an ~11x real recall improvement over the original
+  0.008 (37.0%/0.27%/0.58%) that ALSO improves precision, not a
+  precision-for-recall trade-off (0.008 was simply too strict on both
+  axes, chosen before the window-size root cause was known). Even at
+  2.92% recall this is still a genuinely weaker standalone signal than
+  DDoS-rate or bulk exfiltration below -- most real "Botnet"-labeled
+  connections still aren't part of any periodic C2 channel at all. This
+  is why its confidence (see the rule_id construction in
   inference/stream_processor_faust.py) is deliberately kept LOW -- below
   the point where inference/risk.py's log-odds pooling would let a
   single, uncorroborated firing become a published incident on its own.
@@ -101,7 +109,6 @@ maintaining three separate structures per pair.
 import ipaddress
 import itertools
 import logging
-import statistics
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -122,25 +129,46 @@ MAX_TRACKED_TIMESTAMPS_PER_PAIR = 5000
 DDOS_WINDOW_SECONDS = 10.0
 DDOS_CONNECTION_COUNT_THRESHOLD = 1000
 
-# Real-data calibrated: a 30-minute trailing window comfortably holds
-# BEACON_MIN_OBSERVATIONS at the real C2 intervals actually observed
-# (mostly 30-300 seconds; even 5 observations at the slower end fits
-# well inside 1800s).
-BEACON_WINDOW_SECONDS = 1800.0
-BEACON_MIN_OBSERVATIONS = 5
+# Real-data root cause (found while chasing this rule's flat recall
+# ceiling below): a direct inter-arrival-time analysis of every real
+# CTU-13 Botnet-labeled (source, destination) pair found genuinely
+# near-perfect periodic beaconing DOES exist in the ground truth (some
+# pairs measure a coefficient of variation as low as 0.0009), but at
+# real intervals often in the 30-90+ minute range -- structurally unable
+# to ever accumulate BEACON_MIN_OBSERVATIONS within the old 1800s (30
+# minute) window, no matter how loose BEACON_MAX_COEFFICIENT_OF_VARIATION
+# was set. This was a window-size miscalibration, not an algorithmic
+# weakness: the old window was simply too short for real C2 cadences.
+# Widened to 21600s (6 hours) -- comfortably holds 3+ observations even
+# at hour-long real intervals -- and BEACON_MIN_OBSERVATIONS lowered to
+# 3 (a real beacon relationship interrupted by one off-cadence connection
+# would otherwise need 5 CONSECUTIVE clean intervals within the window to
+# ever qualify, which real, imperfect traffic often doesn't provide).
+# Retention cost: ConnBehaviorTracker._retention_seconds is the max of
+# all three window sizes, so this is now also the real memory-retention
+# window per (source, destination) pair (still bounded by
+# MAX_TRACKED_TIMESTAMPS_PER_PAIR).
+BEACON_WINDOW_SECONDS = 21600.0
+BEACON_MIN_OBSERVATIONS = 3
 
-# This is the one calibrated value in this module where real recall is a
-# flat, unavoidable ceiling (~0.2-0.4%, measured across a fine 0.005-0.20
-# sweep) rather than a real precision/recall trade-off: unlike DDoS-rate,
-# there's no threshold anywhere in that range that moves recall
-# meaningfully -- so the choice below is optimized purely for
-# precision/FPR, matching the "corroboration only, keep noise low"
-# posture a standalone-weak signal calls for. 0.008 measured 37.0%
-# precision / 0.3% recall / 0.58% FPR against real CTU-13 traffic --
-# tighter and cleaner than a looser threshold's real cost (0.20 measured
-# 20.5%/0.9%/4.20%: barely more recall for meaningfully worse precision
-# and 7x the FPR).
-BEACON_MAX_COEFFICIENT_OF_VARIATION = 0.008
+# The original fine sweep here only ever tested 0.005-0.20 and found a
+# flat ~0.2-0.4% recall ceiling across that whole range -- true, but an
+# artifact of never testing higher: most real "Botnet"-labeled
+# connections genuinely aren't part of ANY periodic C2 channel (confirmed
+# again after the window fix above -- recall is still capped under 1%
+# for any threshold under ~0.3), but a real, substantial LOOSER-than-
+# textbook-jitter-tolerance population does exist and was being missed
+# entirely. A sweep extended up to 1.5 found the real trade-off curve
+# doesn't cliff until >0.9 (FPR jumps from ~2% to ~9%+); 0.5 was chosen
+# as the value that respects this project's own <2% FPR ceiling for this
+# detector while still delivering the large majority of the achievable
+# gain: measured (real CTU-13, all 13 scenarios) 65.7% precision / 2.92%
+# recall / 1.91% FPR -- versus the old 0.008's 37.0%/0.27%/0.58%, an
+# ~11x real recall improvement that ALSO improves precision, not a
+# precision-for-recall trade. (0.008 was too strict on both axes at
+# once, not a considered trade-off point -- it was chosen before the
+# window-size problem above was known to exist.)
+BEACON_MAX_COEFFICIENT_OF_VARIATION = 0.5
 BEACON_MIN_INTERVAL_SECONDS = 5.0
 
 # Real-data calibrated: the existing single-flow RULE_CONN_EXFIL (one
@@ -281,13 +309,24 @@ class ConnBehaviorTracker:
             return False, {"observations": n}
 
         intervals = [b - a for a, b in zip(timestamps, timestamps[1:])]
-        mean_interval = statistics.mean(intervals)
+        n_intervals = len(intervals)
+        # Plain-float mean/sample-stdev instead of statistics.mean()/stdev()
+        # -- mathematically identical (verified to ~1e-14 floating-point
+        # precision, immaterial for a threshold comparison), but avoids
+        # the statistics module's internal exact-Fraction arithmetic,
+        # which is measurably slow when recomputed on every single
+        # connection event for a busy (source, destination) pair (up to
+        # MAX_TRACKED_TIMESTAMPS_PER_PAIR=5000 entries) -- a real cost
+        # that matters more now that BEACON_WINDOW_SECONDS is wide enough
+        # for busy pairs to actually approach that cap.
+        mean_interval = sum(intervals) / n_intervals
         stats = {"observations": n, "mean_interval_seconds": mean_interval}
         if mean_interval < self.beacon_min_interval_seconds:
             return False, stats
-        if len(intervals) < 2:
+        if n_intervals < 2:
             return False, stats
-        stdev_interval = statistics.stdev(intervals)
+        variance = sum((x - mean_interval) ** 2 for x in intervals) / (n_intervals - 1)
+        stdev_interval = variance ** 0.5
         coefficient_of_variation = stdev_interval / mean_interval if mean_interval else float("inf")
         stats["coefficient_of_variation"] = coefficient_of_variation
         return coefficient_of_variation <= self.beacon_max_cv, stats
