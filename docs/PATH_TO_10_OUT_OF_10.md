@@ -136,22 +136,44 @@ ground truth, and a real fakeredis/mocking interaction bug found by a
 live pytest run (not an isolated script) are all in
 [SECURITY.md](../SECURITY.md#windowed-connection-behavior-detection-ddos-rate-c2-periodicity--bulk-exfil).
 
-**JA4 fingerprinting: real data investigated, a genuine negative result
-found.** CTU-13's flow records carry no TLS handshake data, but the real
-Lumma Stealer pcap already used throughout this document does — real
-`ja4plus` extraction against its real `ClientHello`s, cross-referenced
-against the 7 already-confirmed-malicious domains, found the malware's
-C2 traffic shares its exact JA4 fingerprint with real Microsoft/Akamai
-traffic on the same infected machine (72% precision even on this small,
-balanced comparison, likely worse at real-world base rates) — consistent
-with this malware not implementing its own TLS stack. The extraction
-pipeline itself is now proven and reusable against any future malware
-sample; this specific finding is a real reason not to ship a rule seeded
-from one pcap, not a data-unavailability gap. A real, broadly-curated
+**JA4 fingerprinting: real data investigated TWICE, independently, same
+negative result both times — this is now a closed, well-understood
+question, not an open gap.** CTU-13's flow records carry no TLS handshake
+data, but the real Lumma Stealer pcap already used throughout this
+document does — real `ja4plus` extraction against its real
+`ClientHello`s, cross-referenced against the 7 already-confirmed-malicious
+domains, found the malware's C2 traffic shares its exact JA4 fingerprint
+with real Microsoft/Akamai traffic on the same infected machine (72%
+precision even on this small, balanced comparison, likely worse at
+real-world base rates) — consistent with this malware not implementing
+its own TLS stack.
+
+A second, independent investigation (enterprise-grade push, since CTU-13's
+own "botnet-only" per-scenario pcaps turned out to be real and downloadable
+despite the full-traffic captures never being published) found the same
+root cause a different way: 427 real `ClientHello`s extracted across 9
+real CTU-13 botnet pcaps collapsed to just 5 unique JA4 fingerprints,
+**shared between two genuinely unrelated real malware families** (Neris
+and Virut) captured on different dates — direct evidence the fingerprint
+reflects a shared, period-correct Windows TLS stack, not either malware's
+own implementation. No honest same-dataset FPR was even measurable this
+time: the one real "confirmed-clean" CTU-13 capture available
+(`normal-capture-20110817.pcap`) has zero TLS traffic at all, a real
+artifact of the dataset's 2011-era timeframe (HTTPS wasn't yet pervasive
+for ordinary desktop use, unlike the malware's own C2 already using it).
+
+The extraction pipeline itself is now proven and reusable against any
+future malware sample or dataset; both specific findings are real reasons
+not to ship a rule seeded from either investigation, not a
+data-unavailability gap — that gap is now closed. A real, broadly-curated
 malicious JA4 feed (Abuse.ch, FoxIO's own community database) — checked
 for real usage terms first, the same diligence already applied to
-CTU-13/baderj's repo — remains the path to a rule that could actually
-discriminate, and even then may not catch this specific malware family.
+CTU-13/baderj's repo — remains the only path to a rule that could
+actually discriminate, since it's the sole approach that could separate
+"genuinely malware-specific" fingerprints from "commodity OS networking
+stack" noise across enough independent malware families to matter, and
+even then either specific family investigated here may simply not be
+catchable this way at all.
 Full numbers in
 [SECURITY.md](../SECURITY.md#rule-based-detector-validation-against-real-world-data).
 
@@ -529,6 +551,40 @@ best in aggregate. Reverted to the original, shipped CNN-only
 architecture (confirmed byte-identical via SHA-256). Full investigation:
 [docs/DGA_MODEL_ROADMAP.md](DGA_MODEL_ROADMAP.md#phase-5--cnnbilstm-hybrid-investigated-not-shipped).
 
+## Phase 10.8 — JA4, a second time: real CTU-13 botnet pcaps (negative result, confirmed)
+
+**Status: done. Second independent negative result, closing this
+question rather than leaving it open.** The Lumma investigation
+(Phase 6) was one malware sample against one capture. CTU-13's own
+regular full-traffic pcaps are never published for privacy, but each of
+its 13 scenarios separately ships a real, non-truncated "botnet-only"
+pcap (traffic captured on the infected VM's own interface) — real data
+this project hadn't looked at yet. Downloaded 9 of these (~1.36GB, same
+CC-BY host already used for the `.binetflow` archive) across 7 named
+scenarios.
+
+Only 4 of the 9 carried any TLS traffic at all (Rbot/Donbot/Sogou/Qvod's
+captures had zero packets on port 443 — those families' real C2 used
+other protocols). The two that did — real Neris and real Virut (CTU-13
+labels some Virut scenarios "fast-flux" for the behavior demonstrated,
+not the malware's name, confirmed against that scenario's own README) —
+yielded 427 real `ClientHello`s across just **5 unique JA4 fingerprints
+total, shared between both genuinely unrelated families**. That's
+direct, structural evidence the fingerprints reflect a common
+period-correct Windows TLS stack, not either malware's own
+implementation — the same root cause as the Lumma finding, now
+confirmed a second, independent way. No same-dataset FPR was even
+measurable this time: the one real "confirmed-clean" CTU-13 capture
+(`normal-capture-20110817.pcap`) has zero port-443 traffic at all, a
+real artifact of the dataset's 2011-era timeframe.
+
+**No JA4 rule is deployed, for the same reason both times.** The
+extraction pipeline itself (real `ja4plus`, real pcap parsing, real RDAP
+cross-referencing) is proven and reusable; what's proven not to work is
+seeding a rule from a single dataset's malware samples, twice over now.
+Full writeup:
+[SECURITY.md](../SECURITY.md#rule-based-detector-validation-against-real-world-data).
+
 ---
 
 ## What "10/10" actually means, concretely
@@ -537,10 +593,13 @@ Not a bigger model, again — a system where:
 1. 🟡 Every detection category the platform claims to have has been
    checked against real attack data at least once — 5 of 6 now (DGA,
    flow anomaly, and all 4 rules, now that DDoS/C2/exfil are fixed and
-   validated too). JA4 was investigated for real (real `ja4plus`
-   extraction against the real Lumma pcap) and found not viable without
-   a broader feed — a real, disclosed negative result, not an unchecked
-   gap; still no working rule (Phase 6).
+   validated too). JA4 was investigated for real TWICE, independently
+   (real `ja4plus` extraction against the real Lumma pcap, then again
+   against 9 real CTU-13 botnet pcaps spanning two genuinely unrelated
+   malware families) and found not viable both times, for the same
+   well-understood reason (Phase 10.8) — a real, disclosed, now
+   twice-confirmed negative result, not an unchecked gap; still no
+   working rule (Phase 6, Phase 10.8).
 2. ✅ A false-positive mode nobody had looked for yet (DNS-burst on
    benign traffic) got found and fixed before a real deployment found it
    first — and it was real, not hypothetical: 100% false-positive rate

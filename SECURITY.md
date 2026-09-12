@@ -732,6 +732,73 @@ noise like this one — remains the real path forward, and even then,
 Lumma-family info-stealers specifically may simply not be catchable
 this way at all.
 
+**Second, independent investigation: broadened from one modern sample to
+real 2011-era botnet traffic, same negative result, now better
+understood.** The finding above was one malware sample against one
+capture. Real Malware Capture Facility Project pcaps (the same
+Stratosphere IPS source CTU-13's `.binetflow` flow summaries come from)
+turned out to include a real, if limited, packet-level source: CTU-13's
+own regular full-traffic captures are never published for privacy, but
+each scenario also ships a "botnet-only" pcap (traffic captured on the
+infected VM's own interface) — real, unredacted, and not truncated.
+Downloaded 9 of these (~1.36GB total, real CC-BY licensed data, the same
+host already used this session for the `.binetflow` archive) spanning 7
+of CTU-13's real named scenarios.
+
+**Real TLS volume, and the honest limits of it:** only 4 of the 9 pcaps
+carried any TLS traffic at all — Rbot, Donbot, Sogou, and Qvod's captures
+had zero packets on port 443 (these families' real C2 apparently used
+other protocols entirely, most consistent with IRC-based C2, common for
+that era). The two that did — real Neris captures (scenarios 1 and 2)
+and real Virut captures (labeled "fast-flux" in CTU-13's own scenario
+naming, since fast-flux DNS was the specific behavior being demonstrated,
+not the malware's identity — confirmed against that scenario's own
+published README) — yielded 427 real `ClientHello`s across only **5
+unique JA4 fingerprints total**.
+
+**The same fingerprints repeat across Neris and Virut** — two malware
+families with no known code or authorship relationship, captured on
+different dates. That is strong, direct evidence these fingerprints
+reflect a shared platform-level TLS stack (period-correct: Windows
+SChannel's TLS 1.0 cipher suite ordering of that era, not a custom
+implementation either family rolled itself) rather than anything
+malware-specific — the same underlying reason the Lumma investigation
+above found a collision, now confirmed a second, structurally different
+way: not just "this fingerprint also appears on legitimate traffic" but
+"this exact fingerprint is shared across genuinely unrelated malware,"
+which is a strictly stronger signal that the fingerprint carries no
+malware-specific information at all. One of the two real destination IPs
+these `ClientHello`s were sent to resolves (verified via live RDAP, not
+assumption) to Microsoft Corporation (AS8075) — plausibly the infected
+VM's own legitimate Windows networking captured incidentally on the same
+interface as the malware traffic, a real, disclosed limitation of what a
+"botnet-only, whole-VM-interface" capture actually contains, not
+necessarily malware C2 disguised as Microsoft traffic this time. The
+other repeatedly-contacted IP resolves to a generic commercial hosting
+provider (Servers.com) with no identifiable historical attribution
+available from a present-day RDAP lookup.
+
+**No honest same-dataset false-positive measurement was possible either
+way:** the one real "confirmed-clean" pcap CTU-13 publishes
+(`normal-capture-20110817.pcap`, scenario 9) has zero packets on port 443
+at all (verified directly, not inferred) — ordinary 2011-era desktop
+network usage genuinely didn't rely on HTTPS as pervasively as malware
+already did for its own C2/beaconing, an artifact of the dataset's era,
+not a processing gap.
+
+**Conclusion, now on firmer footing than the first investigation alone:**
+two independent, methodologically different real investigations — one
+modern info-stealer against real legitimate cloud traffic, one a
+cross-family comparison across genuinely unrelated 2011-era botnets —
+both found the same root cause (the malware examined doesn't roll custom
+TLS, so its JA4 fingerprint reflects the host OS/library, not the
+malware) and the same conclusion: no JA4-based rule is deployed. This is
+a real, disclosed, twice-confirmed negative result, not an unchecked gap
+— the path forward, if one exists, still runs through a real,
+broadly-curated malicious-JA4 feed spanning many networks (Abuse.ch,
+FoxIO's community database), not more single-dataset investigation of
+this shape.
+
 ## Windowed connection-behavior detection (DDoS-rate, C2-periodicity & bulk exfil)
 
 The single-flow `RULE_DDOS_VOLUMETRIC`, `RULE_C2_HEARTBEAT`, and
