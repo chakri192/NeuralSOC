@@ -2,15 +2,18 @@
 
 Honest starting point, not a sales pitch: two of six detection categories
 (DGA, flow anomaly) are now validated against real attack data and hold up
-well. Of the other four, three now have real numbers too — one
-(Reconnaissance) genuinely works, three others (DDoS, C2, Exfil) barely
-fire on real traffic. Detectors now combine into one calibrated
-per-incident score instead of firing independently, and that combination
-is itself measured against real data: 53.7% recall at 98.8% precision,
-beating the best single detector alone. The flow autoencoder and DGA CNN
+well. Reconnaissance genuinely works; DDoS and C2 Beaconing were fixed
+with a genuinely different, windowed detector once single-flow tuning
+proved structurally incapable; Data Exfiltration remains a real,
+disclosed gap. Detectors now combine into one calibrated per-incident
+score instead of firing independently, and that combination is itself
+measured against real data: all six detectors together (including the
+two windowed ones) catch 52.1% of real botnet connections at 98.8%
+precision — a real +6.9-point improvement over the best single detector
+alone (45.1%, the flow autoencoder). The flow autoencoder and DGA CNN
 are now each validated against a second, independent real dataset too —
-see Phase 10 — though the three weak rules (DDoS, C2, Exfil) still only
-have one real dataset (CTU-13) behind them.
+see Phase 10 — though Data Exfiltration still only has one real dataset
+(CTU-13) behind it.
 
 Ordered by how directly each phase closes a *named* gap from the honest
 assessment above, cheapest first. CTU-13 (already downloaded, CC-BY,
@@ -63,7 +66,9 @@ for the full writeup.
 
 ## Phase 6 — Real-world validation for the other 4 detection categories
 
-**Status: done for 3 of 4; JA4 remains genuinely blocked on new data.**
+**Status: Reconnaissance validated; DDoS and C2 Beaconing validated AND
+fixed with a genuinely different detector; Data Exfiltration validated
+but still a real, disclosed gap; JA4 remains blocked on new data.**
 
 Ran `scripts/evaluate_rules_against_real_data.py` (the real
 `evaluate_rules()` production code, not a reimplementation) against
@@ -87,14 +92,44 @@ botnet traffic dominated by C2/recon. Full numbers and the Argus-state
 translation this needed (with its own empirical verification) are in
 [SECURITY.md](../SECURITY.md#rule-based-detector-validation-against-real-world-data).
 
-**Deliberately not retuned.** Unlike the DGA/flow-model fixes, these
-three rules have no held-out real test set to validate a "fix" against
-— adjusting thresholds using only the same data that measured the gap
-would be circular, and would compound the single-dataset risk Phase 10
-already names. Recorded as a disclosed limitation, not silently patched.
-If this gets picked up: source a *second* independent real dataset first
-(Phase 10), then tune against one and validate against the other, the
-same held-out discipline the DGA benchmark already uses.
+**DDoS and C2 Beaconing: fixed, not retuned — the real gap was
+structural.** An exhaustive real threshold sweep (not a quick guess)
+found no single-flow threshold could ever fix these two: a real
+volumetric flood is many connections arriving fast, and real C2
+beaconing is a regular interval between many connections — neither is a
+property any one flow's own fields encode. Built
+`inference/conn_behavior.py`'s `ConnBehaviorTracker` instead — the same
+"stateful window instead of a single-event check" fix Phase 5's DNS
+burst detector already uses — calibrated against the real, raw CTU-13
+`.binetflow` files (real source/destination IPs and timestamps, which
+the sampled `real_rule_validation_dataset.csv` extract above doesn't
+carry). Measured against the real production tracker class itself:
+`RULE_DDOS_CONN_RATE` reaches 100% precision / 11.3% recall / 0.00% FPR
+(versus the old single-flow rule's 55.3%/0.2%/0.14% — a real improvement
+on every axis). `RULE_C2_BEACON_PERIODIC` is real but standalone-weaker
+in a different way: a fine real threshold sweep found its recall is a
+flat ~0.2-0.4% ceiling no threshold moves, so its one calibrated
+parameter is tuned purely for precision/FPR instead (37.0% precision /
+0.3% recall / 0.58% FPR) — and its confidence is deliberately kept below
+0.5 regardless — a lone firing can never by itself cross Phase 8's
+log-odds-pooled incident threshold; it corroborates rather than
+standing alone. Full numbers, the real false-positive mode found
+along the way (a NAT/gateway host that looked like a bigger flood than
+the real attackers until the check was scoped to a
+(source, destination) pair), and CTU-13's own real C2-channel ground
+truth are in
+[SECURITY.md](../SECURITY.md#windowed-connection-behavior-detection-ddos-rate--c2-periodicity).
+
+**Data Exfiltration: still not fixed.** Unlike DDoS/C2, no genuinely
+different detector shape has been built for this one yet, and an
+exhaustive threshold sweep found real recall caps around 1.5% before
+precision collapses — bulk-exfiltration-shaped traffic is simply rare in
+this dataset's real botnet behavior. Retuning its threshold using only
+this one dataset would be circular, and would compound the
+single-dataset risk Phase 10 already names. If this gets picked up:
+source a *second* independent real dataset first (Phase 10), then tune
+against one and validate against the other, the same held-out discipline
+the DGA benchmark already uses.
 
 **JA4 fingerprinting is still blocked on new data sourcing** — CTU-13's
 flow records carry no TLS handshake data at all. Needs a real malicious
@@ -137,13 +172,25 @@ DNS burst, observed live this session) inflate risk linearly.
 **Measured against real data**
 (`scripts/evaluate_composite_scoring_against_real_data.py`, real CTU-13
 flows through the flow autoencoder + all 4 rules): combining detectors
-catches **53.7% of real botnet flows at 98.8% precision**, versus 48.5%
-for the best single detector alone — this is the "recall and precision
+originally caught 53.7% of real botnet flows at 98.8% precision, versus
+48.5% for the best single detector alone — the "recall and precision
 improve together" promise actually delivered, not just reframed. Also
 surfaced a genuinely new finding along the way: the flow autoencoder's
 headline 99.8% recall (Phase 3) is against one held-out scenario; across
-all 13 real scenarios it catches only ~37% alone, a materially more
-honest picture that directly motivates Phase 10 below.
+all 13 real scenarios it catches only ~37-45% alone (the exact figure
+moves with dataset sampling — see below), a materially more honest
+picture that directly motivated Phase 10.
+
+**Re-measured after Phase 10's own DDoS/C2 work folded in two more
+detectors** (`RULE_DDOS_CONN_RATE`, `RULE_C2_BEACON_PERIODIC`) against a
+new, comprehensive, uncapped real dataset
+(`benchmarks/real_composite_dataset.csv`) carrying every field all six
+detectors need: **52.1% recall at 98.8% precision**, a real +6.9-point
+improvement over the best single detector alone (45.1%, the flow
+autoencoder). The recall figure moved from 53.7% for a disclosed,
+non-regression reason — it now reflects the full, naturally-weighted
+real CTU-13 population instead of an equal-per-scenario capped sample —
+not because corroboration stopped working.
 
 **A second real bug, found while wiring this in:**
 `IncidentCorrelator.add_alert()`'s `threshold` parameter had been dead
@@ -324,14 +371,17 @@ catch a regression the same way as every other gate in this document.
 See [SECURITY.md](../SECURITY.md#model-validation-against-real-world-data)
 for the full writeup.
 
-**Still open**: retuning Phase 6's three weak rules
-(`RULE_DDOS_VOLUMETRIC`, `RULE_C2_HEARTBEAT`, `RULE_CONN_EXFIL` — all
-0.2-0.5% recall). This was originally blocked on sourcing a second
-dataset to retune against (retuning against the same CTU-13 data that
-measured the gap would be circular, not a real fix) — that gate now
-exists on the DGA side, but the equivalent for CTU-13 network-flow rules
-would need a second, independent flow-based intrusion dataset (not
-CTU-13 again), which hasn't been sourced yet.
+**Still open**: retuning `RULE_CONN_EXFIL` (0.3% recall). DDoS and C2
+Beaconing turned out not to need a second dataset at all — Phase 6's own
+update above found their real gap was structural (a single flow can't
+encode a multi-connection pattern), fixed with a windowed detector
+instead of a retune. Exfiltration's gap looks different: an exhaustive
+sweep found real recall caps around 1.5% regardless of threshold,
+consistent with bulk-exfiltration-shaped traffic simply being rare in
+CTU-13's real botnet behavior — retuning against the same data that
+measured this would be circular, so this one still needs a second,
+independent flow-based intrusion dataset (not CTU-13 again) before any
+real fix can be validated.
 
 ---
 
@@ -355,8 +405,9 @@ Not a bigger model, again — a system where:
 4. ✅ An incident's reported confidence reflects how many independent
    signals corroborate it, not just whichever detector happened to fire
    first — and combining them measurably catches more real attacks
-   (53.7% vs. 48.5% recall for the best single detector), not just a
-   reshuffled number (Phase 8).
+   (52.1% vs. 45.1% recall for the best single detector, now across all
+   six detectors including the windowed DDoS-rate/C2-periodicity pair),
+   not just a reshuffled number (Phase 8).
 5. ✅ The one remaining hard problem (dictionary DGA) has a built,
    live-verified answer, not a vague "needs more research" or an untested
    industry generalization — real RDAP lookups against the real Lumma
@@ -379,11 +430,9 @@ Not a bigger model, again — a system where:
    different benign source — real evidence today's numbers aren't an
    artifact of any one benchmark's specific construction (Phase 10).
 
-Phases 5, 7, 8, 9, and 10 are done (6 partially — item 6's flow-
-autoencoder/rules piece is done, JA4 fingerprinting from Phase 6 remains
-the one still-unchecked detection category). What's left beyond that:
-retuning Phase 6's three weak rules (`RULE_DDOS_VOLUMETRIC`,
-`RULE_C2_HEARTBEAT`, `RULE_CONN_EXFIL`) needs a second, independent
-network-flow intrusion dataset (not CTU-13 again, for the same
-circularity reason the DGA retune avoided reusing its own first
-dataset) — not yet sourced.
+Phases 5, 7, 8, 9, and 10 are done (6 partially — Reconnaissance and now
+DDoS/C2 Beaconing are done, JA4 fingerprinting remains blocked on new
+data, and Data Exfiltration remains the one real, unfixed rule gap).
+What's left: `RULE_CONN_EXFIL` needs a second, independent network-flow
+intrusion dataset (not CTU-13 again, for the same circularity reason the
+DGA retune avoided reusing its own first dataset) — not yet sourced.

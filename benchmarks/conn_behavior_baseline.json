@@ -1,0 +1,14 @@
+{
+  "RULE_C2_BEACON_PERIODIC": {
+    "accuracy": 0.44290470968782547,
+    "fpr": 0.005804358478982083,
+    "precision": 0.36953196696237384,
+    "recall": 0.002716444156609302
+  },
+  "RULE_DDOS_CONN_RATE": {
+    "accuracy": 0.5067825156262308,
+    "fpr": 0.0,
+    "precision": 1.0,
+    "recall": 0.11296404984045388
+  }
+}

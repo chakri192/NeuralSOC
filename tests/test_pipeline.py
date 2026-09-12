@@ -1436,6 +1436,122 @@ class TestSOCPipelineSecurity(unittest.TestCase):
 
         asyncio.run(_run())
 
+    def test_conn_behavior_tracker_records_every_conn_event(self):
+        """Every real connection must feed the windowed rate/periodicity
+        tracker, regardless of whether either check fires -- otherwise a
+        real flood or beacon spread across many events would never
+        accumulate enough state to be detected at all."""
+        import inference.stream_processor_faust as sp
+
+        event = {"event_type": "conn", "id.orig_h": "10.0.0.5", "id.resp_h": "10.0.0.9", "uid": "C-REC"}
+
+        async def _run():
+            with patch.object(sp, "extract_features", return_value={}), \
+                 patch.object(sp, "evaluate_rules", return_value=[]), \
+                 patch.object(sp.flow_engine, "score", return_value=(False, 0.0, 1.0)), \
+                 patch.object(sp.conn_behavior_tracker, "record_connection", return_value=None) as record_connection, \
+                 patch.object(sp.conn_behavior_tracker, "is_ddos_volumetric", return_value=(False, {})), \
+                 patch.object(sp.conn_behavior_tracker, "is_c2_beacon", return_value=(False, {})), \
+                 patch.object(sp, "_send_dlq_safely", new=AsyncMock()):
+                await sp.process_traffic.fun(self._fake_stream([event]))
+
+            record_connection.assert_called_once()
+            call_args = record_connection.call_args.args
+            self.assertEqual(call_args[0], "10.0.0.5")
+            self.assertEqual(call_args[1], "10.0.0.9")
+
+        asyncio.run(_run())
+
+    def test_conn_behavior_publishes_a_high_confidence_ddos_alert_on_a_real_flood(self):
+        """RULE_DDOS_CONN_RATE is real-data calibrated to 100% precision
+        at its threshold (docs/PATH_TO_10_OUT_OF_10.md's Phase 10-adjacent
+        DDoS/C2 investigation) -- confidence reflects that."""
+        import inference.stream_processor_faust as sp
+
+        event = {"event_type": "conn", "id.orig_h": "10.0.0.5", "id.resp_h": "10.0.0.9", "uid": "C-DDOS"}
+        flood_stats = {"connection_count": 4243, "window_seconds": 10.0}
+
+        async def _run():
+            with patch.object(sp, "extract_features", return_value={}), \
+                 patch.object(sp, "evaluate_rules", return_value=[]), \
+                 patch.object(sp.flow_engine, "score", return_value=(False, 0.0, 1.0)), \
+                 patch.object(sp.conn_behavior_tracker, "record_connection", return_value=None), \
+                 patch.object(sp.conn_behavior_tracker, "is_ddos_volumetric", return_value=(True, flood_stats)), \
+                 patch.object(sp.conn_behavior_tracker, "is_c2_beacon", return_value=(False, {})), \
+                 patch.object(sp, "validate_alert", return_value=(True, None)), \
+                 patch.object(sp.enricher, "enrich", new=AsyncMock(side_effect=lambda a: a)), \
+                 patch.object(sp.alerts_topic, "send", new=AsyncMock(return_value=None)) as alerts_send, \
+                 patch.object(sp.correlator, "add_alert", return_value=None), \
+                 patch.object(sp, "_send_dlq_safely", new=AsyncMock()):
+                await sp.process_traffic.fun(self._fake_stream([event]))
+
+            alerts_send.assert_awaited_once()
+            sent_alert = alerts_send.call_args.kwargs["value"]
+            self.assertEqual(sent_alert["model_name"], "RULE_DDOS_CONN_RATE")
+            self.assertEqual(sent_alert["threat_class"], "DDoS")
+            self.assertEqual(sent_alert["confidence_score"], 0.95)
+            self.assertEqual(sent_alert["evidence"]["connection_count"], 4243)
+            self.assertEqual(sent_alert["evidence"]["destination_ip"], "10.0.0.9")
+
+        asyncio.run(_run())
+
+    def test_conn_behavior_publishes_a_low_confidence_beacon_alert(self):
+        """RULE_C2_BEACON_PERIODIC is a real but standalone-weak signal
+        (~12-19% real precision alone, per inference/conn_behavior.py's
+        module docstring) -- confidence is deliberately kept below 0.5 so
+        a lone firing can never by itself cross
+        inference/risk.py's calculate_risk_score() incident threshold;
+        it's meant to corroborate, not stand alone."""
+        import inference.stream_processor_faust as sp
+
+        event = {"event_type": "conn", "id.orig_h": "10.0.0.5", "id.resp_h": "203.0.113.9", "uid": "C-BEACON"}
+        beacon_stats = {"observations": 7, "mean_interval_seconds": 60.1, "coefficient_of_variation": 0.05}
+
+        async def _run():
+            with patch.object(sp, "extract_features", return_value={}), \
+                 patch.object(sp, "evaluate_rules", return_value=[]), \
+                 patch.object(sp.flow_engine, "score", return_value=(False, 0.0, 1.0)), \
+                 patch.object(sp.conn_behavior_tracker, "record_connection", return_value=None), \
+                 patch.object(sp.conn_behavior_tracker, "is_ddos_volumetric", return_value=(False, {})), \
+                 patch.object(sp.conn_behavior_tracker, "is_c2_beacon", return_value=(True, beacon_stats)), \
+                 patch.object(sp, "validate_alert", return_value=(True, None)), \
+                 patch.object(sp.enricher, "enrich", new=AsyncMock(side_effect=lambda a: a)), \
+                 patch.object(sp.alerts_topic, "send", new=AsyncMock(return_value=None)) as alerts_send, \
+                 patch.object(sp.correlator, "add_alert", return_value=None), \
+                 patch.object(sp, "_send_dlq_safely", new=AsyncMock()):
+                await sp.process_traffic.fun(self._fake_stream([event]))
+
+            alerts_send.assert_awaited_once()
+            sent_alert = alerts_send.call_args.kwargs["value"]
+            self.assertEqual(sent_alert["model_name"], "RULE_C2_BEACON_PERIODIC")
+            self.assertEqual(sent_alert["threat_class"], "C2 Beaconing")
+            self.assertEqual(sent_alert["confidence_score"], 0.40)
+            self.assertLess(sent_alert["confidence_score"], 0.5)
+            self.assertEqual(sent_alert["evidence"]["observations"], 7)
+
+        asyncio.run(_run())
+
+    def test_conn_behavior_neither_alert_fires_on_ordinary_traffic(self):
+        import inference.stream_processor_faust as sp
+
+        event = {"event_type": "conn", "id.orig_h": "10.0.0.5", "id.resp_h": "10.0.0.9", "uid": "C-ORDINARY"}
+
+        async def _run():
+            with patch.object(sp, "extract_features", return_value={}), \
+                 patch.object(sp, "evaluate_rules", return_value=[]), \
+                 patch.object(sp.flow_engine, "score", return_value=(False, 0.0, 1.0)), \
+                 patch.object(sp.conn_behavior_tracker, "record_connection", return_value=None), \
+                 patch.object(sp.conn_behavior_tracker, "is_ddos_volumetric", return_value=(False, {})), \
+                 patch.object(sp.conn_behavior_tracker, "is_c2_beacon", return_value=(False, {})), \
+                 patch.object(sp.alerts_topic, "send", new=AsyncMock(return_value=None)) as alerts_send, \
+                 patch.object(sp, "_send_dlq_safely", new=AsyncMock()) as dlq:
+                await sp.process_traffic.fun(self._fake_stream([event]))
+
+            alerts_send.assert_not_awaited()
+            dlq.assert_not_awaited()
+
+        asyncio.run(_run())
+
     def test_process_traffic_dns_response_event_updates_tracker_without_alerting(self):
         """A dns_response event exists purely to feed the behavioral
         tracker's NXDOMAIN rate -- it must never itself produce an

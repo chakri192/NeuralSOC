@@ -22,6 +22,7 @@ from inference.features import extract_features, safe_int
 from inference.rules import evaluate_rules
 from inference.models import DeepLearningEngine, FlowAnomalyEngine
 from inference.correlation import IncidentCorrelator
+from inference.conn_behavior import ConnBehaviorTracker
 from inference.dns_behavior import DnsBehaviorTracker
 from inference.domain_age import YOUNG_DOMAIN_DAYS_THRESHOLD, DomainAgeLookup, confidence_for_age
 from inference.enrichment import ThreatEnricher
@@ -35,6 +36,7 @@ correlator = IncidentCorrelator()
 # connection rather than opening a second pool with its own security
 # config to audit -- see inference/dns_behavior.py's module docstring.
 dns_behavior_tracker = DnsBehaviorTracker(correlator.redis)
+conn_behavior_tracker = ConnBehaviorTracker(correlator.redis)
 domain_age_lookup = DomainAgeLookup()
 enricher = ThreatEnricher()
 
@@ -338,6 +340,60 @@ async def process_traffic(stream):
                     logger.warning("Flow anomaly inference timed out; skipping")
                 except Exception as e:
                     logger.error(f"Flow anomaly inference failed: {e}")
+
+            # 3e. Connection-rate / periodicity tracking -- independent of
+            # the flow autoencoder above, same reasoning as 3a/3b's DNS
+            # behavioral tracking: a real volumetric flood or periodic C2
+            # beacon is a pattern across MANY connections over time, not a
+            # property any single connection's byte/packet count can
+            # encode alone. See inference/conn_behavior.py's module
+            # docstring for the real-data investigation (CTU-13) that
+            # found this, and the real, disclosed reason
+            # RULE_DDOS_CONN_RATE and RULE_C2_BEACON_PERIODIC get very
+            # different confidences below: the rate check has 100% real
+            # precision at its calibrated threshold, but periodicity
+            # alone is a genuinely weaker signal -- a fine real threshold
+            # sweep found its recall is a flat ~0.2-0.4% ceiling
+            # regardless of threshold, so BEACON_MAX_COEFFICIENT_OF_VARIATION
+            # is tuned purely for precision/FPR (37.0%/0.58% real,
+            # measured) rather than any recall trade-off. Confidence is
+            # kept below 0.5 so a lone firing can never by itself cross
+            # inference/risk.py's incident threshold; it's meant to
+            # corroborate, the same posture inference/domain_age.py takes
+            # for a young-but-legitimate domain.
+            if event.get("event_type") == "conn":
+                try:
+                    source_ip = str(event.get("id.orig_h") or "")
+                    dest_ip = str(event.get("id.resp_h") or "")
+                    if source_ip and dest_ip:
+                        now = time.time()
+                        await asyncio.get_running_loop().run_in_executor(
+                            io_executor, conn_behavior_tracker.record_connection, source_ip, dest_ip, now
+                        )
+                        is_flood, flood_stats = await asyncio.get_running_loop().run_in_executor(
+                            io_executor, conn_behavior_tracker.is_ddos_volumetric, source_ip, dest_ip, now
+                        )
+                        if is_flood:
+                            detections.append({
+                                "threat_class": "DDoS",
+                                "severity": "critical",
+                                "confidence": 0.95,
+                                "rule_id": "RULE_DDOS_CONN_RATE",
+                                "evidence": {"destination_ip": dest_ip, **flood_stats},
+                            })
+                        is_beacon, beacon_stats = await asyncio.get_running_loop().run_in_executor(
+                            io_executor, conn_behavior_tracker.is_c2_beacon, source_ip, dest_ip, now
+                        )
+                        if is_beacon:
+                            detections.append({
+                                "threat_class": "C2 Beaconing",
+                                "severity": "medium",
+                                "confidence": 0.40,
+                                "rule_id": "RULE_C2_BEACON_PERIODIC",
+                                "evidence": {"destination_ip": dest_ip, **beacon_stats},
+                            })
+                except Exception as e:
+                    logger.error(f"Connection behavior tracking failed: {e}")
 
             # 3d. DNS response tracking -- feeds the behavioral tracker's
             # NXDOMAIN rate (see 3a above). Purely an update to shared

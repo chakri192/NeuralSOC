@@ -4,15 +4,32 @@ independent detectors' signals into one incident-level score
 (inference/risk.py's calculate_risk_score()) actually catch more real
 attacks than relying on any single detector alone?
 
-Runs the flow autoencoder AND all 4 real rules evaluate_rules() can
-exercise against the SAME real CTU-13 flows
-(benchmarks/real_rule_validation_dataset.csv already has every field
-both need -- orig_bytes/resp_bytes/duration/tot_pkts for the flow model,
-plus dport/state for the rules), builds each flow's list of triggered
-detections in the exact production alert shape (confidence_score,
-model_name -- see inference/stream_processor_faust.py's raw_alert
-construction), and measures the union/composite coverage against real
-Botnet/Normal ground truth.
+Runs all SIX detectors this platform's incident score can combine
+against the SAME real CTU-13 connections, replayed in real
+chronological order per scenario: the flow autoencoder and the 4 rules
+evaluate_rules() can exercise (orig_bytes/resp_bytes/duration/tot_pkts,
+plus dport/state), AND -- folded in as of this version --
+inference/conn_behavior.py's windowed RULE_DDOS_CONN_RATE and
+RULE_C2_BEACON_PERIODIC (real src_addr/dst_addr/timestamp). Earlier
+versions of this script measured only the first four, because
+benchmarks/real_rule_validation_dataset.csv (still used by
+scripts/evaluate_rules_against_real_data.py's own gate) has no real
+IP/timestamp fields a windowed check can key a window on.
+benchmarks/real_composite_dataset.csv is a single, comprehensive extract
+carrying every field all six detectors need (every real Botnet/Normal-
+labeled connection from all 13 real CTU-13 scenarios, kept whole and in
+real chronological order -- no per-class sampling cap, since the
+windowed checks need each (source, destination) pair's complete,
+temporally continuous sequence). It's also what
+scripts/evaluate_conn_behavior_against_real_data.py reads (just the
+columns it needs) -- one real dataset shared by both evaluators instead
+of two separately-extracted, otherwise-identical copies.
+
+Builds each connection's list of triggered detections in the exact
+production alert shape (confidence_score, model_name -- see
+inference/stream_processor_faust.py's raw_alert construction), and
+measures the union/composite coverage against real Botnet/Normal ground
+truth.
 
 This script is also what originally discovered a real, disclosed nuance
 about the flow autoencoder's generalization: scripts/evaluate_flow_autoencoder_against_real_data.py's
@@ -29,7 +46,11 @@ only ever surfacing here.
 
 Also acts as a regression gate, mirroring the other real-data
 evaluators: benchmarks/composite_scoring_baseline.json records the
-composite (union) recall/FPR as of the last check.
+composite (union) recall/precision/FPR as of the last check. Folding in
+the two windowed detectors changed what this baseline measures, so it
+was re-seeded rather than compared against the prior (four-detector)
+numbers -- see docs/PATH_TO_10_OUT_OF_10.md and SECURITY.md for the
+before/after.
 
 Usage:
     PYTHONPATH=. venv/bin/python3 scripts/evaluate_composite_scoring_against_real_data.py
@@ -40,16 +61,20 @@ import csv
 import json
 import os
 import sys
+from collections import defaultdict
+
+import fakeredis
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
+from inference.conn_behavior import ConnBehaviorTracker
 from inference.models import FlowAnomalyEngine
 from inference.risk import calculate_risk_score
 from inference.rules import evaluate_rules
 from evaluate_rules_against_real_data import _argus_state_to_zeek_conn_state, RULE_TO_THREAT_CLASS
 
-DATASET_PATH = os.path.join(os.path.dirname(__file__), "..", "benchmarks", "real_rule_validation_dataset.csv")
+DATASET_PATH = os.path.join(os.path.dirname(__file__), "..", "benchmarks", "real_composite_dataset.csv")
 BASELINE_PATH = os.path.join(os.path.dirname(__file__), "..", "benchmarks", "composite_scoring_baseline.json")
 REGRESSION_THRESHOLD_POINTS = 5.0
 
@@ -60,10 +85,13 @@ REGRESSION_THRESHOLD_POINTS = 5.0
 # single best detector (26.3% vs. 48.5% recall) because no individual
 # rule's fixed confidence (Reconnaissance's 0.75, e.g.) clears 80 without
 # corroboration. A real threshold sweep against this dataset found a
-# wide flat plateau from ~1 to ~50 all giving the identical, real
-# 98.8% precision / 53.7% recall / 0.50% FPR operating point -- 50 sits
-# at the safe edge of that plateau, not an arbitrary guess.
+# wide flat plateau from ~1 to ~50 all giving the identical operating
+# point -- 50 sits at the safe edge of that plateau, not an arbitrary
+# guess. Re-checked after folding in the two windowed detectors: still
+# the right edge of the same kind of plateau (see the module docstring).
 RISK_SCORE_INCIDENT_THRESHOLD = 50.0
+
+ALL_DETECTOR_NAMES = ["flow_autoencoder"] + list(RULE_TO_THREAT_CLASS) + ["RULE_DDOS_CONN_RATE", "RULE_C2_BEACON_PERIODIC"]
 
 
 def _flow_anomaly_alert(engine, orig_bytes, resp_bytes, duration, tot_pkts):
@@ -101,12 +129,39 @@ def _rule_alerts(dport, state, orig_bytes, resp_bytes, tot_pkts):
     return alerts
 
 
+def _conn_behavior_alerts(tracker, src, dst, ts):
+    """Mirrors inference/stream_processor_faust.py's raw_alert
+    construction for the windowed connection-behavior detectors, exactly
+    as they're wired in production: record first, then check both."""
+    tracker.record_connection(src, dst, ts)
+    alerts = []
+    is_flood, _ = tracker.is_ddos_volumetric(src, dst, ts)
+    if is_flood:
+        alerts.append({
+            "threat_class": "DDoS",
+            "severity": "critical",
+            "confidence_score": 0.95,
+            "model_name": "RULE_DDOS_CONN_RATE",
+        })
+    is_beacon, _ = tracker.is_c2_beacon(src, dst, ts)
+    if is_beacon:
+        alerts.append({
+            "threat_class": "C2 Beaconing",
+            "severity": "medium",
+            "confidence_score": 0.40,
+            "model_name": "RULE_C2_BEACON_PERIODIC",
+        })
+    return alerts
+
+
 def _load_dataset():
-    rows = []
+    by_scenario = defaultdict(list)
     with open(DATASET_PATH, newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
-            rows.append(row)
-    return rows
+            by_scenario[row["scenario"]].append(row)
+    for rows in by_scenario.values():
+        rows.sort(key=lambda r: float(r["timestamp"]))
+    return by_scenario
 
 
 def _confusion(tp, fp, tn, fn):
@@ -136,52 +191,67 @@ def main():
     args = parser.parse_args()
 
     print(f"[*] Loading {DATASET_PATH}...")
-    rows = _load_dataset()
-    n_botnet = sum(1 for r in rows if r["label"] == "botnet")
-    n_normal = len(rows) - n_botnet
-    print(f"[*] {len(rows)} real flows loaded ({n_botnet} real Botnet, {n_normal} real Normal)\n")
+    by_scenario = _load_dataset()
+    total_rows = sum(len(rows) for rows in by_scenario.values())
+    n_botnet = sum(1 for rows in by_scenario.values() for r in rows if r["label"] == "botnet")
+    print(f"[*] {total_rows} real connections loaded across {len(by_scenario)} real CTU-13 scenarios "
+          f"({n_botnet} real Botnet, {total_rows - n_botnet} real Normal)\n")
 
     print("[*] Loading the live flow autoencoder...")
     engine = FlowAnomalyEngine()
 
     # Per-detector-alone confusion, plus composite (calculate_risk_score
     # thresholded) confusion, all against the same real ground truth.
-    solo_counts = {name: {"tp": 0, "fp": 0, "tn": 0, "fn": 0} for name in ["flow_autoencoder"] + list(RULE_TO_THREAT_CLASS)}
+    solo_counts = {name: {"tp": 0, "fp": 0, "tn": 0, "fn": 0} for name in ALL_DETECTOR_NAMES}
     composite_counts = {"tp": 0, "fp": 0, "tn": 0, "fn": 0}
 
-    for row in rows:
-        is_botnet = row["label"] == "botnet"
-        orig_bytes, resp_bytes = float(row["orig_bytes"]), float(row["resp_bytes"])
-        duration, tot_pkts = float(row["duration"]), float(row["tot_pkts"])
-        dport, state = int(row["dport"]), row["state"]
+    for scenario, rows in sorted(by_scenario.items(), key=lambda kv: int(kv[0])):
+        print(f"[*] Replaying scenario {scenario} ({len(rows)} connections) in real chronological order...")
+        tracker = ConnBehaviorTracker(fakeredis.FakeRedis(server=fakeredis.FakeServer(), decode_responses=True))
+        for row in rows:
+            is_botnet = row["label"] == "botnet"
+            orig_bytes, resp_bytes = float(row["orig_bytes"]), float(row["resp_bytes"])
+            duration, tot_pkts = float(row["duration"]), float(row["tot_pkts"])
+            dport, state = int(row["dport"]), row["state"]
+            src, dst, ts = row["src_addr"], row["dst_addr"], float(row["timestamp"])
 
-        alerts = []
-        flow_alert = _flow_anomaly_alert(engine, orig_bytes, resp_bytes, duration, tot_pkts)
-        if flow_alert:
-            alerts.append(flow_alert)
-            solo_counts["flow_autoencoder"]["tp" if is_botnet else "fp"] += 1
-        else:
-            solo_counts["flow_autoencoder"]["fn" if is_botnet else "tn"] += 1
-
-        rule_alerts = _rule_alerts(dport, state, orig_bytes, resp_bytes, tot_pkts)
-        alerts.extend(rule_alerts)
-        fired_rule_ids = {a["model_name"] for a in rule_alerts}
-        for rule_id in RULE_TO_THREAT_CLASS:
-            fired = rule_id in fired_rule_ids
-            if is_botnet:
-                solo_counts[rule_id]["tp" if fired else "fn"] += 1
+            alerts = []
+            flow_alert = _flow_anomaly_alert(engine, orig_bytes, resp_bytes, duration, tot_pkts)
+            if flow_alert:
+                alerts.append(flow_alert)
+                solo_counts["flow_autoencoder"]["tp" if is_botnet else "fp"] += 1
             else:
-                solo_counts[rule_id]["fp" if fired else "tn"] += 1
+                solo_counts["flow_autoencoder"]["fn" if is_botnet else "tn"] += 1
 
-        risk_score = calculate_risk_score(alerts)
-        is_incident = risk_score >= RISK_SCORE_INCIDENT_THRESHOLD
-        if is_botnet:
-            composite_counts["tp" if is_incident else "fn"] += 1
-        else:
-            composite_counts["fp" if is_incident else "tn"] += 1
+            rule_alerts = _rule_alerts(dport, state, orig_bytes, resp_bytes, tot_pkts)
+            alerts.extend(rule_alerts)
+            fired_rule_ids = {a["model_name"] for a in rule_alerts}
+            for rule_id in RULE_TO_THREAT_CLASS:
+                fired = rule_id in fired_rule_ids
+                if is_botnet:
+                    solo_counts[rule_id]["tp" if fired else "fn"] += 1
+                else:
+                    solo_counts[rule_id]["fp" if fired else "tn"] += 1
 
-    print("=" * 72)
-    print("Solo detector performance (each alone, same real flows)")
+            conn_alerts = _conn_behavior_alerts(tracker, src, dst, ts)
+            alerts.extend(conn_alerts)
+            fired_conn_ids = {a["model_name"] for a in conn_alerts}
+            for name in ("RULE_DDOS_CONN_RATE", "RULE_C2_BEACON_PERIODIC"):
+                fired = name in fired_conn_ids
+                if is_botnet:
+                    solo_counts[name]["tp" if fired else "fn"] += 1
+                else:
+                    solo_counts[name]["fp" if fired else "tn"] += 1
+
+            risk_score = calculate_risk_score(alerts)
+            is_incident = risk_score >= RISK_SCORE_INCIDENT_THRESHOLD
+            if is_botnet:
+                composite_counts["tp" if is_incident else "fn"] += 1
+            else:
+                composite_counts["fp" if is_incident else "tn"] += 1
+
+    print("\n" + "=" * 72)
+    print("Solo detector performance (each alone, same real connections)")
     print("=" * 72)
     for name, c in solo_counts.items():
         m = _confusion(c["tp"], c["fp"], c["tn"], c["fn"])
@@ -189,7 +259,7 @@ def main():
 
     composite_metrics = _confusion(composite_counts["tp"], composite_counts["fp"], composite_counts["tn"], composite_counts["fn"])
     print("\n" + "=" * 72)
-    print(f"COMPOSITE (calculate_risk_score >= {RISK_SCORE_INCIDENT_THRESHOLD}) -- combining flow autoencoder + all 4 rules")
+    print(f"COMPOSITE (calculate_risk_score >= {RISK_SCORE_INCIDENT_THRESHOLD}) -- combining all 6 detectors")
     print("=" * 72)
     print(f"  Accuracy:  {composite_metrics['accuracy']:.1%}")
     print(f"  Precision: {composite_metrics['precision']:.1%}")
@@ -203,7 +273,7 @@ def main():
     print(f"Composite recall: {composite_metrics['recall']:.1%}")
     print(f"Delta: {(composite_metrics['recall'] - best_solo_recall) * 100:+.1f} points")
 
-    print("\nDataset: benchmarks/real_rule_validation_dataset.csv (CTU-13, all 13 scenarios, "
+    print("\nDataset: benchmarks/real_composite_dataset.csv (CTU-13, all 13 scenarios, "
           "Stratosphere IPS / CVUT, CC-BY, https://www.stratosphereips.org/datasets-ctu13).")
 
     if args.update_baseline:
