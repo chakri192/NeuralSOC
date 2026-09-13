@@ -1,4 +1,4 @@
-from dashboard.components.ui import mono, safe_html
+from dashboard.components.ui import build_kill_chain, mono, safe_html
 from shared.formatters import format_timestamp, format_mitre, categorize_evidence, escape_markdown
 
 def test_format_timestamp_valid():
@@ -76,3 +76,73 @@ def test_mono_wraps_ordinary_values_visually_unchanged():
 def test_safe_html_escapes_an_injected_tag():
     payload = '<script>alert(1)</script>'
     assert "<script" not in safe_html(payload)
+
+
+def _alert(timestamp, model_name="DL_MODEL", threat_class="Anomalous Flow", severity="medium", tactic=None, technique=None):
+    return {
+        "timestamp": timestamp,
+        "model_name": model_name,
+        "threat_class": threat_class,
+        "severity": severity,
+        "mitre_tactic": tactic,
+        "mitre_technique": technique,
+    }
+
+
+def test_build_kill_chain_empty_input_returns_empty_list():
+    assert build_kill_chain([]) == []
+
+
+def test_build_kill_chain_groups_globally_not_just_consecutive_runs():
+    # Two detectors firing on interleaved, sub-second timestamps for the
+    # same ongoing transfer -- exactly what a real windowed detector
+    # (flow anomaly + byte-volume exfil both re-evaluating the same
+    # sustained transfer) produces. Collapsing only strictly-adjacent
+    # duplicates would fragment this into 4 tiny alternating phases;
+    # grouping by type globally should produce exactly 2.
+    alerts = [
+        _alert("2026-01-01T00:00:00Z", model_name="A", threat_class="Anomalous Flow"),
+        _alert("2026-01-01T00:00:01Z", model_name="B", threat_class="Data Exfiltration"),
+        _alert("2026-01-01T00:00:02Z", model_name="A", threat_class="Anomalous Flow"),
+        _alert("2026-01-01T00:00:03Z", model_name="B", threat_class="Data Exfiltration"),
+    ]
+    phases = build_kill_chain(alerts)
+    assert len(phases) == 2
+    assert phases[0]["model_name"] == "A"
+    assert phases[0]["threat_class"] == "Anomalous Flow"
+    assert phases[0]["count"] == 2
+    assert phases[0]["start_time"] == "2026-01-01T00:00:00Z"
+    assert phases[0]["end_time"] == "2026-01-01T00:00:02Z"
+    assert phases[1]["model_name"] == "B"
+    assert phases[1]["count"] == 2
+
+
+def test_build_kill_chain_orders_phases_by_first_occurrence():
+    alerts = [
+        _alert("2026-01-01T00:00:05Z", model_name="LATER", threat_class="DGA"),
+        _alert("2026-01-01T00:00:01Z", model_name="FIRST", threat_class="Recon"),
+        _alert("2026-01-01T00:00:06Z", model_name="LATER", threat_class="DGA"),
+    ]
+    phases = build_kill_chain(alerts)
+    assert [p["model_name"] for p in phases] == ["FIRST", "LATER"]
+
+
+def test_build_kill_chain_escalates_to_the_most_severe_alert_in_a_group():
+    alerts = [
+        _alert("2026-01-01T00:00:00Z", severity="low"),
+        _alert("2026-01-01T00:00:01Z", severity="critical"),
+        _alert("2026-01-01T00:00:02Z", severity="medium"),
+    ]
+    phases = build_kill_chain(alerts)
+    assert len(phases) == 1
+    assert phases[0]["severity"] == "critical"
+
+
+def test_build_kill_chain_preserves_mitre_fields_from_the_first_alert_in_a_group():
+    alerts = [
+        _alert("2026-01-01T00:00:00Z", tactic="Command and Control", technique="T1071"),
+        _alert("2026-01-01T00:00:01Z", tactic=None, technique=None),
+    ]
+    phases = build_kill_chain(alerts)
+    assert phases[0]["mitre_tactic"] == "Command and Control"
+    assert phases[0]["mitre_technique"] == "T1071"

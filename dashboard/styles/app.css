@@ -246,6 +246,29 @@ h1, h2, h3, h4 {
 .tsoc-kv__key { color: var(--text-muted); flex: 1 1 auto; min-width: 0; }
 .tsoc-kv__val { font-family: var(--font-mono); text-align: right; word-break: break-all; flex: 0 0 auto; white-space: nowrap; }
 
+/* ---------- Kill chain / attack phase timeline (incident detail) ---------- */
+
+.tsoc-chain { display: flex; flex-direction: column; }
+.tsoc-chain__step { display: flex; gap: 0.85rem; }
+.tsoc-chain__marker { display: flex; flex-direction: column; align-items: center; flex: 0 0 auto; }
+.tsoc-chain__dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  margin-top: 0.3rem;
+  background: var(--dot-color);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--dot-color) 22%, transparent);
+  flex: 0 0 auto;
+}
+.tsoc-chain__line { width: 2px; flex: 1 1 auto; min-height: 1.6rem; background: var(--border); margin: 0.2rem 0; }
+.tsoc-chain__body { flex: 1 1 auto; min-width: 0; padding-bottom: 1.3rem; }
+.tsoc-chain__head { display: flex; align-items: baseline; justify-content: space-between; gap: 0.6rem; }
+.tsoc-chain__threat { font-weight: 700; font-size: 0.92rem; color: var(--text); }
+.tsoc-chain__count { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted); flex: 0 0 auto; }
+.tsoc-chain__meta { font-size: 0.8rem; color: var(--text-muted); margin-top: 0.15rem; }
+.tsoc-chain__mitre { font-size: 0.78rem; color: var(--text-muted); margin-top: 0.3rem; }
+.tsoc-chain__mitre code { font-family: var(--font-mono); background: var(--surface-raised); padding: 0.05rem 0.35rem; border-radius: 4px; }
+
 /* ---------- Streamlit component overrides ---------- */
 
 div[data-testid="stMetric"], div[data-testid="metric-container"] {

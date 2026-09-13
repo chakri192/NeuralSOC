@@ -16,7 +16,17 @@ import streamlit as st
 import shared.triage_store as triage_store
 from dashboard import session_data
 from dashboard.components.empty_states import render_broker_unavailable, render_no_alerts
-from dashboard.components.ui import kpi_card, kpi_row, mono, relative_time, render_evidence_columns, severity_badge, status_badge
+from dashboard.components.ui import (
+    build_kill_chain,
+    kpi_card,
+    kpi_row,
+    mono,
+    relative_time,
+    render_evidence_columns,
+    render_kill_chain,
+    severity_badge,
+    status_badge,
+)
 from dashboard.theme import SEVERITY_ORDER, STATUS_LABELS
 from shared.formatters import escape_markdown, format_timestamp
 
@@ -158,7 +168,16 @@ kc3.metric("Signals", len(incident.get("related_alert_ids", [])))
 
 st.markdown(mono(f'Affected: {", ".join(incident["affected_entities"])}'), unsafe_allow_html=True)
 
-tab_summary, tab_evidence, tab_attack, tab_actions = st.tabs(["Summary", "Evidence", "ATT&CK Mapping", "Analyst Actions"])
+tab_summary, tab_chain, tab_evidence, tab_attack, tab_actions = st.tabs(
+    ["Summary", "Kill Chain", "Evidence", "ATT&CK Mapping", "Analyst Actions"]
+)
+
+# Shared by the Kill Chain and Evidence tabs -- same underlying alerts,
+# two different views of them (a condensed phase timeline vs. the full
+# per-alert drill-down), so compute the join once rather than twice.
+alerts = session_data.get_alerts()
+related_ids = set(incident.get("related_alert_ids", []))
+rel_alerts = [a for a in alerts if a["alert_id"] in related_ids]
 
 with tab_summary:
     # evidence_summary is server-synthesized (shared/data_access.py) but
@@ -168,11 +187,17 @@ with tab_summary:
     # link or a tracking-pixel image fetch the instant this tab opens.
     st.markdown(escape_markdown(incident["evidence_summary"]))
 
-with tab_evidence:
-    alerts = session_data.get_alerts()
-    related_ids = set(incident.get("related_alert_ids", []))
-    rel_alerts = [a for a in alerts if a["alert_id"] in related_ids]
+with tab_chain:
+    if not rel_alerts:
+        st.info("Detailed signals have rotated out of the memory buffer.")
+    else:
+        st.caption(
+            f"{len(rel_alerts)} correlated signal(s) condensed into attack phases, "
+            "in the real order they were observed."
+        )
+        render_kill_chain(build_kill_chain(rel_alerts))
 
+with tab_evidence:
     if not rel_alerts:
         st.info("Detailed signals have rotated out of the memory buffer.")
     else:

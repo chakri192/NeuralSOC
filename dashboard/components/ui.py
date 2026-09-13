@@ -11,10 +11,11 @@ import dateutil.parser
 import streamlit as st
 
 from dashboard.components.icons import svg
-from dashboard.theme import SEVERITY_COLORS, STATUS_COLORS, STATUS_LABELS, css_variables
-from shared.formatters import categorize_evidence
+from dashboard.theme import SEVERITY_COLORS, SEVERITY_ORDER, STATUS_COLORS, STATUS_LABELS, css_variables
+from shared.formatters import categorize_evidence, format_timestamp
 
 _CSS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "styles", "app.css")
+_SEVERITY_ORDER_INDEX = {severity: i for i, severity in enumerate(SEVERITY_ORDER)}
 
 
 def inject_theme() -> None:
@@ -134,3 +135,102 @@ def connection_pill(healthy: bool) -> str:
     if healthy:
         return f'<span class="tsoc-pill tsoc-pill--ok">{dot} Live</span>'
     return f'<span class="tsoc-pill tsoc-pill--down">{dot} Disconnected</span>'
+
+
+def build_kill_chain(alerts: list) -> list:
+    """Condenses an incident's related alerts -- which can number in the
+    thousands for a sustained windowed-detector firing (e.g. a bulk-exfil
+    byte-volume check re-evaluating every connection in a transfer) --
+    into a small, readable sequence of ATTACK PHASES: every alert sharing
+    the same (model_name, threat_class) collapses into one phase spanning
+    its full start-to-end time range, instead of one timeline entry per
+    raw alert.
+
+    Grouped by type globally, not just consecutive runs: two detectors
+    watching the same live traffic routinely fire on interleaved,
+    sub-second timestamps (e.g. a flow-anomaly check and a byte-volume
+    check both re-evaluating the same ongoing transfer) -- collapsing
+    only strictly-adjacent duplicates left dozens of tiny alternating
+    phases that told a noisier, less honest story than what actually
+    happened: two concurrent detection threads, not a rapid back-and-forth
+    between them. Phases are then ordered by each type's own first
+    occurrence, so the sequence still reflects real observed order overall
+    (which detector's evidence appeared first), without fragmenting a
+    single sustained detection into noise.
+
+    Returns a list of dicts: start_time, end_time, count, model_name,
+    threat_class, severity, mitre_tactic, mitre_technique -- empty list
+    if `alerts` is empty (callers should render an empty state instead
+    of calling this).
+    """
+    ordered = sorted(alerts, key=lambda a: a.get("timestamp") or "")
+    phases_by_key = {}
+    order = []
+    for alert in ordered:
+        key = (alert.get("model_name") or "rule-based", alert.get("threat_class") or "Unclassified")
+        severity = (alert.get("severity") or "low").lower()
+        if key not in phases_by_key:
+            order.append(key)
+            phases_by_key[key] = {
+                "start_time": alert.get("timestamp"),
+                "end_time": alert.get("timestamp"),
+                "count": 1,
+                "model_name": key[0],
+                "threat_class": key[1],
+                "severity": severity,
+                "mitre_tactic": alert.get("mitre_tactic"),
+                "mitre_technique": alert.get("mitre_technique"),
+            }
+        else:
+            phase = phases_by_key[key]
+            phase["end_time"] = alert.get("timestamp")
+            phase["count"] += 1
+            if _SEVERITY_ORDER_INDEX.get(severity, 99) < _SEVERITY_ORDER_INDEX.get(phase["severity"], 99):
+                phase["severity"] = severity
+    return [phases_by_key[key] for key in order]
+
+
+def render_kill_chain(phases: list) -> None:
+    """Renders build_kill_chain()'s output as a vertical, connected
+    stepper -- one node per attack phase, colored by that phase's own
+    severity, in real chronological order."""
+    if not phases:
+        st.info("No phased timeline available for this incident.")
+        return
+
+    rows = []
+    for i, phase in enumerate(phases):
+        color = SEVERITY_COLORS.get((phase.get("severity") or "low").lower(), SEVERITY_COLORS["low"])
+        is_last = i == len(phases) - 1
+        line = "" if is_last else '<div class="tsoc-chain__line"></div>'
+        start = format_timestamp(phase["start_time"])
+        span = (
+            f"{start}"
+            if phase["start_time"] == phase["end_time"]
+            else f"{start} → {format_timestamp(phase['end_time'])}"
+        )
+        count_label = f"× {phase['count']}" if phase["count"] > 1 else ""
+        mitre_bits = []
+        if phase.get("mitre_tactic"):
+            mitre_bits.append(html.escape(str(phase["mitre_tactic"])))
+        if phase.get("mitre_technique"):
+            mitre_bits.append(f"<code>{html.escape(str(phase['mitre_technique']))}</code>")
+        mitre_html = f'<div class="tsoc-chain__mitre">{" · ".join(mitre_bits)}</div>' if mitre_bits else ""
+
+        rows.append(f'''
+<div class="tsoc-chain__step">
+  <div class="tsoc-chain__marker">
+    <div class="tsoc-chain__dot" style="--dot-color:{color};"></div>
+    {line}
+  </div>
+  <div class="tsoc-chain__body">
+    <div class="tsoc-chain__head">
+      <span class="tsoc-chain__threat">{html.escape(str(phase["threat_class"]))}</span>
+      <span class="tsoc-chain__count">{count_label}</span>
+    </div>
+    <div class="tsoc-chain__meta">{html.escape(str(phase["model_name"]))} · {span}</div>
+    {mitre_html}
+  </div>
+</div>''')
+
+    st.markdown(f'<div class="tsoc-chain">{"".join(rows)}</div>', unsafe_allow_html=True)
