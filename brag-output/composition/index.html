@@ -1,0 +1,701 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NeuralSOC — Brag Video</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+
+<!-- GSAP (Hyperframes runtime dependency) -->
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
+
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:          #0a0a0a;
+    --surface:     #131313;
+    --surface-r:   #1a1a1a;
+    --border:      #2a2a2a;
+    --text:        #eeeeee;
+    --text-muted:  #94948f;
+    --accent:      #3b82f6;
+    --accent-soft: rgba(59,130,246,0.14);
+    --critical:    #e5484d;
+    --high:        #f5a524;
+    --medium:      #f5d90a;
+    --low:         #6b7785;
+    --font-ui:     'Inter', -apple-system, sans-serif;
+    --font-mono:   'JetBrains Mono', ui-monospace, monospace;
+  }
+
+  html, body {
+    width: 1920px;
+    height: 1080px;
+    overflow: hidden;
+    background: var(--bg);
+    font-family: var(--font-ui);
+    color: var(--text);
+  }
+
+  #composition {
+    width: 1920px;
+    height: 1080px;
+    position: relative;
+    overflow: hidden;
+    background: var(--bg);
+  }
+
+  /* Composition wrapper — always visible, never animated */
+  .composition-root {
+    position: relative;
+    width: 1920px;
+    height: 1080px;
+    overflow: hidden;
+    background: var(--bg);
+    opacity: 1;
+  }
+
+  /* All scenes are clips — hidden by default, GSAP controls opacity */
+  .clip {
+    position: absolute;
+    inset: 0;
+    width: 1920px;
+    height: 1080px;
+    opacity: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    visibility: visible;
+  }
+
+  /* ─── Scene 1: Hook ─── */
+  #scene-hook { background: var(--bg); flex-direction: column; }
+
+  #hook-line {
+    font-family: var(--font-mono);
+    font-size: 62px;
+    font-weight: 500;
+    color: var(--text);
+    letter-spacing: -0.02em;
+    display: flex;
+    align-items: center;
+  }
+  #hook-cursor {
+    display: inline-block;
+    width: 3px;
+    height: 72px;
+    background: var(--accent);
+    margin-left: 4px;
+    border-radius: 2px;
+  }
+
+  /* ─── Scene 2: Dashboard ─── */
+  #scene-dashboard { background: var(--bg); flex-direction: row; align-items: stretch; padding: 0; }
+
+  .dash-sidebar {
+    width: 220px;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    padding: 24px 16px;
+    gap: 12px;
+    flex-shrink: 0;
+  }
+  .sidebar-logo {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--text);
+    margin-bottom: 8px;
+  }
+  .sidebar-nav-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text-muted);
+  }
+  .sidebar-nav-item.active { background: var(--accent-soft); color: var(--accent); }
+  .sidebar-spacer { flex: 1; }
+  .sidebar-footer { font-size: 11px; color: var(--text-muted); font-family: var(--font-mono); line-height: 1.6; }
+  .broker-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    background: rgba(59,130,246,0.12);
+    border: 1px solid rgba(59,130,246,0.3);
+    font-size: 11px;
+    color: var(--accent);
+    font-family: var(--font-mono);
+    margin-bottom: 8px;
+  }
+  .broker-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+
+  .dash-main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    padding: 32px 40px;
+    gap: 24px;
+    overflow: hidden;
+  }
+  .dash-title { font-size: 28px; font-weight: 700; color: var(--text); }
+
+  .kpi-strip { display: flex; gap: 16px; }
+  .kpi-card {
+    flex: 1;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .kpi-label { font-size: 12px; font-weight: 500; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.08em; }
+  .kpi-value { font-size: 42px; font-weight: 800; line-height: 1; }
+  .kpi-sub { font-size: 11px; color: var(--text-muted); }
+  .kpi-card.accent .kpi-value { color: var(--accent); }
+  .kpi-card.critical .kpi-value { color: var(--critical); }
+  .kpi-card.high .kpi-value { color: var(--high); }
+
+  .queue-title { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-muted); }
+  .queue-table { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; flex: 1; }
+  .queue-header {
+    display: grid;
+    grid-template-columns: 110px 100px 130px 260px 200px 140px;
+    padding: 12px 20px;
+    border-bottom: 1px solid var(--border);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-muted);
+    gap: 16px;
+  }
+  .queue-row {
+    display: grid;
+    grid-template-columns: 110px 100px 130px 260px 200px 140px;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+    gap: 16px;
+    align-items: center;
+  }
+  .queue-row:last-child { border-bottom: none; }
+  .queue-row.selected { background: var(--accent-soft); }
+
+  .sev-badge { font-family: var(--font-mono); font-size: 11px; font-weight: 700; letter-spacing: 0.06em; }
+  .sev-critical { color: var(--critical); }
+  .sev-high     { color: var(--high); }
+  .sev-medium   { color: var(--medium); }
+  .sev-low      { color: var(--low); }
+
+  .risk-bar-wrap { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600; font-family: var(--font-mono); }
+  .risk-bar-bg { flex: 1; height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; }
+  .risk-bar-fill { height: 100%; border-radius: 3px; background: linear-gradient(90deg, var(--accent), var(--critical)); }
+  .mono-id { font-family: var(--font-mono); font-size: 12px; color: var(--text-muted); }
+  .threat-text { font-size: 13px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .time-text { font-size: 12px; color: var(--text-muted); }
+  .status-open { font-size: 12px; color: var(--accent); font-weight: 600; }
+
+  /* ─── Scene 3: Kill Chain ─── */
+  #scene-killchain { background: var(--bg); flex-direction: row; align-items: stretch; padding: 0; }
+
+  .incident-panel { display: flex; flex-direction: column; padding: 40px 56px; gap: 24px; width: 100%; }
+  .incident-title { font-size: 32px; font-weight: 700; color: var(--text); margin-bottom: 8px; }
+  .incident-meta { display: flex; align-items: center; gap: 12px; font-family: var(--font-mono); font-size: 13px; color: var(--text-muted); margin-bottom: 8px; }
+  .incident-metrics { display: flex; gap: 40px; margin-bottom: 4px; }
+  .metric-item { display: flex; flex-direction: column; gap: 4px; }
+  .metric-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); font-weight: 600; }
+  .metric-value { font-size: 28px; font-weight: 700; color: var(--text); }
+  .metric-value.red { color: var(--critical); }
+
+  .tabs { display: flex; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
+  .tab { padding: 12px 20px; font-size: 13px; font-weight: 500; color: var(--text-muted); border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  .tab.active { color: var(--text); border-bottom-color: var(--accent); }
+
+  .kc-phase {
+    display: flex;
+    align-items: flex-start;
+    gap: 20px;
+    padding: 16px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .kc-phase:last-child { border-bottom: none; }
+  .kc-dot { width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--accent); background: var(--accent-soft); flex-shrink: 0; margin-top: 4px; }
+  .kc-dot.red { border-color: var(--critical); background: rgba(229,72,77,0.15); }
+  .kc-dot.amber { border-color: var(--high); background: rgba(245,165,36,0.15); }
+  .kc-tactic { font-size: 16px; font-weight: 600; color: var(--text); margin-bottom: 4px; }
+  .kc-detail { display: flex; align-items: center; gap: 16px; font-family: var(--font-mono); font-size: 12px; color: var(--text-muted); }
+  .kc-technique { background: var(--surface-r); border: 1px solid var(--border); border-radius: 4px; padding: 2px 8px; color: var(--accent); font-weight: 600; }
+  .kc-confidence { color: var(--medium); font-weight: 600; }
+
+  /* ─── Scene 4: Confirm ─── */
+  #scene-confirm { background: var(--bg); }
+
+  .confirm-panel { display: flex; flex-direction: column; padding: 60px 80px; gap: 28px; width: 100%; justify-content: center; }
+  .confirm-header { font-size: 28px; font-weight: 700; color: var(--text); }
+  .analyst-info { font-size: 14px; color: var(--text-muted); font-family: var(--font-mono); }
+  .note-field { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px 18px; font-size: 14px; color: var(--text-muted); max-width: 640px; }
+  .info-box { font-size: 13px; color: var(--text-muted); background: rgba(59,130,246,0.08); border: 1px solid rgba(59,130,246,0.2); border-radius: 8px; padding: 12px 16px; max-width: 640px; }
+  .action-buttons { display: flex; gap: 16px; max-width: 640px; }
+  .btn { flex: 1; padding: 16px 20px; border-radius: 10px; font-size: 15px; font-weight: 600; text-align: center; font-family: var(--font-ui); border: 1px solid var(--border); background: var(--surface); color: var(--text); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+  #sim-cursor {
+    position: absolute;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.85);
+    border: 1.5px solid rgba(255,255,255,0.4);
+    pointer-events: none;
+    z-index: 9999;
+    box-shadow: 0 0 8px rgba(255,255,255,0.3);
+    margin-left: -10px;
+    margin-top: -10px;
+    left: 760px;
+    top: 800px;
+  }
+
+  /* ─── Toast ─── */
+  #toast {
+    position: absolute;
+    top: 40px;
+    right: 60px;
+    background: var(--surface-r);
+    border: 1px solid rgba(59,130,246,0.35);
+    border-radius: 12px;
+    padding: 16px 24px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text);
+    box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+    min-width: 360px;
+    z-index: 100;
+  }
+  .toast-icon { width: 24px; height: 24px; border-radius: 50%; background: var(--accent); display: flex; align-items: center; justify-content: center; color: #fff; font-size: 14px; flex-shrink: 0; }
+  .toast-id { font-family: var(--font-mono); font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+
+  /* ─── Scene 5: Outro ─── */
+  #scene-outro { background: var(--bg); flex-direction: column; gap: 20px; }
+  .outro-name { font-size: 72px; font-weight: 800; color: var(--text); letter-spacing: -0.03em; }
+  .outro-tagline { font-size: 24px; font-weight: 400; color: var(--text-muted); letter-spacing: 0.12em; text-transform: uppercase; font-family: var(--font-mono); }
+
+  .diode-stamp { position: absolute; bottom: 28px; right: 40px; font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); opacity: 0.45; letter-spacing: 0.12em; }
+</style>
+</head>
+<body>
+
+<!-- ─── Composition ─── (audio lives inside so HyperFrames owns it) -->
+<div data-hf-id="hf-mivp" id="composition" class="composition-root" data-composition-id="neuralsoc-brag" data-width="1920" data-height="1080" data-duration="20">
+
+<!-- Audio: inside composition root so HyperFrames can bind data-composition-id -->
+<audio data-hf-id="hf-f6yf" id="bg-music" data-start="0" data-duration="20" data-track-index="10" data-volume="0.32" src="assets/music/happy-beats-business-moves-vol-12-by-ende-dot-app.mp3">
+</audio>
+
+<!-- Keyboard SFX: each on its own unique track-index to avoid overlap warnings -->
+<audio data-hf-id="hf-g3u8" id="k1" data-start="0.40" data-duration="0.12" data-track-index="20" data-volume="0.35" src="assets/sfx/keyboard/keypress-001.wav"></audio>
+<audio data-hf-id="hf-8fhm" id="k2" data-start="0.52" data-duration="0.12" data-track-index="21" data-volume="0.32" src="assets/sfx/keyboard/keypress-003.wav"></audio>
+<audio data-hf-id="hf-0r8q" id="k3" data-start="0.64" data-duration="0.12" data-track-index="22" data-volume="0.34" src="assets/sfx/keyboard/keypress-002.wav"></audio>
+<audio data-hf-id="hf-li9j" id="k4" data-start="0.76" data-duration="0.12" data-track-index="23" data-volume="0.31" src="assets/sfx/keyboard/keypress-005.wav"></audio>
+<audio data-hf-id="hf-bzhf" id="k5" data-start="0.88" data-duration="0.12" data-track-index="24" data-volume="0.33" src="assets/sfx/keyboard/keypress-004.wav"></audio>
+<audio data-hf-id="hf-1m2v" id="k6" data-start="1.00" data-duration="0.12" data-track-index="25" data-volume="0.35" src="assets/sfx/keyboard/keypress-001.wav"></audio>
+<audio data-hf-id="hf-zqah" id="k7" data-start="1.12" data-duration="0.12" data-track-index="26" data-volume="0.32" src="assets/sfx/keyboard/keypress-003.wav"></audio>
+<audio data-hf-id="hf-q5b5" id="k8" data-start="1.24" data-duration="0.12" data-track-index="27" data-volume="0.34" src="assets/sfx/keyboard/keypress-002.wav"></audio>
+<audio data-hf-id="hf-yvak" id="k9" data-start="1.36" data-duration="0.12" data-track-index="28" data-volume="0.31" src="assets/sfx/keyboard/keypress-005.wav"></audio>
+<audio data-hf-id="hf-6517" id="k10" data-start="1.48" data-duration="0.12" data-track-index="29" data-volume="0.33" src="assets/sfx/keyboard/keypress-004.wav"></audio>
+<audio data-hf-id="hf-2m2j" id="k11" data-start="1.60" data-duration="0.12" data-track-index="30" data-volume="0.35" src="assets/sfx/keyboard/keypress-001.wav"></audio>
+<audio data-hf-id="hf-4p0j" id="k12" data-start="1.72" data-duration="0.12" data-track-index="31" data-volume="0.32" src="assets/sfx/keyboard/keypress-003.wav"></audio>
+<audio data-hf-id="hf-ox77" id="k13" data-start="1.84" data-duration="0.12" data-track-index="32" data-volume="0.34" src="assets/sfx/keyboard/keypress-002.wav"></audio>
+<audio data-hf-id="hf-i5hk" id="k14" data-start="1.96" data-duration="0.12" data-track-index="33" data-volume="0.31" src="assets/sfx/keyboard/keypress-005.wav"></audio>
+<audio data-hf-id="hf-ucm9" id="k15" data-start="2.08" data-duration="0.12" data-track-index="34" data-volume="0.33" src="assets/sfx/keyboard/keypress-004.wav"></audio>
+
+<!-- KPI slam: beat-locked 8.74s // beat-locked: 8.74s -->
+<audio data-hf-id="hf-9bdc" id="sfx-kpi" data-start="8.60" data-duration="0.18" data-track-index="12" data-volume="0.70" src="assets/sfx/impact/impactSoft_medium_001.ogg">
+</audio>
+
+<!-- Click: 16.9s -->
+<audio data-hf-id="hf-7rpq" id="sfx-click" data-start="16.90" data-duration="0.06" data-track-index="13" data-volume="0.65" src="assets/sfx/ui/mouseclick1.ogg">
+</audio>
+
+<!-- Bell: beat-locked 17.47s // beat-locked: 17.47s -->
+<audio data-hf-id="hf-vb6i" id="sfx-bell" data-start="17.40" data-duration="1.48" data-track-index="14" data-volume="0.75" src="assets/sfx/impact/impactBell_heavy_000.ogg">
+</audio>
+
+
+  <!-- ─── Scene 1: Hook ─── 0–3.5s -->
+  <div data-hf-id="hf-theg" class="clip scene" id="scene-hook" data-start="0" data-duration="3.5">
+    <div data-hf-id="hf-jhvj" id="hook-line">
+      <span data-hf-id="hf-pd8l" id="hook-text"></span>
+      <span data-hf-id="hf-llt2" id="hook-cursor"></span>
+    </div>
+    <div data-hf-id="hf-261a" class="diode-stamp">DIODE: ONE-WAY</div>
+  </div>
+
+  <!-- ─── Scene 2: Dashboard ─── 3.5–8.5s -->
+  <div data-hf-id="hf-2tj8" class="clip scene" id="scene-dashboard" data-start="3.5" data-duration="5" style="flex-direction:row;align-items:stretch;">
+
+    <div data-hf-id="hf-7hnz" class="dash-sidebar">
+      <div data-hf-id="hf-qgxq" class="sidebar-logo">
+        <svg data-hf-id="hf-4lgq" width="22" height="22" viewBox="0 0 24 24" fill="none">
+          <path data-hf-id="hf-07gs" d="M12 2L3 7v5c0 5.25 3.75 10.15 9 11.35C17.25 22.15 21 17.25 21 12V7L12 2z" fill="#3b82f6" opacity="0.9" />
+          <path data-hf-id="hf-1nta" d="M12 6L6 9.5v3.5c0 3.25 2.5 6.3 6 7.15 3.5-.85 6-3.9 6-7.15V9.5L12 6z" fill="#1e40af" />
+        </svg>
+        T-SOC
+      </div>
+      <div data-hf-id="hf-6dxi" class="broker-pill"><div data-hf-id="hf-tmld" class="broker-dot"></div>BROKER LIVE</div>
+      <div data-hf-id="hf-suym" class="sidebar-nav-item active">⚡ Incidents</div>
+      <div data-hf-id="hf-fvbx" class="sidebar-nav-item">🔍 Investigate</div>
+      <div data-hf-id="hf-v7y6" class="sidebar-nav-item">🌐 Network</div>
+      <div data-hf-id="hf-fdl2" class="sidebar-nav-item">❤ Health</div>
+      <div data-hf-id="hf-kfp1" class="sidebar-spacer"></div>
+      <div data-hf-id="hf-xgnf" class="sidebar-footer">analyst@demo.tsoc.local<br data-hf-id="hf-x5px">ENV: DEMO · DIODE: ONE-WAY</div>
+    </div>
+
+    <div data-hf-id="hf-4i9a" class="dash-main">
+      <div data-hf-id="hf-otcm" class="dash-title">Operations Overview</div>
+
+      <div data-hf-id="hf-dykf" class="kpi-strip">
+        <div data-hf-id="hf-zsml" class="kpi-card accent" id="kpi-1">
+          <div data-hf-id="hf-v94c" class="kpi-label">Needs Triage</div>
+          <div data-hf-id="hf-2nqn" class="kpi-value">14</div>
+          <div data-hf-id="hf-ritd" class="kpi-sub">untouched incidents</div>
+        </div>
+        <div data-hf-id="hf-a0a9" class="kpi-card critical" id="kpi-2">
+          <div data-hf-id="hf-ykwa" class="kpi-label">Critical</div>
+          <div data-hf-id="hf-lnmv" class="kpi-value">7</div>
+        </div>
+        <div data-hf-id="hf-936l" class="kpi-card high" id="kpi-3">
+          <div data-hf-id="hf-8co7" class="kpi-label">High</div>
+          <div data-hf-id="hf-3gcp" class="kpi-value">12</div>
+        </div>
+        <div data-hf-id="hf-mbf4" class="kpi-card" id="kpi-4">
+          <div data-hf-id="hf-b7ir" class="kpi-label">Total Active</div>
+          <div data-hf-id="hf-9bby" class="kpi-value">31</div>
+          <div data-hf-id="hf-l311" class="kpi-sub">3 dismissed</div>
+        </div>
+        <div data-hf-id="hf-em89" class="kpi-card accent" id="kpi-5">
+          <div data-hf-id="hf-zdtm" class="kpi-label">Avg Risk Score</div>
+          <div data-hf-id="hf-pelo" class="kpi-value">82</div>
+        </div>
+      </div>
+
+      <div data-hf-id="hf-x3dp" class="queue-title">Incident Queue</div>
+      <div data-hf-id="hf-9e6e" class="queue-table">
+        <div data-hf-id="hf-wjh9" class="queue-header">
+          <div data-hf-id="hf-4f21">First Seen</div><div data-hf-id="hf-vm07">Severity</div><div data-hf-id="hf-ub37">Risk</div>
+          <div data-hf-id="hf-n7vc">Threat Class</div><div data-hf-id="hf-t07v">Entities</div><div data-hf-id="hf-qwv6">Status</div>
+        </div>
+        <div data-hf-id="hf-kzqt" class="queue-row selected">
+          <div data-hf-id="hf-il9x" class="time-text">2m ago</div>
+          <div data-hf-id="hf-otwx" class="sev-badge sev-critical">CRITICAL</div>
+          <div data-hf-id="hf-30je" class="risk-bar-wrap"><span data-hf-id="hf-339j">95</span><div data-hf-id="hf-w8mv" class="risk-bar-bg"><div data-hf-id="hf-9kg8" class="risk-bar-fill" style="width:95%"></div></div></div>
+          <div data-hf-id="hf-u9f8" class="threat-text">DGA / DNS Tunnelling</div>
+          <div data-hf-id="hf-59l9" class="mono-id">10.0.0.5</div>
+          <div data-hf-id="hf-t30v" class="status-open">Open</div>
+        </div>
+        <div data-hf-id="hf-f4hq" class="queue-row">
+          <div data-hf-id="hf-270w" class="time-text">7m ago</div>
+          <div data-hf-id="hf-57s3" class="sev-badge sev-high">HIGH</div>
+          <div data-hf-id="hf-reou" class="risk-bar-wrap"><span data-hf-id="hf-kvfm">74</span><div data-hf-id="hf-t77b" class="risk-bar-bg"><div data-hf-id="hf-9d6x" class="risk-bar-fill" style="width:74%"></div></div></div>
+          <div data-hf-id="hf-wt0x" class="threat-text">C2 Beaconing</div>
+          <div data-hf-id="hf-ufpw" class="mono-id">10.0.1.23</div>
+          <div data-hf-id="hf-km27" class="status-open">Open</div>
+        </div>
+        <div data-hf-id="hf-62jm" class="queue-row">
+          <div data-hf-id="hf-y8c6" class="time-text">14m ago</div>
+          <div data-hf-id="hf-zu77" class="sev-badge sev-high">HIGH</div>
+          <div data-hf-id="hf-rszv" class="risk-bar-wrap"><span data-hf-id="hf-k1vb">68</span><div data-hf-id="hf-sswa" class="risk-bar-bg"><div data-hf-id="hf-a7ng" class="risk-bar-fill" style="width:68%"></div></div></div>
+          <div data-hf-id="hf-0u1r" class="threat-text">Data Exfiltration</div>
+          <div data-hf-id="hf-bp2s" class="mono-id">192.168.0.44</div>
+          <div data-hf-id="hf-wuwb" class="status-open">Acknowledged</div>
+        </div>
+        <div data-hf-id="hf-6gun" class="queue-row">
+          <div data-hf-id="hf-a8td" class="time-text">31m ago</div>
+          <div data-hf-id="hf-az5l" class="sev-badge sev-medium">MEDIUM</div>
+          <div data-hf-id="hf-s7aw" class="risk-bar-wrap"><span data-hf-id="hf-9di2">41</span><div data-hf-id="hf-sel9" class="risk-bar-bg"><div data-hf-id="hf-wmu5" class="risk-bar-fill" style="width:41%"></div></div></div>
+          <div data-hf-id="hf-l7zg" class="threat-text">Reconnaissance</div>
+          <div data-hf-id="hf-0f9m" class="mono-id">172.16.0.8</div>
+          <div data-hf-id="hf-k7r6" class="status-open">Open</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── Scene 3: Kill Chain ─── 8.5–14.5s -->
+  <div data-hf-id="hf-4e6l" class="clip scene" id="scene-killchain" data-start="8.5" data-duration="6" style="flex-direction:row;align-items:stretch;">
+
+    <div data-hf-id="hf-kxar" class="incident-panel">
+      <div data-hf-id="hf-yeow">
+        <div data-hf-id="hf-z0dn" class="incident-title">DGA / DNS Tunnelling</div>
+        <div data-hf-id="hf-vw2s" class="incident-meta">
+          <span data-hf-id="hf-fjt2" class="mono-id">INC-10-0-0-5</span>
+          <span data-hf-id="hf-v4rw" class="sev-badge sev-critical">CRITICAL</span>
+          <span data-hf-id="hf-vmkw" style="color:var(--accent);font-weight:600">Open</span>
+        </div>
+      </div>
+
+      <div data-hf-id="hf-bbo6" class="incident-metrics">
+        <div data-hf-id="hf-i94c" class="metric-item">
+          <div data-hf-id="hf-4ufs" class="metric-label">Risk Score</div>
+          <div data-hf-id="hf-o1w3" class="metric-value red">95</div>
+        </div>
+        <div data-hf-id="hf-2af8" class="metric-item">
+          <div data-hf-id="hf-p644" class="metric-label">First Seen</div>
+          <div data-hf-id="hf-a2lv" class="metric-value" style="font-size:20px;margin-top:6px;color:var(--text-muted)">2m ago</div>
+        </div>
+        <div data-hf-id="hf-13i5" class="metric-item">
+          <div data-hf-id="hf-fq96" class="metric-label">Signals</div>
+          <div data-hf-id="hf-ppr8" class="metric-value">4</div>
+        </div>
+      </div>
+
+      <div data-hf-id="hf-5rmk" class="tabs">
+        <div data-hf-id="hf-rzwj" class="tab">Summary</div>
+        <div data-hf-id="hf-i1rs" class="tab active">Kill Chain</div>
+        <div data-hf-id="hf-rmok" class="tab">Evidence</div>
+        <div data-hf-id="hf-ao9e" class="tab">ATT&amp;CK Mapping</div>
+        <div data-hf-id="hf-9mza" class="tab">Analyst Actions</div>
+      </div>
+
+      <div data-hf-id="hf-a9rk" id="kc-list">
+        <!-- Phase 1: // beat-grid: 13.11s -->
+        <div data-hf-id="hf-zt8q" class="kc-phase" id="kc-1">
+          <div data-hf-id="hf-bdrt" class="kc-dot red"></div>
+          <div data-hf-id="hf-y7yw">
+            <div data-hf-id="hf-kgsf" class="kc-tactic">Discovery</div>
+            <div data-hf-id="hf-wcqo" class="kc-detail">
+              <span data-hf-id="hf-e9l5" class="kc-technique">T1046</span>
+              <span data-hf-id="hf-ylow">Reconnaissance / Port Scan</span>
+              <span data-hf-id="hf-u7eu" class="kc-confidence">0.75</span>
+              <span data-hf-id="hf-vrqt">rule-based</span>
+            </div>
+          </div>
+        </div>
+        <!-- Phase 2: // beat-grid: 13.64s -->
+        <div data-hf-id="hf-vv4p" class="kc-phase" id="kc-2">
+          <div data-hf-id="hf-b5fx" class="kc-dot red"></div>
+          <div data-hf-id="hf-x11t">
+            <div data-hf-id="hf-uj00" class="kc-tactic">Command and Control</div>
+            <div data-hf-id="hf-nvqw" class="kc-detail">
+              <span data-hf-id="hf-b82q" class="kc-technique">T1568.002</span>
+              <span data-hf-id="hf-kb39">DGA / DNS Tunnelling</span>
+              <span data-hf-id="hf-6kck" class="kc-confidence">0.95</span>
+              <span data-hf-id="hf-ea3z">CNN Classifier</span>
+            </div>
+          </div>
+        </div>
+        <!-- Phase 3: // beat-grid: 14.20s -->
+        <div data-hf-id="hf-v3gw" class="kc-phase" id="kc-3">
+          <div data-hf-id="hf-x3ap" class="kc-dot amber"></div>
+          <div data-hf-id="hf-xfcu">
+            <div data-hf-id="hf-vf60" class="kc-tactic">Command and Control</div>
+            <div data-hf-id="hf-mott" class="kc-detail">
+              <span data-hf-id="hf-02pi" class="kc-technique">T1071.001</span>
+              <span data-hf-id="hf-vlks">Encrypted-Traffic Malware</span>
+              <span data-hf-id="hf-efng" class="kc-confidence">0.95</span>
+              <span data-hf-id="hf-2usw">JA4 Fingerprint</span>
+            </div>
+          </div>
+        </div>
+        <!-- Phase 4: // beat-grid: 14.45s (capped within scene) -->
+        <div data-hf-id="hf-oxr3" class="kc-phase" id="kc-4">
+          <div data-hf-id="hf-x02k" class="kc-dot"></div>
+          <div data-hf-id="hf-w8fr">
+            <div data-hf-id="hf-jmys" class="kc-tactic">Exfiltration</div>
+            <div data-hf-id="hf-n34u" class="kc-detail">
+              <span data-hf-id="hf-aaiv" class="kc-technique">T1048</span>
+              <span data-hf-id="hf-viio">Data Exfiltration</span>
+              <span data-hf-id="hf-86ix" class="kc-confidence">0.85</span>
+              <span data-hf-id="hf-vbs9">rule-based</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div data-hf-id="hf-boya" class="diode-stamp">DIODE: ONE-WAY</div>
+  </div>
+
+  <!-- ─── Scene 4: Confirm & Escalate ─── 14.5–17.5s -->
+  <div data-hf-id="hf-etf2" class="clip scene" id="scene-confirm" data-start="14.5" data-duration="3">
+    <div data-hf-id="hf-1g71" class="confirm-panel">
+      <div data-hf-id="hf-razb" class="confirm-header">Analyst Actions</div>
+      <div data-hf-id="hf-ahgx" class="analyst-info">analyst@demo.tsoc.local · INC-10-0-0-5</div>
+      <div data-hf-id="hf-caib" class="info-box">ℹ Automated containment actions are disabled (read-only data diode). These actions record analyst triage state only.</div>
+      <div data-hf-id="hf-llzf" class="note-field">Note: Confirmed C2 beacon pattern via CNN. Escalating.</div>
+      <div data-hf-id="hf-baua" class="action-buttons">
+        <div data-hf-id="hf-ddlw" class="btn">Acknowledge</div>
+        <div data-hf-id="hf-0wj1" class="btn">Mark False Positive</div>
+        <div data-hf-id="hf-6tdh" class="btn primary" id="btn-confirm">Confirm &amp; Escalate</div>
+      </div>
+    </div>
+
+    <!-- Simulated cursor: absolutely positioned within scene -->
+    <div data-hf-id="hf-bsq9" id="sim-cursor"></div>
+
+    <!-- Toast: hidden until animated in -->
+    <div data-hf-id="hf-n5ua" id="toast">
+      <div data-hf-id="hf-afri" class="toast-icon">✓</div>
+      <div data-hf-id="hf-wmqs">
+        <div data-hf-id="hf-fubs">Confirmed and escalated</div>
+        <div data-hf-id="hf-2jct" class="toast-id">INC-10-0-0-5</div>
+      </div>
+    </div>
+
+    <div data-hf-id="hf-c39b" class="diode-stamp">DIODE: ONE-WAY</div>
+  </div>
+
+  <!-- ─── Scene 5: Outro ─── 17.5–20s -->
+  <div data-hf-id="hf-6hlw" class="clip scene" id="scene-outro" data-start="17.5" data-duration="2.5">
+    <div data-hf-id="hf-sw7q" id="outro-logo">
+      <svg data-hf-id="hf-hmxm" width="80" height="80" viewBox="0 0 24 24" fill="none">
+        <path data-hf-id="hf-1nrm" d="M12 2L3 7v5c0 5.25 3.75 10.15 9 11.35C17.25 22.15 21 17.25 21 12V7L12 2z" fill="#3b82f6" opacity="0.85" />
+        <path data-hf-id="hf-1n82" d="M12 6L6 9.5v3.5c0 3.25 2.5 6.3 6 7.15 3.5-.85 6-3.9 6-7.15V9.5L12 6z" fill="#1e40af" />
+      </svg>
+    </div>
+    <div data-hf-id="hf-ky2r" class="outro-name" id="outro-name" style="opacity:0">NeuralSOC</div>
+    <div data-hf-id="hf-5rrz" class="outro-tagline" id="outro-tagline" style="opacity:0">Passive · Precise · Paranoid</div>
+  </div>
+
+</div><!-- /#composition -->
+
+<script>
+// ─── Seeded PRNG (mulberry32) — deterministic, no Math.random() ───
+function mulberry32(a) {
+  return function() {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    var t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+const rng = mulberry32(42); // fixed seed = deterministic render
+
+// ─── GSAP Timeline ───
+const tl = gsap.timeline({ paused: true });
+
+// Scene 1 fade in/out
+tl.to('#scene-hook',      { opacity: 1, duration: 0.3, ease: 'power2.out' }, 0)
+  .to('#scene-hook',      { opacity: 0, duration: 0.3, ease: 'power2.in'  }, 3.2);
+
+// Typing animation via clip-path text reveal
+// We reveal the hook text by updating textContent in steps via a labelled tween
+const hookFull = "One-way link. No write-back. Ever.";
+const hookEl   = document.getElementById('hook-text');
+const hookCursor = document.getElementById('hook-cursor');
+
+// Blink cursor — GSAP yoyo opacity
+tl.to('#hook-cursor', { opacity: 0, repeat: -1, yoyo: true, duration: 0.5, ease: 'none' }, 0);
+
+// Drive typing via a custom tween on a progress object
+const hookTyper = { progress: 0 };
+tl.to(hookTyper, {
+  progress: 1,
+  duration: 1.8,
+  ease: 'none',
+  onUpdate: function() {
+    const chars = Math.round(hookTyper.progress * hookFull.length);
+    hookEl.textContent = hookFull.slice(0, chars);
+  }
+}, 0.4);
+
+// Scene 2 — Dashboard
+tl.to('#scene-dashboard', { opacity: 1, duration: 0.5, ease: 'power2.out' }, 3.5);
+tl.to('#scene-dashboard', { opacity: 0, duration: 0.3, ease: 'power2.in'  }, 8.2);
+
+// KPI cards arrive one by one; 5th card beat-locked: ~8.74s absolute, maps to tl time 8.74s
+// (KPI 1 at 4.2, 2 at 5.0, 3 at 5.6, 4 at 6.2, 5 at 6.65 → closest to beat at 6.56s in relative,
+//  but absolute start of scene is 3.5s so card5 lands at 3.5+3.15=6.65... 
+//  For beat-locking the slam SFX we use the audio data-start="8.60" which covers it)
+const kpiCards = ['#kpi-1','#kpi-2','#kpi-3','#kpi-4','#kpi-5'];
+const kpiStartTimes = [4.2, 5.0, 5.6, 6.2, 6.65]; // absolute timeline seconds
+// Initialise all KPI cards invisible
+gsap.set(kpiCards, { opacity: 0, y: 14 });
+kpiCards.forEach((sel, i) => {
+  tl.to(sel, { opacity: 1, y: 0, duration: 0.4, ease: 'power3.out' }, kpiStartTimes[i]);
+});
+
+// Scene 3 — Kill Chain // beat-locked: 13.11s
+tl.to('#scene-killchain', { opacity: 1, duration: 0.5, ease: 'power2.out' }, 8.5);
+tl.to('#scene-killchain', { opacity: 0, duration: 0.3, ease: 'power2.in'  }, 14.2);
+
+// Kill Chain phases: beat-grid 13.11, 13.64, 14.20, 14.45
+const kcPhases = ['#kc-1','#kc-2','#kc-3','#kc-4'];
+const kcTimes  = [13.11,  13.64,  14.20,  14.45]; // // beat-grid
+gsap.set(kcPhases, { opacity: 0, x: -20 });
+kcPhases.forEach((sel, i) => {
+  tl.to(sel, { opacity: 1, x: 0, duration: 0.35, ease: 'power2.out' }, kcTimes[i]);
+});
+
+// Scene 4 — Confirm & Escalate
+tl.to('#scene-confirm', { opacity: 1, duration: 0.4, ease: 'power2.out' }, 14.5);
+tl.to('#scene-confirm', { opacity: 0, duration: 0.3, ease: 'power2.in'  }, 17.2);
+
+// Set initial hidden states via GSAP (no CSS transform conflicts)
+gsap.set('#toast',        { opacity: 0, y: -12 });
+gsap.set('#outro-logo',   { opacity: 0, scale: 0.9 });
+gsap.set('#outro-name',   { opacity: 0 });
+gsap.set('#outro-tagline',{ opacity: 0 });
+
+// Cursor motion: use x/y (transforms) not left/top (layout properties)
+// Start position: x=760 y=740 relative to sim-cursor's CSS position base
+gsap.set('#sim-cursor', { x: 0, y: 0, opacity: 0 });
+tl.to('#sim-cursor', { opacity: 1, duration: 0.3, ease: 'power2.out' }, 15.2);
+// Move cursor toward Confirm & Escalate button: x delta ~270px right, y delta ~40px down
+tl.to('#sim-cursor', { x: 270, y: 40, duration: 1.2, ease: 'power2.inOut' }, 15.5);
+// Click: scale pulse
+tl.to('#sim-cursor', { scale: 0.75, duration: 0.12, ease: 'power2.in'  }, 16.9);
+tl.to('#sim-cursor', { scale: 1.00, duration: 0.12, ease: 'power2.out' }, 17.02);
+// Button pressed state
+tl.to('#btn-confirm', { background: '#1d4ed8', duration: 0.1 }, 16.9);
+
+// Toast: appears at // beat-locked: 17.47s
+tl.to('#toast', { opacity: 1, y: 0, duration: 0.3, ease: 'power3.out' }, 17.40);
+
+// Scene 5 — Outro
+tl.to('#scene-outro',  { opacity: 1, duration: 0.5, ease: 'power2.out' }, 17.5);
+tl.to('#outro-logo',   { opacity: 1, scale: 1, duration: 0.6, ease: 'back.out(1.4)' }, 17.8);
+tl.to('#outro-name',   { opacity: 1, duration: 0.5, ease: 'power2.out' }, 18.2);
+tl.to('#outro-tagline',{ opacity: 1, duration: 0.5, ease: 'power2.out' }, 18.7);
+
+// Music fade-out (HyperFrames owns this in render; we tween volume for preview parity only via a plain object)
+const musicFader = { v: 0.32 };
+tl.to(musicFader, {
+  v: 0,
+  duration: 2.0,
+  ease: 'power2.in',
+  onUpdate: function() {
+    const el = document.getElementById('bg-music');
+    if (el && typeof el.volume !== 'undefined') el.volume = Math.max(0, musicFader.v);
+  }
+}, 18.0);
+
+// ─── Register timeline on window.__timelines (HyperFrames contract) ───
+window.__timelines = window.__timelines || {};
+window.__timelines['neuralsoc-brag'] = tl;
+
+// ─── Preview autoplay (standalone only — HyperFrames overrides in render) ───
+document.fonts.ready.then(() => {
+  tl.play();
+  // Note: do not call bgMusic.play() here — HyperFrames owns media.
+  // Preview audio is handled by the data-start/data-duration contract.
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,1 @@
+Built a SOC platform that physically can't write back to the network it's watching — 98.3% precision catching real botnet traffic, not synthetic. Passive. Precise. Paranoid.

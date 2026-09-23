@@ -1,0 +1,5 @@
+NeuralSOC.
+
+Built for networks that physically can't write back. One-way link — raw traffic stays on-prem, only the threat intelligence gets out. 0.00% false-positive rate on real CTU-13 botnet data.
+
+Passive. Precise. Paranoid.

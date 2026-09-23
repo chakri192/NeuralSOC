@@ -21,6 +21,12 @@ data/soc_alerts.*
 # permanently bloats git history; kept on disk, just not tracked.
 demos/
 
+# /brag skill output (launch videos + their music/SFX/font assets) --
+# same binary-media-bloats-history reasoning as demos/ above. Each run
+# writes a fresh timestamped brag-output-<ts>/ directory.
+brag-output/
+brag-output-*/
+
 k8s/secrets.yaml
 test.db
 *.db

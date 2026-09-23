@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NeuralSOC — Brag Video</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+
+<!-- GSAP (Hyperframes runtime dependency) -->
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
+
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:          #0a0a0a;
+    --surface:     #131313;
+    --surface-r:   #1a1a1a;
+    --border:      #2a2a2a;
+    --text:        #eeeeee;
+    --text-muted:  #94948f;
+    --accent:      #4487f6;
+    --accent-soft: rgba(59,130,246,0.14);
+    --critical:    #e7585c;
+    --high:        #f5a524;
+    --medium:      #f5d90a;
+    --font-ui:     'Inter', -apple-system, sans-serif;
+    --font-mono:   'JetBrains Mono', ui-monospace, monospace;
+  }
+
+  html, body {
+    width: 1920px;
+    height: 1080px;
+    overflow: hidden;
+    background: var(--bg);
+    font-family: var(--font-ui);
+    color: var(--text);
+  }
+
+  #composition {
+    width: 1920px;
+    height: 1080px;
+    position: relative;
+    overflow: hidden;
+    background: var(--bg);
+  }
+
+  .composition-root {
+    position: relative;
+    width: 1920px;
+    height: 1080px;
+    overflow: hidden;
+    background: var(--bg);
+    opacity: 1;
+  }
+
+  .clip {
+    position: absolute;
+    inset: 0;
+    width: 1920px;
+    height: 1080px;
+    opacity: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    visibility: visible;
+  }
+
+  /* ─── Scene 1: Hook ─── */
+  #scene-hook { background: var(--bg); flex-direction: column; gap: 22px; }
+  #hook-line-1 {
+    font-family: var(--font-mono);
+    font-size: 56px;
+    font-weight: 500;
+    color: var(--text);
+    letter-spacing: -0.01em;
+    display: flex;
+    align-items: center;
+  }
+  #hook-cursor {
+    display: inline-block;
+    width: 3px;
+    height: 62px;
+    background: var(--accent);
+    margin-left: 4px;
+    border-radius: 2px;
+  }
+  #hook-line-2 {
+    font-family: var(--font-ui);
+    font-size: 26px;
+    font-weight: 400;
+    color: var(--text-muted);
+    opacity: 0;
+  }
+
+  /* ─── Scene 2: Command center ─── */
+  #scene-dashboard { background: var(--bg); flex-direction: row; align-items: stretch; padding: 0; }
+  .dash-sidebar {
+    width: 220px;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    padding: 24px 16px;
+    gap: 12px;
+    flex-shrink: 0;
+  }
+  .sidebar-logo { display: flex; align-items: center; gap: 10px; font-size: 20px; font-weight: 700; color: var(--text); margin-bottom: 8px; }
+  .sidebar-nav-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 8px; font-size: 14px; font-weight: 500; color: var(--text-muted); }
+  .sidebar-nav-item.active { background: var(--accent-soft); color: var(--accent); }
+  .sidebar-spacer { flex: 1; }
+  .sidebar-footer { font-size: 11px; color: var(--text-muted); font-family: var(--font-mono); line-height: 1.6; }
+  .broker-pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; background: rgba(59,130,246,0.12); border: 1px solid rgba(59,130,246,0.3); font-size: 11px; color: var(--accent); font-family: var(--font-mono); margin-bottom: 8px; }
+  .broker-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+
+  .dash-main { flex: 1; display: flex; flex-direction: column; padding: 40px 48px; gap: 28px; overflow: hidden; }
+  .dash-title { font-size: 30px; font-weight: 700; color: var(--text); }
+
+  .kpi-strip { display: flex; gap: 18px; }
+  .kpi-card { flex: 1; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 22px 26px; display: flex; flex-direction: column; gap: 6px; }
+  .kpi-label { font-size: 12px; font-weight: 500; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.08em; }
+  .kpi-value { font-size: 44px; font-weight: 800; line-height: 1; }
+  .kpi-sub { font-size: 11px; color: var(--text-muted); }
+  .kpi-card.accent .kpi-value { color: var(--accent); }
+  .kpi-card.critical .kpi-value { color: var(--critical); }
+  .kpi-card.high .kpi-value { color: var(--high); }
+
+  .queue-title { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-muted); }
+  .queue-table { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; flex: 1; }
+  .queue-header { display: grid; grid-template-columns: 120px 110px 140px 1fr 200px 140px; padding: 14px 22px; border-bottom: 1px solid var(--border); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); gap: 16px; }
+  .queue-row { display: grid; grid-template-columns: 120px 110px 140px 1fr 200px 140px; padding: 16px 22px; border-bottom: 1px solid var(--border); font-size: 14px; gap: 16px; align-items: center; }
+  .queue-row:last-child { border-bottom: none; }
+  .queue-row.selected { background: var(--accent-soft); }
+  .sev-badge { font-family: var(--font-mono); font-size: 12px; font-weight: 700; letter-spacing: 0.06em; }
+  .sev-critical { color: var(--critical); }
+  .sev-high     { color: var(--high); }
+  .sev-medium   { color: var(--medium); }
+  .risk-bar-wrap { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; font-family: var(--font-mono); }
+  .risk-bar-bg { flex: 1; height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; }
+  .risk-bar-fill { height: 100%; border-radius: 3px; background: linear-gradient(90deg, var(--accent), var(--critical)); }
+  .mono-id { font-family: var(--font-mono); font-size: 13px; color: var(--text-muted); }
+  .threat-text { font-size: 14px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .time-text { font-size: 13px; color: var(--text-muted); }
+  .status-open { font-size: 13px; color: var(--accent); font-weight: 600; }
+
+  /* ─── Scene 3: Kill Chain ─── */
+  #scene-killchain { background: var(--bg); flex-direction: row; align-items: stretch; padding: 0; }
+  .incident-panel { display: flex; flex-direction: column; padding: 48px 64px; gap: 26px; width: 100%; }
+  .incident-title { font-size: 34px; font-weight: 700; color: var(--text); margin-bottom: 6px; }
+  .incident-meta { display: flex; align-items: center; gap: 14px; font-family: var(--font-mono); font-size: 14px; color: var(--text-muted); margin-bottom: 4px; }
+  .tabs { display: flex; border-bottom: 1px solid var(--border); margin-bottom: 8px; }
+  .tab { padding: 12px 22px; font-size: 14px; font-weight: 500; color: var(--text-muted); border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  .tab.active { color: var(--text); border-bottom-color: var(--accent); }
+  .kc-caption { font-size: 14px; color: var(--text-muted); margin-bottom: 4px; }
+
+  #kc-list { position: relative; display: flex; flex-direction: column; }
+  .kc-step { display: flex; gap: 22px; }
+  .kc-marker { display: flex; flex-direction: column; align-items: center; flex: 0 0 auto; }
+  .kc-dot { width: 16px; height: 16px; border-radius: 50%; margin-top: 4px; flex-shrink: 0; }
+  .kc-dot.amber { background: var(--high); box-shadow: 0 0 0 5px rgba(245,165,36,0.20); }
+  .kc-dot.red   { background: var(--critical); box-shadow: 0 0 0 5px rgba(229,72,77,0.20); }
+  .kc-line { width: 2px; flex: 1 1 auto; min-height: 46px; background: var(--border); margin: 4px 0; }
+  .kc-body { flex: 1 1 auto; padding-bottom: 30px; }
+  .kc-head { display: flex; align-items: baseline; gap: 14px; }
+  .kc-threat { font-size: 22px; font-weight: 700; color: var(--text); }
+  .kc-count { font-family: var(--font-mono); font-size: 16px; color: var(--text-muted); }
+  .kc-meta { font-size: 15px; color: var(--text-muted); margin-top: 6px; }
+  .kc-mitre { font-size: 14px; color: var(--text-muted); margin-top: 8px; }
+  .kc-mitre code { font-family: var(--font-mono); background: var(--surface-r); border: 1px solid var(--border); border-radius: 4px; padding: 2px 8px; color: var(--accent); }
+
+  .diode-stamp { position: absolute; bottom: 28px; right: 40px; font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); opacity: 0.45; letter-spacing: 0.12em; }
+
+  /* ─── Scene 4: Number + Outro ─── */
+  #scene-number { background: var(--bg); flex-direction: column; gap: 14px; }
+  #stat-value { font-family: var(--font-ui); font-size: 148px; font-weight: 800; color: var(--text); letter-spacing: -0.02em; }
+  #stat-sub { font-family: var(--font-mono); font-size: 22px; color: var(--text-muted); opacity: 0; }
+
+  #scene-outro { background: var(--bg); flex-direction: column; gap: 18px; }
+  .outro-name { font-size: 68px; font-weight: 800; color: var(--text); letter-spacing: -0.03em; }
+  .outro-tagline { font-size: 22px; font-weight: 400; color: var(--text-muted); letter-spacing: 0.12em; text-transform: uppercase; font-family: var(--font-mono); }
+</style>
+</head>
+<body>
+
+<div data-hf-id="hf-root" id="composition" class="composition-root" data-composition-id="neuralsoc-brag" data-width="1920" data-height="1080" data-duration="20">
+
+<audio data-hf-id="hf-music" id="bg-music" data-start="0" data-duration="20" data-track-index="10" data-volume="0.30" src="assets/music/happy-beats-business-moves-vol-12-by-ende-dot-app.mp3"></audio>
+
+<audio data-hf-id="hf-k1" id="tick-1" data-start="0.55" data-duration="0.12" data-track-index="20" data-volume="0.22" src="assets/sfx/keyboard/keypress-002.wav"></audio>
+<audio data-hf-id="hf-k2" id="tick-2" data-start="1.15" data-duration="0.12" data-track-index="21" data-volume="0.20" src="assets/sfx/keyboard/keypress-006.wav"></audio>
+
+<audio data-hf-id="hf-kc" id="sfx-kc" data-start="13.11" data-duration="0.11" data-track-index="12" data-volume="0.50" src="assets/sfx/interface/drop_001.ogg"></audio>
+
+<audio data-hf-id="hf-bong" id="sfx-bong" data-start="17.47" data-duration="0.12" data-track-index="13" data-volume="0.55" src="assets/sfx/interface/bong_001.ogg"></audio>
+
+  <!-- ─── Scene 1: Hook ─── 0–3.5s -->
+  <div data-hf-id="hf-s1" class="clip scene" id="scene-hook" data-start="0" data-duration="3.5">
+    <div data-hf-id="hf-h1" id="hook-line-1">
+      <span data-hf-id="hf-h1t" id="hook-text"></span>
+      <span data-hf-id="hf-h1c" id="hook-cursor"></span>
+    </div>
+    <div data-hf-id="hf-h2" id="hook-line-2">That's not a limitation. That's the point.</div>
+    <div data-hf-id="hf-s1d" class="diode-stamp">DIODE: ONE-WAY</div>
+  </div>
+
+  <!-- ─── Scene 2: Command center ─── 3.5–8.74s -->
+  <div data-hf-id="hf-s2" class="clip scene" id="scene-dashboard" data-start="3.5" data-duration="5.24" style="flex-direction:row;align-items:stretch;">
+    <div data-hf-id="hf-sb" class="dash-sidebar">
+      <div data-hf-id="hf-sblogo" class="sidebar-logo">
+        <svg data-hf-id="hf-sbsvg" width="22" height="22" viewBox="0 0 24 24" fill="none">
+          <path data-hf-id="hf-sbp1" d="M12 2L3 7v5c0 5.25 3.75 10.15 9 11.35C17.25 22.15 21 17.25 21 12V7L12 2z" fill="#3b82f6" opacity="0.9" />
+          <path data-hf-id="hf-sbp2" d="M12 6L6 9.5v3.5c0 3.25 2.5 6.3 6 7.15 3.5-.85 6-3.9 6-7.15V9.5L12 6z" fill="#1e40af" />
+        </svg>
+        NeuralSOC
+      </div>
+      <div data-hf-id="hf-broker" class="broker-pill"><div data-hf-id="hf-bdot" class="broker-dot"></div>BROKER LIVE</div>
+      <div data-hf-id="hf-nav1" class="sidebar-nav-item active">⚡ Incidents</div>
+      <div data-hf-id="hf-nav2" class="sidebar-nav-item">🔍 Investigate</div>
+      <div data-hf-id="hf-nav3" class="sidebar-nav-item">🌐 Network</div>
+      <div data-hf-id="hf-nav4" class="sidebar-nav-item">❤ Health</div>
+      <div data-hf-id="hf-sbspace" class="sidebar-spacer"></div>
+      <div data-hf-id="hf-sbfoot" class="sidebar-footer">analyst@demo.tsoc.local<br data-hf-id="hf-sbbr">ENV: DEMO · DIODE: ONE-WAY</div>
+    </div>
+    <div data-hf-id="hf-main" class="dash-main">
+      <div data-hf-id="hf-title" class="dash-title">Operations Overview</div>
+      <div data-hf-id="hf-kpis" class="kpi-strip">
+        <div data-hf-id="hf-kpi1" class="kpi-card accent" id="kpi-1">
+          <div data-hf-id="hf-kpi1l" class="kpi-label">Needs Triage</div>
+          <div data-hf-id="hf-kpi1v" class="kpi-value">14</div>
+          <div data-hf-id="hf-kpi1s" class="kpi-sub">untouched incidents</div>
+        </div>
+        <div data-hf-id="hf-kpi2" class="kpi-card critical" id="kpi-2">
+          <div data-hf-id="hf-kpi2l" class="kpi-label">Critical</div>
+          <div data-hf-id="hf-kpi2v" class="kpi-value">7</div>
+        </div>
+        <div data-hf-id="hf-kpi3" class="kpi-card high" id="kpi-3">
+          <div data-hf-id="hf-kpi3l" class="kpi-label">High</div>
+          <div data-hf-id="hf-kpi3v" class="kpi-value">12</div>
+        </div>
+      </div>
+      <div data-hf-id="hf-qt" class="queue-title">Incident Queue</div>
+      <div data-hf-id="hf-qtable" class="queue-table">
+        <div data-hf-id="hf-qhead" class="queue-header">
+          <div data-hf-id="hf-qh1">First Seen</div><div data-hf-id="hf-qh2">Severity</div><div data-hf-id="hf-qh3">Risk</div>
+          <div data-hf-id="hf-qh4">Threat Class</div><div data-hf-id="hf-qh5">Entities</div><div data-hf-id="hf-qh6">Status</div>
+        </div>
+        <div data-hf-id="hf-row1" class="queue-row selected" id="row-1">
+          <div data-hf-id="hf-r1a" class="time-text">2m ago</div>
+          <div data-hf-id="hf-r1b" class="sev-badge sev-critical">CRITICAL</div>
+          <div data-hf-id="hf-r1c" class="risk-bar-wrap"><span data-hf-id="hf-r1c1">95</span><div data-hf-id="hf-r1c2" class="risk-bar-bg"><div data-hf-id="hf-r1c3" class="risk-bar-fill" style="width:95%"></div></div></div>
+          <div data-hf-id="hf-r1d" class="threat-text">Anomalous Flow / Data Exfiltration</div>
+          <div data-hf-id="hf-r1e" class="mono-id">10.0.0.5</div>
+          <div data-hf-id="hf-r1f" class="status-open">Open</div>
+        </div>
+        <div data-hf-id="hf-row2" class="queue-row" id="row-2">
+          <div data-hf-id="hf-r2a" class="time-text">7m ago</div>
+          <div data-hf-id="hf-r2b" class="sev-badge sev-high">HIGH</div>
+          <div data-hf-id="hf-r2c" class="risk-bar-wrap"><span data-hf-id="hf-r2c1">74</span><div data-hf-id="hf-r2c2" class="risk-bar-bg"><div data-hf-id="hf-r2c3" class="risk-bar-fill" style="width:74%"></div></div></div>
+          <div data-hf-id="hf-r2d" class="threat-text">C2 Beaconing</div>
+          <div data-hf-id="hf-r2e" class="mono-id">10.0.1.23</div>
+          <div data-hf-id="hf-r2f" class="status-open">Open</div>
+        </div>
+        <div data-hf-id="hf-row3" class="queue-row" id="row-3">
+          <div data-hf-id="hf-r3a" class="time-text">14m ago</div>
+          <div data-hf-id="hf-r3b" class="sev-badge sev-medium">MEDIUM</div>
+          <div data-hf-id="hf-r3c" class="risk-bar-wrap"><span data-hf-id="hf-r3c1">41</span><div data-hf-id="hf-r3c2" class="risk-bar-bg"><div data-hf-id="hf-r3c3" class="risk-bar-fill" style="width:41%"></div></div></div>
+          <div data-hf-id="hf-r3d" class="threat-text">Reconnaissance</div>
+          <div data-hf-id="hf-r3e" class="mono-id">172.16.0.8</div>
+          <div data-hf-id="hf-r3f" class="status-open">Open</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── Scene 3: Kill Chain ─── 8.74–15.74s -->
+  <div data-hf-id="hf-s3" class="clip scene" id="scene-killchain" data-start="8.74" data-duration="7.0" style="flex-direction:row;align-items:stretch;">
+    <div data-hf-id="hf-ip" class="incident-panel">
+      <div data-hf-id="hf-iphead">
+        <div data-hf-id="hf-iptitle" class="incident-title">Anomalous Flow / Data Exfiltration</div>
+        <div data-hf-id="hf-ipmeta" class="incident-meta">
+          <span data-hf-id="hf-ipid" class="mono-id">INC-10-0-0-5</span>
+          <span data-hf-id="hf-ipbadge" class="sev-badge sev-critical">CRITICAL</span>
+        </div>
+      </div>
+      <div data-hf-id="hf-tabs" class="tabs">
+        <div data-hf-id="hf-tab1" class="tab">Summary</div>
+        <div data-hf-id="hf-tab2" class="tab active">Kill Chain</div>
+        <div data-hf-id="hf-tab3" class="tab">Evidence</div>
+        <div data-hf-id="hf-tab4" class="tab">ATT&amp;CK Mapping</div>
+      </div>
+      <div data-hf-id="hf-cap" class="kc-caption">2 correlated signal(s) condensed into attack phases, in the real order they were observed.</div>
+      <div data-hf-id="hf-kclist" id="kc-list">
+        <div data-hf-id="hf-kc1" class="kc-step" id="kc-1">
+          <div data-hf-id="hf-kc1m" class="kc-marker">
+            <div data-hf-id="hf-kc1dot" class="kc-dot amber"></div>
+            <div data-hf-id="hf-kc1line" class="kc-line"></div>
+          </div>
+          <div data-hf-id="hf-kc1body" class="kc-body">
+            <div data-hf-id="hf-kc1head" class="kc-head">
+              <span data-hf-id="hf-kc1threat" class="kc-threat">Anomalous Flow</span>
+              <span data-hf-id="hf-kc1count" class="kc-count">× 37</span>
+            </div>
+            <div data-hf-id="hf-kc1meta" class="kc-meta">DL_AUTOENCODER_FLOW_ANOMALY · 22:01:28 → 22:01:29 UTC</div>
+          </div>
+        </div>
+        <div data-hf-id="hf-kc2" class="kc-step" id="kc-2">
+          <div data-hf-id="hf-kc2m" class="kc-marker">
+            <div data-hf-id="hf-kc2dot" class="kc-dot red"></div>
+          </div>
+          <div data-hf-id="hf-kc2body" class="kc-body">
+            <div data-hf-id="hf-kc2head" class="kc-head">
+              <span data-hf-id="hf-kc2threat" class="kc-threat">Data Exfiltration</span>
+              <span data-hf-id="hf-kc2count" class="kc-count">× 63</span>
+            </div>
+            <div data-hf-id="hf-kc2meta" class="kc-meta">RULE_EXFIL_BYTE_VOLUME · 22:01:28 → 22:01:29 UTC</div>
+            <div data-hf-id="hf-kc2mitre" class="kc-mitre">Exfiltration · <code data-hf-id="hf-kc2code">T1048</code></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div data-hf-id="hf-s3d" class="diode-stamp">DIODE: ONE-WAY</div>
+  </div>
+
+  <!-- ─── Scene 4a: Number ─── 15.74–18.2s (within scene 4 block) -->
+  <div data-hf-id="hf-s4" class="clip scene" id="scene-number" data-start="15.74" data-duration="2.5">
+    <div data-hf-id="hf-statv" id="stat-value">0%</div>
+    <div data-hf-id="hf-stats" id="stat-sub">precision — real botnet traffic, not synthetic</div>
+  </div>
+
+  <!-- ─── Scene 4b: Outro ─── 18.2–20s -->
+  <div data-hf-id="hf-s5" class="clip scene" id="scene-outro" data-start="18.2" data-duration="1.8">
+    <div data-hf-id="hf-outrologo" id="outro-logo">
+      <svg data-hf-id="hf-osvg" width="76" height="76" viewBox="0 0 24 24" fill="none">
+        <path data-hf-id="hf-op1" d="M12 2L3 7v5c0 5.25 3.75 10.15 9 11.35C17.25 22.15 21 17.25 21 12V7L12 2z" fill="#3b82f6" opacity="0.85" />
+        <path data-hf-id="hf-op2" d="M12 6L6 9.5v3.5c0 3.25 2.5 6.3 6 7.15 3.5-.85 6-3.9 6-7.15V9.5L12 6z" fill="#1e40af" />
+      </svg>
+    </div>
+    <div data-hf-id="hf-oname" class="outro-name" id="outro-name" style="opacity:0">NeuralSOC</div>
+    <div data-hf-id="hf-otag" class="outro-tagline" id="outro-tagline" style="opacity:0">Passive · Precise · Paranoid</div>
+  </div>
+
+</div><!-- /#composition -->
+
+<script>
+// ─── GSAP Timeline ───
+const tl = gsap.timeline({ paused: true });
+
+// Scene 1 — Hook
+tl.to('#scene-hook', { opacity: 1, duration: 0.3, ease: 'power2.out' }, 0)
+  .to('#scene-hook', { opacity: 0, duration: 0.3, ease: 'power2.in'  }, 3.2);
+
+const hookFull = "It can't write back to your network.";
+const hookEl = document.getElementById('hook-text');
+const hookTyper = { progress: 0 };
+tl.to(hookTyper, {
+  progress: 1,
+  duration: 1.4,
+  ease: 'none',
+  onUpdate: function() {
+    const chars = Math.round(hookTyper.progress * hookFull.length);
+    hookEl.textContent = hookFull.slice(0, chars);
+  }
+}, 0.4);
+tl.to('#hook-cursor', { opacity: 0, repeat: 40, yoyo: true, duration: 0.5, ease: 'none' }, 0);
+tl.to('#hook-line-2', { opacity: 1, duration: 0.5, ease: 'power2.out' }, 2.1);
+
+// Scene 2 — Command center
+tl.to('#scene-dashboard', { opacity: 1, duration: 0.4, ease: 'power2.out' }, 3.5);
+tl.to('#scene-dashboard', { opacity: 0, duration: 0.3, ease: 'power2.in'  }, 8.44);
+
+const kpiCards = ['#kpi-1', '#kpi-2', '#kpi-3'];
+const kpiTimes = [3.9, 4.3, 4.7]; // absolute timeline seconds
+gsap.set(kpiCards, { opacity: 0, y: 14 });
+kpiCards.forEach((sel, i) => {
+  tl.to(sel, { opacity: 1, y: 0, duration: 0.35, ease: 'power3.out' }, kpiTimes[i]);
+});
+
+const rows = ['#row-1', '#row-2', '#row-3'];
+const rowTimes = [5.3, 5.7, 6.1]; // absolute timeline seconds
+gsap.set(rows, { opacity: 0, y: 10 });
+rows.forEach((sel, i) => {
+  tl.to(sel, { opacity: 1, y: 0, duration: 0.35, ease: 'power3.out' }, rowTimes[i]);
+});
+
+// Scene 3 — Kill Chain
+tl.to('#scene-killchain', { opacity: 1, duration: 0.5, ease: 'power2.out' }, 8.74);
+tl.to('#scene-killchain', { opacity: 0, duration: 0.3, ease: 'power2.in'  }, 15.44);
+
+gsap.set(['#kc-1', '#kc-2'], { opacity: 0, x: -18 });
+// Phase 1: silent arrival, early in the scene
+tl.to('#kc-1', { opacity: 1, x: 0, duration: 0.4, ease: 'power2.out' }, 9.2);
+// Phase 2: // beat-locked: 13.11s
+tl.to('#kc-2', { opacity: 1, x: 0, duration: 0.4, ease: 'power2.out' }, 13.11);
+
+// Scene 4a — Number count-up (0 → 98.3, landing // beat-locked: 17.47s)
+tl.to('#scene-number', { opacity: 1, duration: 0.4, ease: 'power2.out' }, 15.74);
+tl.to('#scene-number', { opacity: 0, duration: 0.3, ease: 'power2.in'  }, 18.0);
+
+const statEl = document.getElementById('stat-value');
+const statCounter = { v: 0 };
+tl.to(statCounter, {
+  v: 98.3,
+  duration: 1.73,
+  ease: 'power2.out',
+  onUpdate: function() {
+    statEl.textContent = statCounter.v.toFixed(1) + '%';
+  }
+}, 15.74); // lands exactly at 15.74 + 1.73 = 17.47
+tl.to('#stat-sub', { opacity: 1, duration: 0.4, ease: 'power2.out' }, 17.6);
+
+// Scene 4b — Outro
+tl.to('#scene-outro', { opacity: 1, duration: 0.5, ease: 'power2.out' }, 18.2);
+tl.to('#outro-logo', { opacity: 1, scale: 1, duration: 0.5, ease: 'back.out(1.4)' }, 18.4);
+gsap.set('#outro-logo', { opacity: 0, scale: 0.9 });
+tl.to('#outro-name', { opacity: 1, duration: 0.45, ease: 'power2.out' }, 18.7);
+tl.to('#outro-tagline', { opacity: 1, duration: 0.45, ease: 'power2.out' }, 19.05);
+
+// Music fade-out (HyperFrames owns real audio mixing in render; this
+// tween keeps preview parity only)
+const musicFader = { v: 0.30 };
+tl.to(musicFader, {
+  v: 0,
+  duration: 2.0,
+  ease: 'power2.in',
+  onUpdate: function() {
+    const el = document.getElementById('bg-music');
+    if (el && typeof el.volume !== 'undefined') el.volume = Math.max(0, musicFader.v);
+  }
+}, 18.0);
+
+// ─── Register timeline on window.__timelines (HyperFrames contract) ───
+window.__timelines = window.__timelines || {};
+window.__timelines['neuralsoc-brag'] = tl;
+
+// ─── Preview autoplay (standalone only — HyperFrames overrides in render) ───
+document.fonts.ready.then(() => {
+  tl.play();
+});
+</script>
+</body>
+</html>
