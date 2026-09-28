@@ -342,7 +342,7 @@ jobs:
         # Dockerfile.dashboard.dockerignore convention Dockerfile.dashboard
         # relies on (plain `docker build` without Buildx ignores it and
         # falls back to the repo-root .dockerignore instead).
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
