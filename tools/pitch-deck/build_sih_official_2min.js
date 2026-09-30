@@ -152,23 +152,16 @@ async function main() {
       { text: '1.15% FPR', options: { bold: true, color: C.accentBlue, fontSize: 9.5 } },
     ], { x: vX, y: vfY + vfH + 0.44, w: vW, h: 0.24, isTextBox: true, margin: 0 });
 
-    // Three differentiator tags right under the stat line -- fills what was
-    // dead space with scannable, real claims instead of a bigger empty card.
-    const tags1 = ['Zero disruption', 'MITRE-mapped', 'Self-hosted'];
-    let tgx = vX;
-    for (const tag of tags1) {
-      const tw = 0.28 + tag.length * 0.074;
-      s.addShape('roundRect', { x: tgx, y: vfY + vfH + 0.7, w: tw, h: 0.32, rectRadius: 0.16, fill: { color: C.accentBlueTint }, line: { type: 'none' } });
-      s.addText(tag, { x: tgx, y: vfY + vfH + 0.7, w: tw, h: 0.32, isTextBox: true, margin: 0, align: 'center', valign: 'middle', fontFace: FONT_MONO, fontSize: 8, color: C.accentBlue, bold: true });
-      tgx += tw + 0.14;
-    }
-
     // Adobe Acrobat/Reader gates embedded video behind a one-time "trust
     // this document" prompt (its own security setting, not fixable from
     // the file side) -- a note plus a real QR fallback (its own bordered
     // card, matching the "VIEW THE SOURCE" panel's treatment below)
-    // beats a judge assuming the video is broken and moving on.
-    const noteY = vfY + vfH + 1.06, noteH = 0.52, qrSize = 0.42, qrPad = 0.05, qrBox = qrSize + qrPad * 2;
+    // beats a judge assuming the video is broken and moving on. The QR
+    // encodes a long GitHub release URL (dense module grid), so it needs
+    // real size to stay scannable -- the differentiator-tag row that used
+    // to sit here was dropped to make room; the stat line above already
+    // carries the numbers that matter most.
+    const noteY = vfY + vfH + 0.8, noteH = 0.72, qrSize = 0.62, qrPad = 0.06, qrBox = qrSize + qrPad * 2;
     s.addShape('roundRect', { x: vX + vW - qrBox, y: noteY, w: qrBox, h: qrBox, rectRadius: 0.06, fill: { color: 'FFFFFF' }, line: { color: C.border, width: 1 } });
     s.addImage({ path: '/Users/chakri/Downloads/sih14-redesign/assets/qr_2min_video.png', x: vX + vW - qrBox + qrPad, y: noteY + qrPad, w: qrSize, h: qrSize });
     s.addText([
