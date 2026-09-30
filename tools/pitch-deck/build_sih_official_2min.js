@@ -131,19 +131,17 @@ async function main() {
       ey += 0.72;
     }
 
-    // --- Right: a static poster frame with a play-button look, not a real
-    // embedded video. An earlier version used addMedia() -- LibreOffice's
-    // PDF export turns that into a /Screen multimedia annotation, which
-    // Adobe Acrobat/Reader blocks by default behind a "trust this
-    // document" prompt (a viewer-side security gate, not something the
-    // document can waive). The actual video ships as its own MP4 file
-    // (no trust prompt ever applies to a plain video file), so this panel
-    // is just a preview pointing at it.
+    // --- Right: a real video slot, sized and labeled so a judge finds it
+    // immediately -- drop the actual recording in here in PowerPoint.
     const vX = 7.55, vW = 5.15;
     s.addText('WATCH THE DEMO', { x: vX, y: 2.25, w: vW, h: 0.24, isTextBox: true, margin: 0, fontFace: FONT_MONO, fontSize: 9.5, bold: true, color: C.headlineNavy, charSpacing: 1.5 });
     const vfH = vW * 9 / 16, vfY = 2.55;
     s.addShape('roundRect', { x: vX, y: vfY, w: vW, h: vfH, rectRadius: 0.08, fill: { color: '000000' }, line: { type: 'none' } });
-    s.addImage({ path: '/Users/chakri/Downloads/sih14-redesign/assets/video_poster.jpg', x: vX, y: vfY, w: vW, h: vfH });
+    s.addMedia({
+      type: 'video',
+      path: '/Users/chakri/Downloads/hackaton/project/neuralsoc-videos/composition_2min/renders/composition_2min_2026-09-30_01-43-45.mp4',
+      x: vX, y: vfY, w: vW, h: vfH,
+    });
 
     s.addText('Full walkthrough: passive capture → seven detectors → one correlated, explainable incident.', {
       x: vX, y: vfY + vfH + 0.16, w: vW, h: 0.42, isTextBox: true, margin: 0, fontFace: FONT_BODY, fontSize: 9, color: C.bodyGray, lineSpacing: 12,
