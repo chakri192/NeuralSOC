@@ -47,7 +47,7 @@ Tested against public datasets of real malware traffic, not just generated data:
 |---|---|---|---|
 | Malware domain (DGA) classifier | 84.6% | 77.2% | 13.9% |
 | Unusual-connection model | 95.8% | 54.5% | 0.63% |
-| Combined incident score | 98.3% | 53.0% | |
+| Combined incident score | 98.3% | 53.0% | 1.15% |
 
 Details and datasets are in [SECURITY.md](SECURITY.md#model-validation-against-real-world-data).
 
@@ -212,3 +212,8 @@ Before deploying:
 | [docs/THREAT_TAXONOMY.md](docs/THREAT_TAXONOMY.md) | Threats and their ATT&CK mappings |
 | [docs/DISASTER_RECOVERY.md](docs/DISASTER_RECOVERY.md) | Backup and restore |
 | [docs/MODEL_ROTATION.md](docs/MODEL_ROTATION.md) | Replacing models safely |
+| [docs/DGA_MODEL_ROADMAP.md](docs/DGA_MODEL_ROADMAP.md) | What was tried on the DGA model, including what didn't work and why |
+
+## License
+
+MIT — see [LICENSE](LICENSE).

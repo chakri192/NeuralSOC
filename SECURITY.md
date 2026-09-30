@@ -508,7 +508,7 @@ now catches almost everything the rule-based detectors used to add on
 top of it (composite lead over best-single-detector shrank from +7.3
 points to +0.4). This is disclosed, not spun: the flow autoencoder
 retrain was a real, isolated win: precision 98.3%, recall 53.0%, FPR
-1.16% (composite's own FPR rose from 0.80% to 1.16%, tracking the flow
+1.15% (composite's own FPR rose from 0.80% to 1.15%, tracking the flow
 autoencoder's own FPR increase — still well under the 2% ceiling this
 project's composite detectors already tolerate for correlating
 signals, but a real, disclosed cost of the recall gain, not something
@@ -1052,7 +1052,7 @@ expected consequence of the flow autoencoder itself getting
 meaningfully better at generalizing, not a regression in corroboration:
 there's simply less incremental recall left for the rule-based
 detectors to add on top of a much stronger anchor detector. FPR rose
-from 0.80% to 1.16% for the same reason, tracking the flow
+from 0.80% to 1.15% for the same reason, tracking the flow
 autoencoder's own real FPR increase (0.21% → 0.63% on its own leak-free
 gate) rather than any new false-positive source. The composite baseline
 was re-seeded against this measurement for the same reason as before —

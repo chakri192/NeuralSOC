@@ -19,7 +19,11 @@ FROM python:3.12-slim-bookworm@sha256:782412e85d0f0984994c290652577d4018aff08145
 # curl is for the HEALTHCHECK below, which matters for `docker compose up`/
 # local `docker run` (k8s ignores Docker HEALTHCHECK -- it uses the
 # manifests' own liveness/readiness probes instead).
-RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
+# apt-get upgrade pulls Debian security-repo patches released after the
+# base image digest above was pinned (2026-09-05) -- without it, CI's
+# Trivy scan fails the build on HIGH-severity CVEs (e.g. libpcre2-8-0)
+# fixed upstream but absent from the pinned layer.
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
 # --uid 1000 pinned explicitly: k8s/soc-deployment.yaml hardcodes
 # securityContext.runAsUser: 1000 on every workload. Without pinning here,
 # a base-image change that happens to pre-create a UID-1000 user shifts

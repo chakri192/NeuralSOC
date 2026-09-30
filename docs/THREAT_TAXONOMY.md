@@ -1,122 +1,124 @@
-#  Cyber Threat Taxonomy & Detection Matrix
+# Cyber Threat Taxonomy & Detection Matrix
 
-Comprehensive mapping of all 6 threat categories specified in the Problem Statement to MITRE ATT&CK techniques, detection algorithms, and evidence schemas.
+Mapping of the 6 threat categories NeuralSOC detects to MITRE ATT&CK techniques, the rules/models behind them, and real evidence schemas from the code.
+
+Each category can fire from more than one detector: a fast single-flow rule in `inference/rules.py` (evaluated per-event) and, for several categories, an additional windowed/behavioral rule in `inference/conn_behavior.py` or `inference/dns_behavior.py` (evaluated over a rolling window of related events — see [SECURITY.md](../SECURITY.md) for why both layers exist). The tables below show one representative real `rule_id` and evidence example per category, not an exhaustive list of every rule that can contribute to it.
 
 ---
 
-##  Threat Matrix Overview
+## Threat Matrix Overview
 
 | Code | Threat Category | Primary Detection Technique | MITRE ATT&CK ID | Default Severity |
 | :--- | :--- | :--- | :--- | :--- |
-| **a** | **Volumetric / Protocol DDoS** | SYN flood rate & UDP amplification port tracking | **T1498** (Network DoS) | `CRITICAL` |
-| **b** | **Botnet C2 Beaconing** | Inter-Arrival Time (IAT) periodicity & Jitter CV ($CV < 0.15$) | **T1071** (App Layer Protocol) | `HIGH` |
-| **c** | **DGA Domains & DNS Tunnelling** | Shannon Entropy ($H > 3.8$), Random Forest ML & Hex/Base64 TXT parsing | **T1568.002** (DGA) / **T1071.004** (DNS) | `CRITICAL` / `HIGH` |
-| **d** | **Encrypted Malware Sessions** | JA3/JA4 TLS fingerprinting, SNI entropy & self-signed certificates | **T1071.001** (Web Protocols) / **T1573.002** (Asymmetric Crypt) | `CRITICAL` |
-| **e** | **Reconnaissance & Port Scanning** | Stateful sliding window fan-out tracker (Horizontal sweeps & vertical scans) | **T1046** (Network Service Discovery) | `HIGH` |
-| **f** | **Data Exfiltration** | Unilateral byte asymmetry ratios ($R > 500:1$) & Isolation Forest | **T1048** (Exfiltration Over Protocol) | `CRITICAL` |
+| **a** | **Volumetric / Protocol DDoS** | Packet-rate/volume thresholds on TCP SYN floods and rejected-connection floods | **T1498** (Network DoS) | `CRITICAL` |
+| **b** | **Botnet C2 Beaconing** | Tiny repeated payloads on non-standard ports; Inter-Arrival Time jitter for windowed beacon detection | **T1071** (App Layer Protocol) / **T1132** (Data Encoding) | `HIGH` |
+| **c** | **DGA Domains & DNS Tunnelling** | Hybrid CNN + lexical-feature classifier (`DGA_HybridModel`), entropy fallback rule & long-TXT-record tunnelling check | **T1568.002** (DGA) / **T1071.004** (DNS) | `CRITICAL` / `HIGH` |
+| **d** | **Unusual Connections** | Flow autoencoder (reconstruction error vs. a calibrated threshold) — connections that don't fit normal traffic shape | **T1071** (App Layer Protocol, general) | `MEDIUM` |
+| **e** | **Reconnaissance & Port Scanning** | Low-packet `S0` (unanswered SYN) connections per source | **T1046** (Network Service Discovery) | `LOW`–`HIGH` |
+| **f** | **Data Exfiltration** | Unilateral byte asymmetry — large outbound, negligible inbound | **T1048** (Exfiltration Over Alternative Protocol) | `HIGH` |
 
 ---
 
-##  Detailed Threat Class Breakdowns
+## Detailed Threat Class Breakdowns
 
-### 1. Volumetric / Protocol DDoS (`VOLUMETRIC_PROTOCOL_DDOS`)
-- **Vectors Monitored**:
-  - TCP SYN Floods (`conn_state`: `S0` or `RSTOS0` with high packet rates).
-  - UDP Protocol Amplification: NTP (port 123), DNS (port 53), Memcached (port 11211), SSDP (port 1900), SNMP (port 161).
-- **Evidence Output**:
+### 1. Volumetric / Protocol DDoS (`RULE_DDOS_VOLUMETRIC`)
+- **Vectors Monitored**: a single connection with >10,000 originator packets (critical), or a rejected (`REJ`) connection with ≥100 originator packets (high) — the packet-count gate exists specifically so a single closed port doesn't get flagged as a critical DDoS event.
+- **Evidence Output** (`inference/rules.py`):
   ```json
   {
-    "reason": "High-rate uncompleted TCP SYN flood (350 packets, state=S0)",
-    "subclass": "TCP_SYN_FLOOD",
-    "packets_per_sec": 3500.0,
-    "proto": "tcp",
-    "conn_state": "S0"
+    "rule_id": "RULE_DDOS_VOLUMETRIC",
+    "threat_class": "DDoS",
+    "severity": "critical",
+    "confidence": 0.95,
+    "evidence": {"conn_state": "S0", "orig_pkts": 14302},
+    "mitre_tactic": "Impact",
+    "mitre_technique": "T1498"
   }
   ```
 
 ---
 
-### 2. Botnet C2 Beaconing (`BOTNET_C2_BEACONING`)
-- **Vectors Monitored**:
-  - Low-jitter recurring connection heartbeats to command & control nodes.
-- **Evidence Output**:
+### 2. Botnet C2 Beaconing (`RULE_C2_HEARTBEAT`)
+- **Vectors Monitored**: tiny (50–150 byte) originator and responder payloads on a port other than 80/443/53 — the fingerprint of a heartbeat-style C2 check-in rather than a real application protocol.
+- **Evidence Output** (`inference/rules.py`):
   ```json
   {
-    "reason": "Periodic C2 Heartbeat: Interval ~10.0s (Jitter CV=0.012)",
-    "mean_interval_sec": 10.0,
-    "jitter_cv": 0.012,
-    "observed_pulses": 6,
-    "recent_iats": [10.0, 10.0, 9.98, 10.01, 10.0]
+    "rule_id": "RULE_C2_HEARTBEAT",
+    "threat_class": "C2 Beaconing",
+    "severity": "high",
+    "confidence": 0.85,
+    "evidence": {"orig_bytes": 88, "resp_bytes": 92, "port": 8443},
+    "mitre_tactic": "Command and Control",
+    "mitre_technique": "T1132"
+  }
+  ```
+- A separate windowed rule (`inference/conn_behavior.py`) tracks inter-arrival-time jitter across repeated connections between the same host pair, for slower beacons a single-flow rule can't see.
+
+---
+
+### 3. DGA Domains & DNS Tunnelling (`DL_CNN_DGA` / `RULE_DNS_TUNNELLING` / `RULE_DNS_DGA_FALLBACK`)
+- **Vectors Monitored**:
+  - Algorithmically-generated malware domains — scored by the `DGA_HybridModel` CNN (see [docs/MODEL_METHODOLOGY.md](MODEL_METHODOLOGY.md)).
+  - DNS tunnelling: any `TXT`-record query with a query string over 60 characters.
+  - An entropy fallback for longer domains the model doesn't see confidently.
+- **Evidence Output** (`inference/rules.py`, DNS tunnelling rule):
+  ```json
+  {
+    "rule_id": "RULE_DNS_TUNNELLING",
+    "threat_class": "DGA / DNS Tunnelling",
+    "severity": "high",
+    "evidence": {"query_length": 74, "qtype": "TXT"},
+    "mitre_tactic": "Command and Control",
+    "mitre_technique": "T1071.004"
   }
   ```
 
 ---
 
-### 3. DGA Domains & DNS Tunnelling (`DGA_DOMAIN` / `DNS_TUNNELING_EXFIL`)
-- **Vectors Monitored**:
-  - Algorithmic malware domain lookups (Conficker, Cryptolocker, Banjori).
-  - Encoded data exfiltration via deep subdomains or TXT/NULL record queries.
-- **Evidence Output**:
+### 4. Unusual Connections (`DL_AUTOENCODER_FLOW_ANOMALY`)
+- **Vectors Monitored**: connections whose shape (byte/packet volume, duration) reconstructs poorly under a `FlowAutoencoder` trained only on real, confirmed-benign CTU-13 traffic — a general anomaly signal for behavior none of the other five, more specific detectors are built to name. Zero payload decryption; scored from NetFlow-style metadata only.
+- **Evidence Output** (`inference/stream_processor_faust.py`):
   ```json
   {
-    "reason": "High-Entropy Long Subdomain Payload (58 chars, H=3.92)",
-    "query": "exfil.01af89e2bcd3456789abcdef012345.tunnel-c2.net",
-    "query_length": 58,
-    "entropy": 3.92,
-    "qtype": "TXT",
-    "subdomain_levels": 3
+    "threat_class": "Anomalous Flow",
+    "severity": "medium",
+    "rule_id": "DL_AUTOENCODER_FLOW_ANOMALY",
+    "evidence": {"reconstruction_mse": 0.0412, "threshold": 0.018}
   }
   ```
+- A separate rule, `RULE_TLS_JA4_MALWARE`, also exists for exact-match JA4 TLS fingerprinting against a curated malicious-fingerprint list — but ships with no real threat-intel feed by default and, per real-pcap investigation, **is not deployed in production** (see [docs/MODEL_METHODOLOGY.md](MODEL_METHODOLOGY.md#b-encrypted-session-metadata) and [SECURITY.md](../SECURITY.md)). It is not one of the product's six shipped-by-default detection categories.
 
 ---
 
-### 4. Encrypted Malware Sessions (`MALICIOUS_JA3_FINGERPRINT` / `ENCRYPTED_MALWARE_TLS`)
-- **Vectors Monitored**:
-  - Zero payload decryption.
-  - Client Hello JA3 signatures for Cobalt Strike, Sliver C2, Metasploit Meterpreter, TrickBot, AsyncRAT, QakBot.
-- **Evidence Output**:
+### 5. Reconnaissance & Port Scanning (`RULE_RECON_PORT_SCAN`)
+- **Vectors Monitored**: unanswered SYNs (`conn_state == "S0"`) with fewer than 5 originator packets — a single probe, not a volumetric flood.
+- **Evidence Output** (`inference/rules.py`):
   ```json
   {
-    "reason": "Known Malware / C2 Fingerprint: Cobalt Strike Beacon",
-    "ja3_hash": "a0e9f5d64349fb13191bc781f81f42e1",
-    "malware_family": "Cobalt Strike Beacon",
-    "threat_description": "Default Cobalt Strike Malleable C2 HTTPS Profile",
-    "sni": "cdn-cloud-update-service.com"
+    "rule_id": "RULE_RECON_PORT_SCAN",
+    "threat_class": "Reconnaissance",
+    "severity": "low",
+    "confidence": 0.75,
+    "evidence": {"conn_state": "S0", "target_port": 3389},
+    "mitre_tactic": "Discovery",
+    "mitre_technique": "T1046"
   }
   ```
+- A separate windowed rule (`inference/conn_behavior.py`) tracks fan-out — one source touching many distinct ports or hosts — for slower scans a single connection's fields can't show.
 
 ---
 
-### 5. Reconnaissance & Port Scanning (`RECON_PORT_SCAN`)
-- **Vectors Monitored**:
-  - Vertical Port Scans: Single source scanning $\ge 12$ distinct ports on a single host.
-  - Horizontal Host Sweeps: Single source sweeping a common service port across many subnet hosts.
-- **Evidence Output**:
+### 6. Data Exfiltration (`RULE_CONN_EXFIL`)
+- **Vectors Monitored**: outbound transfers over 5MB with under 10KB returned — a large, unilateral byte asymmetry.
+- **Evidence Output** (`inference/rules.py`):
   ```json
   {
-    "reason": "Active Reconnaissance: Vertical Port Scan",
-    "scan_type": "VERTICAL_PORT_SCAN",
-    "target": "192.168.1.50",
-    "unique_probes": 15,
-    "details": {
-      "sample_ports": [21, 22, 23, 25, 80, 443, 445, 3389]
-    }
-  }
-  ```
-
----
-
-### 6. Data Exfiltration (`DATA_EXFILTRATION` / `FLOW_ANOMALY`)
-- **Vectors Monitored**:
-  - Massive unilateral outbound byte transfers with negligible response volume ($R_{byte} > 500:1$).
-  - Outlier flow velocities flagged by Isolation Forest.
-- **Evidence Output**:
-  ```json
-  {
-    "reason": "Massive Unidirectional Outbound Transfer: 68.5 MB sent, 140 bytes received (Asymmetry: 489285:1)",
-    "orig_bytes": 71827456,
-    "resp_bytes": 140,
-    "byte_asymmetry_ratio": 489285.0,
-    "duration_sec": 4.8
+    "rule_id": "RULE_CONN_EXFIL",
+    "threat_class": "Data Exfiltration",
+    "severity": "high",
+    "confidence": 0.85,
+    "evidence": {"orig_bytes": 71827456, "resp_bytes": 140},
+    "mitre_tactic": "Exfiltration",
+    "mitre_technique": "T1048"
   }
   ```
