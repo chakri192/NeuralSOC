@@ -174,12 +174,6 @@ async function main() {
       s.addText(tag, { x: tgx, y: noteY, w: tw, h: 0.3, isTextBox: true, margin: 0, align: 'center', valign: 'middle', fontFace: FONT_MONO, fontSize: 8, color: C.accentBlue, bold: true });
       tgx += tw + 0.14;
     }
-    s.addText([
-      { text: 'Note for judges: ', options: { bold: true } },
-      { text: 'video not playing? Click “Trust this document” in Adobe Acrobat, or scan this code.', options: {} },
-    ], {
-      x: vX, y: noteY + 0.34, w: vW - qrBox - 0.15, h: noteH - 0.34, isTextBox: true, margin: 0, valign: 'top', fontFace: FONT_BODY, fontSize: 9.5, italic: true, color: C.bodyGray, lineSpacing: 12,
-    });
 
     // Left column closes on the same line the video itself closes on, so
     // the deck and the walkthrough land on the same note.
