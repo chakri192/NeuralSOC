@@ -161,7 +161,7 @@ async function main() {
     // real size to stay scannable -- the differentiator-tag row that used
     // to sit here was dropped to make room; the stat line above already
     // carries the numbers that matter most.
-    const noteY = vfY + vfH + 0.8, noteH = 0.72, qrSize = 0.62, qrPad = 0.06, qrBox = qrSize + qrPad * 2;
+    const noteY = vfY + vfH + 0.74, noteH = 0.82, qrSize = 0.72, qrPad = 0.05, qrBox = qrSize + qrPad * 2;
     s.addShape('roundRect', { x: vX + vW - qrBox, y: noteY, w: qrBox, h: qrBox, rectRadius: 0.06, fill: { color: 'FFFFFF' }, line: { color: C.border, width: 1 } });
     s.addImage({ path: '/Users/chakri/Downloads/sih14-redesign/assets/qr_2min_video.png', x: vX + vW - qrBox + qrPad, y: noteY + qrPad, w: qrSize, h: qrSize });
     s.addText([
