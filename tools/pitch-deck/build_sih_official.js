@@ -163,6 +163,14 @@ async function main() {
       tgx += tw + 0.14;
     }
 
+    // Adobe Acrobat/Reader gates embedded video behind a one-time "trust
+    // this document" prompt (its own security setting, not fixable from
+    // the file side) -- a plain note here beats a judge assuming it's
+    // broken and moving on.
+    s.addText('Note for judges: video not playing? Click “Trust this document” at the top of Adobe Acrobat (one-time step).', {
+      x: vX, y: vfY + vfH + 1.27, w: vW, h: 0.3, isTextBox: true, margin: 0, fontFace: FONT_BODY, fontSize: 8, italic: true, color: C.bodyGray, lineSpacing: 10.5,
+    });
+
     // Left column closes on the same line the video itself closes on, so
     // the deck and the walkthrough land on the same note.
     s.addText('Built for the institutions that can’t afford to just guess — schools, hospitals, and government networks.', {
