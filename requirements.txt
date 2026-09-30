@@ -101,7 +101,10 @@ python-dateutil==2.9.0.post0
 # 2.10.1 has 12 known CVEs per pip-audit (mostly PyJWKClient/algorithm-
 # allowlist issues our HS256-only, no-remote-JWKS usage doesn't reach --
 # still bumped past the fix threshold rather than relying on that).
-PyJWT==2.13.0
+# 2.13.0 itself later got 6 more (1 critical, 5 high; CVE-2026-102266
+# through -102271 -- HMAC-key/JWKS/DER-key auth-bypass issues) flagged
+# by CI's Trivy scan; 2.14.0 is the fixed release for all of them.
+PyJWT==2.14.0
 # Transitive (via streamlit/faust-streaming), unpinned; resolved to
 # 8.1.8, a known CVE. Pin explicitly.
 click==8.3.3
