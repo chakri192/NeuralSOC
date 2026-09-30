@@ -167,12 +167,14 @@ async function main() {
     // this document" prompt (its own security setting, not fixable from
     // the file side) -- a plain note here beats a judge assuming it's
     // broken and moving on.
+    const noteY = vfY + vfH + 1.24 + 0.03, noteH = 0.34, qrSize = 0.34;
     s.addText([
       { text: 'Note for judges: ', options: { bold: true } },
-      { text: 'video not playing? Click “Trust this document” in Adobe Acrobat.', options: {} },
+      { text: 'video not playing? Scan for the file →', options: {} },
     ], {
-      x: vX, y: vfY + vfH + 1.26, w: vW, h: 0.36, isTextBox: true, margin: 0, fontFace: FONT_BODY, fontSize: 9.5, italic: true, color: C.bodyGray, lineSpacing: 12,
+      x: vX, y: noteY, w: vW - qrSize - 0.12, h: noteH, isTextBox: true, margin: 0, valign: 'middle', fontFace: FONT_BODY, fontSize: 9.5, italic: true, color: C.bodyGray, lineSpacing: 12,
     });
+    s.addImage({ path: '/Users/chakri/Downloads/sih14-redesign/assets/qr_2min_video.png', x: vX + vW - qrSize, y: noteY, w: qrSize, h: qrSize });
 
     // Left column closes on the same line the video itself closes on, so
     // the deck and the walkthrough land on the same note.
