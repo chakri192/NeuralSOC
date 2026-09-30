@@ -8,9 +8,9 @@ In the app it's called **T-SOC**.
 
 ## Demo
 
-<video src="https://github.com/chakri192/NeuralSOC/releases/download/v1.0.0/NeuralSOC_5min_Video.mp4" controls width="100%"></video>
+[![Watch the 5-minute demo](docs/media/demo-5min-thumbnail.jpg)](https://github.com/chakri192/NeuralSOC/releases/download/v1.0.0/NeuralSOC_5min_Video.mp4)
 
-*If the player above doesn't load, [download the video directly](https://github.com/chakri192/NeuralSOC/releases/download/v1.0.0/NeuralSOC_5min_Video.mp4).*
+*Click to download and watch the 5-minute walkthrough (13MB, MP4).*
 
 ## How it works
 
