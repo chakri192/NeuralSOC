@@ -169,9 +169,9 @@ async function main() {
     // broken and moving on.
     s.addText([
       { text: 'Note for judges: ', options: { bold: true } },
-      { text: 'video not playing? Click “Trust this document” at the top of Adobe Acrobat (one-time step).', options: {} },
+      { text: 'video not playing? Click “Trust this document” in Adobe Acrobat.', options: {} },
     ], {
-      x: vX, y: vfY + vfH + 1.27, w: vW, h: 0.3, isTextBox: true, margin: 0, fontFace: FONT_BODY, fontSize: 8, italic: true, color: C.bodyGray, lineSpacing: 10.5,
+      x: vX, y: vfY + vfH + 1.26, w: vW, h: 0.36, isTextBox: true, margin: 0, fontFace: FONT_BODY, fontSize: 9.5, italic: true, color: C.bodyGray, lineSpacing: 12,
     });
 
     // Left column closes on the same line the video itself closes on, so
