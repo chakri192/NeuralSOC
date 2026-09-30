@@ -7,7 +7,7 @@
 # PyPI metadata (which returns environment-marker-conditioned requirements
 # out of order). 6.2.0 is the newest release still on rich>=13.3.3.
 textual==6.2.0
-kafka-python-ng==2.2.2
+kafka-python-ng==2.2.3
 scikit-learn==1.5.2
 numpy==1.26.4
 pandas==2.2.3
