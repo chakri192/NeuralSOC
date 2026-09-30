@@ -144,13 +144,13 @@ async function main() {
     });
 
     s.addText('Full walkthrough: passive capture → seven detectors → one correlated, explainable incident.', {
-      x: vX, y: vfY + vfH + 0.16, w: vW, h: 0.42, isTextBox: true, margin: 0, fontFace: FONT_BODY, fontSize: 9, color: C.bodyGray, lineSpacing: 12,
+      x: vX, y: vfY + vfH + 0.16, w: vW, h: 0.3, isTextBox: true, margin: 0, fontFace: FONT_BODY, fontSize: 9, color: C.bodyGray, lineSpacing: 12,
     });
     s.addText([
       { text: '98.3% precision', options: { bold: true, color: C.accentBlue, fontSize: 9.5 } }, { text: '  ·  ', options: { color: C.border, fontSize: 9.5 } },
       { text: '7 detectors', options: { bold: true, color: C.accentBlue, fontSize: 9.5 } }, { text: '  ·  ', options: { color: C.border, fontSize: 9.5 } },
       { text: '1.15% FPR', options: { bold: true, color: C.accentBlue, fontSize: 9.5 } },
-    ], { x: vX, y: vfY + vfH + 0.6, w: vW, h: 0.28, isTextBox: true, margin: 0 });
+    ], { x: vX, y: vfY + vfH + 0.44, w: vW, h: 0.24, isTextBox: true, margin: 0 });
 
     // Three differentiator tags right under the stat line -- fills what was
     // dead space with scannable, real claims instead of a bigger empty card.
@@ -158,23 +158,25 @@ async function main() {
     let tgx = vX;
     for (const tag of tags1) {
       const tw = 0.28 + tag.length * 0.074;
-      s.addShape('roundRect', { x: tgx, y: vfY + vfH + 0.92, w: tw, h: 0.32, rectRadius: 0.16, fill: { color: C.accentBlueTint }, line: { type: 'none' } });
-      s.addText(tag, { x: tgx, y: vfY + vfH + 0.92, w: tw, h: 0.32, isTextBox: true, margin: 0, align: 'center', valign: 'middle', fontFace: FONT_MONO, fontSize: 8, color: C.accentBlue, bold: true });
+      s.addShape('roundRect', { x: tgx, y: vfY + vfH + 0.7, w: tw, h: 0.32, rectRadius: 0.16, fill: { color: C.accentBlueTint }, line: { type: 'none' } });
+      s.addText(tag, { x: tgx, y: vfY + vfH + 0.7, w: tw, h: 0.32, isTextBox: true, margin: 0, align: 'center', valign: 'middle', fontFace: FONT_MONO, fontSize: 8, color: C.accentBlue, bold: true });
       tgx += tw + 0.14;
     }
 
     // Adobe Acrobat/Reader gates embedded video behind a one-time "trust
     // this document" prompt (its own security setting, not fixable from
-    // the file side) -- a plain note here beats a judge assuming it's
-    // broken and moving on.
-    const noteY = vfY + vfH + 1.24 + 0.03, noteH = 0.34, qrSize = 0.34;
+    // the file side) -- a note plus a real QR fallback (its own bordered
+    // card, matching the "VIEW THE SOURCE" panel's treatment below)
+    // beats a judge assuming the video is broken and moving on.
+    const noteY = vfY + vfH + 1.06, noteH = 0.52, qrSize = 0.42, qrPad = 0.05, qrBox = qrSize + qrPad * 2;
+    s.addShape('roundRect', { x: vX + vW - qrBox, y: noteY, w: qrBox, h: qrBox, rectRadius: 0.06, fill: { color: 'FFFFFF' }, line: { color: C.border, width: 1 } });
+    s.addImage({ path: '/Users/chakri/Downloads/sih14-redesign/assets/qr_2min_video.png', x: vX + vW - qrBox + qrPad, y: noteY + qrPad, w: qrSize, h: qrSize });
     s.addText([
       { text: 'Note for judges: ', options: { bold: true } },
-      { text: 'video not playing? Scan for the file →', options: {} },
+      { text: 'video not playing? Click “Trust this document” in Adobe Acrobat, or scan this code.', options: {} },
     ], {
-      x: vX, y: noteY, w: vW - qrSize - 0.12, h: noteH, isTextBox: true, margin: 0, valign: 'middle', fontFace: FONT_BODY, fontSize: 9.5, italic: true, color: C.bodyGray, lineSpacing: 12,
+      x: vX, y: noteY, w: vW - qrBox - 0.15, h: noteH, isTextBox: true, margin: 0, valign: 'middle', fontFace: FONT_BODY, fontSize: 9.5, italic: true, color: C.bodyGray, lineSpacing: 12,
     });
-    s.addImage({ path: '/Users/chakri/Downloads/sih14-redesign/assets/qr_2min_video.png', x: vX + vW - qrSize, y: noteY, w: qrSize, h: qrSize });
 
     // Left column closes on the same line the video itself closes on, so
     // the deck and the walkthrough land on the same note.
