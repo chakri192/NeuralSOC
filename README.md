@@ -6,6 +6,12 @@ In the app it's called **T-SOC**.
 
 [![CI](https://github.com/chakri192/NeuralSOC/actions/workflows/ci.yml/badge.svg)](https://github.com/chakri192/NeuralSOC/actions/workflows/ci.yml)
 
+## Demo
+
+<video src="https://github.com/chakri192/NeuralSOC/releases/download/v1.0.0/NeuralSOC_5min_Video.mp4" controls width="100%"></video>
+
+*If the player above doesn't load, [download the video directly](https://github.com/chakri192/NeuralSOC/releases/download/v1.0.0/NeuralSOC_5min_Video.mp4).*
+
 ## How it works
 
 ```mermaid
