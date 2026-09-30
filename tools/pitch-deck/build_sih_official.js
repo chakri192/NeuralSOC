@@ -106,10 +106,8 @@ async function main() {
     const s = newSlide();
     sihHeader(s);
 
-    eyebrow(s, 'Idea Title · Proposed Solution', { x: 0.7, y: 0.95 });
-
     s.addText('Passive Observation.\nContextual Intelligence.', {
-      x: 0.7, y: 1.2, w: 11.9, h: 0.9, isTextBox: true, margin: 0,
+      x: 0.7, y: 0.95, w: 11.9, h: 0.9, isTextBox: true, margin: 0,
       fontFace: FONT_HEAD, fontSize: 26, bold: true, color: C.headlineNavy, lineSpacing: 30,
     });
 
