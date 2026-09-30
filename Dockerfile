@@ -4,7 +4,7 @@
 # .github/workflows/ci.yml's test interpreter). Digest fetched live from
 # the registry on 2026-09-05 -- re-pin periodically (Renovate/Dependabot)
 # rather than letting this go stale the way the tag-only pin did.
-FROM python:3.12-slim-bookworm@sha256:782412e85d0f0984994c290652577d4018aff08145c85b262bb63dc0c7522254 AS builder
+FROM python:3.14-slim-bookworm@sha256:82bc3c539b8813ada9d68c63b40158fa002f7f33de9bf3312a3dfdc0620dff56 AS builder
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential
 WORKDIR /app
 COPY requirements.txt .
@@ -15,7 +15,7 @@ RUN pip install --user --no-cache-dir -r requirements.txt
 RUN pip install --user --no-cache-dir faust-cchardet
 
 # Stage 2: Production
-FROM python:3.12-slim-bookworm@sha256:782412e85d0f0984994c290652577d4018aff08145c85b262bb63dc0c7522254
+FROM python:3.14-slim-bookworm@sha256:82bc3c539b8813ada9d68c63b40158fa002f7f33de9bf3312a3dfdc0620dff56
 # curl is for the HEALTHCHECK below, which matters for `docker compose up`/
 # local `docker run` (k8s ignores Docker HEALTHCHECK -- it uses the
 # manifests' own liveness/readiness probes instead).
