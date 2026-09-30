@@ -79,7 +79,7 @@ async function main() {
   // lockup), plus the original template's own footer convention: centered
   // caption, page number right, nothing else.
   function sihHeader(slide) {
-    slide.addText('CIRCUMSPECT GATEWAY', { x: 0.6, y: 0.3, w: 1.75, h: 0.5, isTextBox: true, margin: 0, align: 'left', valign: 'middle', fontFace: FONT_BODY, fontSize: 11, bold: true, color: C.headlineNavy });
+    slide.addText('CIRCUMSPECT GATEWAY', { x: 0.6, y: 0.3, w: 1.75, h: 0.5, isTextBox: true, margin: 0, align: 'left', valign: 'middle', fontFace: FONT_MONO, fontSize: 11, bold: true, color: C.accentBlue, charSpacing: 2 });
     slide.addImage({ path: '/Users/chakri/Downloads/sih14-redesign/sih_logo_2026_mark.png', x: 10.99, y: 0.19, w: 2.04, h: 1.054 });
   }
 
