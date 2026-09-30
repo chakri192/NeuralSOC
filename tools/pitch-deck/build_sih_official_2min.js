@@ -155,20 +155,30 @@ async function main() {
     // Adobe Acrobat/Reader gates embedded video behind a one-time "trust
     // this document" prompt (its own security setting, not fixable from
     // the file side) -- a note plus a real QR fallback (its own bordered
-    // card, matching the "VIEW THE SOURCE" panel's treatment below)
-    // beats a judge assuming the video is broken and moving on. The QR
-    // encodes a long GitHub release URL (dense module grid), so it needs
-    // real size to stay scannable -- the differentiator-tag row that used
-    // to sit here was dropped to make room; the stat line above already
-    // carries the numbers that matter most.
+    // card, matching the "VIEW THE SOURCE" panel's treatment below) beats
+    // a judge assuming the video is broken and moving on. The QR encodes
+    // a long GitHub release URL, so it needs real size to stay scannable
+    // (matches the "VIEW THE SOURCE" QR's own 0.72in exactly). The tag
+    // row lives in the same vertical band as the QR now -- that band is
+    // taller than either the tags or the note text alone need, so both
+    // stack inside it instead of claiming a further row of their own.
     const noteY = vfY + vfH + 0.74, noteH = 0.82, qrSize = 0.72, qrPad = 0.05, qrBox = qrSize + qrPad * 2;
     s.addShape('roundRect', { x: vX + vW - qrBox, y: noteY, w: qrBox, h: qrBox, rectRadius: 0.06, fill: { color: 'FFFFFF' }, line: { color: C.border, width: 1 } });
     s.addImage({ path: '/Users/chakri/Downloads/sih14-redesign/assets/qr_2min_video.png', x: vX + vW - qrBox + qrPad, y: noteY + qrPad, w: qrSize, h: qrSize });
+
+    const tags1 = ['Zero disruption', 'MITRE-mapped', 'Self-hosted'];
+    let tgx = vX;
+    for (const tag of tags1) {
+      const tw = 0.28 + tag.length * 0.074;
+      s.addShape('roundRect', { x: tgx, y: noteY, w: tw, h: 0.3, rectRadius: 0.15, fill: { color: C.accentBlueTint }, line: { type: 'none' } });
+      s.addText(tag, { x: tgx, y: noteY, w: tw, h: 0.3, isTextBox: true, margin: 0, align: 'center', valign: 'middle', fontFace: FONT_MONO, fontSize: 8, color: C.accentBlue, bold: true });
+      tgx += tw + 0.14;
+    }
     s.addText([
       { text: 'Note for judges: ', options: { bold: true } },
       { text: 'video not playing? Click “Trust this document” in Adobe Acrobat, or scan this code.', options: {} },
     ], {
-      x: vX, y: noteY, w: vW - qrBox - 0.15, h: noteH, isTextBox: true, margin: 0, valign: 'middle', fontFace: FONT_BODY, fontSize: 9.5, italic: true, color: C.bodyGray, lineSpacing: 12,
+      x: vX, y: noteY + 0.34, w: vW - qrBox - 0.15, h: noteH - 0.34, isTextBox: true, margin: 0, valign: 'top', fontFace: FONT_BODY, fontSize: 9.5, italic: true, color: C.bodyGray, lineSpacing: 12,
     });
 
     // Left column closes on the same line the video itself closes on, so
