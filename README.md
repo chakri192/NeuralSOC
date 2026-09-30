@@ -2,7 +2,7 @@
 
 Network threat detection for one-way (data-diode) networks. It reads network logs without ever sending anything back into the monitored network, detects attacks with rules and machine-learning models, groups alerts into incidents, and shows them in a web dashboard and a terminal console. Several companies (tenants) can share one installation, each seeing only their own data.
 
-In the app it's called **T-SOC**.
+It's called **T-SOC**.
 
 [![CI](https://github.com/chakri192/NeuralSOC/actions/workflows/ci.yml/badge.svg)](https://github.com/chakri192/NeuralSOC/actions/workflows/ci.yml)
 
