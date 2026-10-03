@@ -94,8 +94,7 @@ It's safe to run again; anything already running is left alone. Logs go to `/tmp
 Then, in a new terminal, open the dashboard at http://localhost:8501:
 
 ```bash
-set -a; source .env; set +a
-venv/bin/streamlit run dashboard/app.py
+make dashboard
 ```
 
 And in another terminal, send some test traffic, including attacks:
@@ -113,6 +112,24 @@ To stop everything:
 pkill -f 'uvicorn api.main:app'; pkill -f stream_processor_faust; pkill -f api/kafka_sink.py; pkill -f ingest/simulator.py
 docker compose down
 ```
+
+### Running each service yourself
+
+Instead of the script, you can run each part in its own terminal. Every `make` command loads `.env` for you (the script creates one; otherwise copy `.env.example` and fill it in).
+
+```bash
+make up            # Kafka, Postgres, Redis
+make api           # API on http://localhost:8000
+PYTHONPATH=. venv/bin/python3 scripts/bootstrap_tenant.py   # first time only: creates your admin
+                                                            # login; add the TSOC_SENSOR_TOKEN it prints to .env
+make pipeline      # detection
+make kafka-sink    # sends alerts to the API
+make dashboard     # web dashboard on http://localhost:8501
+make terminal      # terminal console
+make simulate      # test traffic, high volume
+```
+
+`make down` stops Docker and deletes its data.
 
 ## Using your own traffic
 
@@ -145,8 +162,7 @@ venv/bin/python3 ingest/pcap_ingester.py capture.pcap --broker localhost:9092
 The same incidents and actions in the terminal, with the same login:
 
 ```bash
-set -a; source .env; set +a
-venv/bin/python3 terminal/tsoc_console.py
+make terminal
 ```
 
 | Key | Action |
@@ -158,7 +174,7 @@ venv/bin/python3 terminal/tsoc_console.py
 | `p` | Pause live updates |
 | `r` | Refresh |
 
-`dashboard/cli_dashboard.py` is a read-only live feed for on-call staff. It uses one shared password (`DASHBOARD_PASSWORD` in `.env`) instead of personal accounts.
+`make cli-dashboard` is a read-only live feed for on-call staff. It uses one shared password (`DASHBOARD_PASSWORD` in `.env`) instead of personal accounts.
 
 ### Accounts and roles
 
@@ -200,7 +216,7 @@ PYTHONPATH=. venv/bin/python3 scripts/enroll_admin_mfa.py --email admin@demo.loc
 | `DGA_CLASSIFICATION_THRESHOLD` | How sure the domain model must be to alert (default `0.97`) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | Send traces to Jaeger (`http://localhost:4318`; UI at http://localhost:16686) |
 
-The Python services don't read `.env` themselves, so load it into each terminal first with `set -a; source .env; set +a`.
+The `make` commands load `.env` automatically. If you run a Python script directly instead, load it first with `set -a; source .env; set +a`.
 
 After pulling changes that alter the database, update it with `venv/bin/alembic upgrade head`.
 

@@ -8,6 +8,20 @@ PYTHON := venv/bin/python3
 UVICORN := venv/bin/uvicorn
 STREAMLIT := venv/bin/streamlit
 
+# None of the Python services read .env themselves (only docker compose
+# does), so every target below loads it into the recipe's shell first --
+# the same `set -a; . ./.env` scripts/start_local_demo.sh uses. Sourced by
+# the shell rather than parsed with make's `include`, so values containing
+# `$`, `#` or spaces behave exactly as they do there. Skipped silently when
+# there's no .env yet (e.g. CI, which exports its variables directly).
+LOAD_ENV := if [ -f .env ]; then set -a; . ./.env; set +a; fi;
+
+# The stream processor's own default (/var/lib/app/faust) matches the
+# container's writable mount, but isn't writable on a developer machine.
+# Use a repo-local, gitignored directory unless FAUST_DATADIR is already
+# set (by .env or the caller).
+LOCAL_FAUST_DATADIR := $(CURDIR)/.faust-data
+
 up:
 	@echo "[+] Starting Redpanda Infrastructure..."
 	$(DOCKER_CMD) up -d --remove-orphans
@@ -21,19 +35,17 @@ down:
 
 api:
 	@echo "[+] Starting FastAPI Backend..."
-	PYTHONPATH="$(PWD)" $(UVICORN) api.main:app --host 0.0.0.0 --port 8000
+	$(LOAD_ENV) PYTHONPATH="$(CURDIR)" $(UVICORN) api.main:app --host 0.0.0.0 --port 8000
 
 pipeline:
 	@echo "[+] Starting AI Stream Processor..."
-	# api/ and dashboard/ targets below both set PYTHONPATH; this one
-	# didn't, and ingest/stream_processor_faust.py is run as a direct
+	# PYTHONPATH: ingest/stream_processor_faust.py is run as a direct
 	# script path (not `python -m ...`), so Python puts inference/'s own
 	# directory on sys.path instead of the repo root -- `from
 	# inference.features import extract_features` then fails with
-	# ModuleNotFoundError the moment this runs in a shell that doesn't
-	# already have PYTHONPATH set some other way. Found by an automated
-	# CI job actually running this exact command in a clean environment.
-	export REDPANDA_BROKERS=127.0.0.1:9092 && PYTHONPATH="$(PWD)" $(PYTHON) inference/stream_processor_faust.py worker -l info
+	# ModuleNotFoundError without it. Found by an automated CI job actually
+	# running this exact command in a clean environment.
+	$(LOAD_ENV) export REDPANDA_BROKERS=127.0.0.1:9092 FAUST_DATADIR="$${FAUST_DATADIR:-$(LOCAL_FAUST_DATADIR)}" && mkdir -p "$$FAUST_DATADIR" && PYTHONPATH="$(CURDIR)" $(PYTHON) inference/stream_processor_faust.py worker -l info
 
 kafka-sink:
 	@echo "[+] Starting Kafka-to-API Sink..."
@@ -43,23 +55,23 @@ kafka-sink:
 	# flow calls this script. Requires TSOC_SENSOR_TOKEN (see
 	# .env.example) -- this process authenticates to the API as one
 	# tenant's ingest sensor, not with TSOC_API_KEY.
-	PYTHONPATH="$(PWD)" $(PYTHON) api/kafka_sink.py
+	$(LOAD_ENV) PYTHONPATH="$(CURDIR)" $(PYTHON) api/kafka_sink.py
 
 simulate:
 	@echo "[+] Injecting Synthetic Attack Traffic (Burst Mode)..."
-	export REDPANDA_BROKERS=127.0.0.1:9092 && $(PYTHON) ingest/simulator.py --scenario mixed --burst
+	$(LOAD_ENV) export REDPANDA_BROKERS=127.0.0.1:9092 && $(PYTHON) ingest/simulator.py --scenario mixed --burst
 
 dashboard:
 	@echo "[+] Starting SOC Dashboard..."
-	export REDPANDA_BROKERS=127.0.0.1:9092 && PYTHONPATH="$(PWD)" $(STREAMLIT) run dashboard/app.py
+	$(LOAD_ENV) export REDPANDA_BROKERS=127.0.0.1:9092 && PYTHONPATH="$(CURDIR)" $(STREAMLIT) run dashboard/app.py
 
 terminal:
 	@echo "[+] Starting T-SOC Console..."
-	export REDPANDA_BROKERS=127.0.0.1:9092 && PYTHONPATH="$(PWD)" $(PYTHON) terminal/tsoc_console.py
+	$(LOAD_ENV) export REDPANDA_BROKERS=127.0.0.1:9092 && PYTHONPATH="$(CURDIR)" $(PYTHON) terminal/tsoc_console.py
 
 cli-dashboard:
 	@echo "[+] Starting T-SOC Terminal Dashboard (live feed)..."
-	PYTHONPATH="$(PWD)" $(PYTHON) dashboard/cli_dashboard.py
+	$(LOAD_ENV) PYTHONPATH="$(CURDIR)" $(PYTHON) dashboard/cli_dashboard.py
 
 clean:
 	@echo "[+] Cleaning up local environment..."
