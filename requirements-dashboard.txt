@@ -11,7 +11,7 @@
 # twice, not two independently-resolved versions of it. If you bump one
 # file's pin, bump the other's too.
 numpy==1.26.4
-pandas==2.2.3
+pandas==3.0.5
 streamlit==1.55.0
 pillow==12.3.0
 pyarrow==23.0.1
